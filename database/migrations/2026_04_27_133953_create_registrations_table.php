@@ -20,8 +20,6 @@ return new class extends Migration
             $table->string('status')->default('pending');
             $table->text('note')->nullable();
             $table->text('reason')->nullable();
-            $table->unsignedBigInteger('approved_by')->nullable();
-            $table->date('approved_at')->nullable();
             $table->foreignId('assigned_room_id')->nullable()->constrained('rooms')->nullOnDelete();
         });
     }
