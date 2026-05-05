@@ -18,13 +18,13 @@ class AccountSeeder extends Seeder
             [
                 'email' => 'phatnt.si.1922@gmail.com',
                 'password' => Hash::make('*Bin12022004#'),
-                'role' => 'admin',
+                'role' => 'student',
                 'is_active' => 1
             ],
             [
                 'email' => 'kytucxadaihoccongnghesaigon@gmail.com',
                 'password' => Hash::make('Stu123456789@'),
-                'role' => 'student',
+                'role' => 'admin',
                 'is_active' => 1
             ]
         ]);
