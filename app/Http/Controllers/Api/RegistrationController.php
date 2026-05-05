@@ -28,8 +28,6 @@ class RegistrationController extends Controller
                 'cccd_front_url' => $registration->cccd_front_url,
                 'cccd_back_url' => $registration->cccd_back_url,
                 'reason' => $registration->reason,
-                'approved_by' => $registration->approved_by,
-                'approved_at' => $registration->approved_at,
                 'assigned_room_id' => $registration->assigned_room_id,
                 'note' => $registration->note,
                 'created_at' => $registration->created_at,
@@ -158,8 +156,6 @@ class RegistrationController extends Controller
             'cccd_front_url' => $registration->cccd_front_url,
             'cccd_back_url' => $registration->cccd_back_url,
             'reason' => $registration->reason,
-            'approved_by' => $registration->approved_by,
-            'approved_at' => $registration->approved_at,
             'assigned_room_id' => $registration->assigned_room_id,
             'note' => $registration->note,
             'created_at' => $registration->created_at,
@@ -177,8 +173,6 @@ class RegistrationController extends Controller
         }
 
         $registration->status = 'approved';
-        $registration->approved_by = 1; // giả lập admin
-        $registration->approved_at = now()->toDateString();
         $registration->save();
 
         return response()->json([
@@ -224,8 +218,6 @@ class RegistrationController extends Controller
             'cccd_front_url' => $registration->cccd_front_url,
             'cccd_back_url' => $registration->cccd_back_url,
             'reason' => $registration->reason,
-            'approved_by' => $registration->approved_by,
-            'approved_at' => $registration->approved_at,
             'assigned_room_id' => $registration->assigned_room_id,
             'note' => $registration->note,
             'created_at' => $registration->created_at,

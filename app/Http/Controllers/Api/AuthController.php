@@ -101,35 +101,7 @@ class AuthController extends Controller
         ]);
     }
 
-    public function sendResetLink(SendResetLinkRequest $request)
-    {
-        $account = Account::where('email', $request->email)->first();
-
-        // 🔥 tạo token
-        $token = Str::random(60);
-
-        // lưu DB
-        DB::table('password_resets')->updateOrInsert(
-            ['email' => $request->email],
-            [
-                'token' => $token,
-                'created_at' => now()
-            ]
-        );
-
-        // 🔥 link reset
-        $resetLink = "http://localhost:5173/reset-password?token=$token&email={$request->email}";
-
-        // gửi mail
-        Mail::raw("Click link để đổi mật khẩu: $resetLink", function ($message) use ($request) {
-            $message->to($request->email)
-                ->subject('Reset mật khẩu');
-        });
-
-        return response()->json([
-            'message' => 'Đã gửi email reset mật khẩu'
-        ]);
-    }
+    
     public function resetPassword(ResetPasswordRequest $request)
     {
         $reset = DB::table('password_resets')

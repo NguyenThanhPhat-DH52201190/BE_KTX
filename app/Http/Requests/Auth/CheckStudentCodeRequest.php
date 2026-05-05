@@ -17,4 +17,12 @@ class CheckStudentCodeRequest extends FormRequest
             'student_code' => 'required|string',
         ];
     }
+
+    public function messages(): array
+    {
+        return [
+            'student_code.required' => 'Vui lòng nhập MSSV.',
+            'student_code.string' => 'MSSV không hợp lệ.',
+        ];
+    }
 }

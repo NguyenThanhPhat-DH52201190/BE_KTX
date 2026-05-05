@@ -17,4 +17,12 @@ class CheckEmailRequest extends FormRequest
             'email' => 'required|email',
         ];
     }
+
+    public function messages(): array
+    {
+        return [
+            'email.required' => 'Vui lòng nhập email.',
+            'email.email' => 'Email không hợp lệ.',
+        ];
+    }
 }

@@ -23,7 +23,14 @@ class ResetPasswordOtpRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'email.required' => 'Vui lòng nhập email.',
+            'email.email' => 'Email không hợp lệ.',
+            'email.exists' => 'Email chưa được đăng ký.',
+            'otp.required' => 'Vui lòng nhập mã OTP.',
             'otp.size' => 'OTP phải có 6 ký tự',
+            'password.required' => 'Vui lòng nhập mật khẩu mới.',
+            'password.min' => 'Mật khẩu phải ít nhất :min ký tự.',
+            'password.confirmed' => 'Xác nhận mật khẩu không khớp.',
         ];
     }
 }

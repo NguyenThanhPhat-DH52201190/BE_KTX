@@ -16,8 +16,6 @@ class Registration extends Model
         'status',
         'note',
         'reason',
-        'approved_by',
-        'approved_at',
         'assigned_room_id',
     ];
 
