@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Student extends Model
 {
@@ -26,5 +28,15 @@ class Student extends Model
         'status',
     ];
 
-    public $timestamps = false; // vì bảng bạn KHÔNG có created_at
+    public $timestamps = false;
+
+    public function registrations(): HasMany
+    {
+        return $this->hasMany(Registration::class);
+    }
+
+    public function account(): HasOne
+    {
+        return $this->hasOne(Account::class, 'student_id');
+    }
 }

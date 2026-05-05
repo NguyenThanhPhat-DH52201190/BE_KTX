@@ -16,7 +16,7 @@ return new class extends Migration
             $table->string('student_code')->unique();
             $table->string('avatar')->nullable();
             $table->string('full_name');
-            $table->string('gender');
+            $table->enum('gender', ['male', 'female'])->default('male');
             $table->string('class_name');
             $table->string('faculty');
             $table->string('phone');
@@ -27,7 +27,7 @@ return new class extends Migration
             $table->string('parent_name');
             $table->string('parent_phone');
             $table->string('parent_relationship');
-            $table->string('status')->default('active');
+            $table->enum('status', ['active', 'inactive'])->default('active');
         });
     }
 

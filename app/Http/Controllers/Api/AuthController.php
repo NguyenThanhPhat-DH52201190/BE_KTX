@@ -12,17 +12,20 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 use App\Models\Account;
+use App\Http\Requests\Auth\RegisterRequest;
+use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\ResetPasswordOtpRequest;
+use App\Http\Requests\Auth\ResetPasswordRequest;
+use App\Http\Requests\Auth\SendResetLinkRequest;
+use App\Http\Requests\Auth\SendOtpRequest;
+use App\Http\Requests\Auth\CheckEmailRequest;
+use App\Http\Requests\Auth\CheckStudentCodeRequest;
 
 
 class AuthController extends Controller
 {
-    public function register(Request $request)
+    public function register(RegisterRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email|unique:accounts,email',
-            'password' => 'required|min:6',
-        ]);
-
         $account = Account::create([
             'email' => $request->email,
             'password' => Hash::make($request->password),
@@ -33,17 +36,11 @@ class AuthController extends Controller
         return response()->json([
             'message' => 'Đăng ký thành công',
             'account' => $account
-        ]);
+        ], 201);
     }
 
-    // ✅ LOGIN
-    public function login(Request $request)
+    public function login(LoginRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required',
-        ]);
-
         $account = Account::where('email', $request->email)->first();
 
         if (!$account || !Hash::check($request->password, $account->password)) {
@@ -58,7 +55,6 @@ class AuthController extends Controller
             ], 403);
         }
 
-        // 🔥 tạo token
         $token = $account->createToken('auth_token')->plainTextToken;
 
         return response()->json([
@@ -87,12 +83,8 @@ class AuthController extends Controller
         ]);
     }
 
-    public function checkEmail(Request $request)
+    public function checkEmail(CheckEmailRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-        ]);
-
         $exists = Account::where('email', $request->email)->exists();
 
         return response()->json([
@@ -100,12 +92,8 @@ class AuthController extends Controller
         ]);
     }
 
-    public function checkStudentCode(Request $request)
+    public function checkStudentCode(CheckStudentCodeRequest $request)
     {
-        $request->validate([
-            'student_code' => 'required'
-        ]);
-
         $exists = \App\Models\Student::where('student_code', $request->student_code)->exists();
 
         return response()->json([
@@ -113,19 +101,9 @@ class AuthController extends Controller
         ]);
     }
 
-    public function sendResetLink(Request $request)
+    public function sendResetLink(SendResetLinkRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email'
-        ]);
-
         $account = Account::where('email', $request->email)->first();
-
-        if (!$account) {
-            return response()->json([
-                'message' => 'Email không tồn tại'
-            ], 404);
-        }
 
         // 🔥 tạo token
         $token = Str::random(60);
@@ -152,14 +130,8 @@ class AuthController extends Controller
             'message' => 'Đã gửi email reset mật khẩu'
         ]);
     }
-    public function resetPassword(Request $request)
+    public function resetPassword(ResetPasswordRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'token' => 'required',
-            'password' => 'required|min:6',
-        ]);
-
         $reset = DB::table('password_resets')
             ->where('email', $request->email)
             ->where('token', $request->token)
@@ -184,17 +156,9 @@ class AuthController extends Controller
         ]);
     }
 
-    public function sendOtp(Request $request)
+    public function sendOtp(SendOtpRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email'
-        ]);
-
         $account = Account::where('email', $request->email)->first();
-
-        if (!$account) {
-            return response()->json(['message' => 'Email không tồn tại'], 404);
-        }
 
         $otp = random_int(100000, 999999);
 
@@ -235,13 +199,9 @@ class AuthController extends Controller
         return response()->json(['message' => 'Đã gửi OTP']);
     }
 
-    public function resetWithOtp(Request $request)
+    public function resetWithOtp(ResetPasswordOtpRequest $request)
     {
         $account = Account::where('email', $request->email)->first();
-
-        if (!$account) {
-            return response()->json(['message' => 'Không tìm thấy'], 404);
-        }
 
         if ($account->otp_code != $request->otp) {
             return response()->json(['message' => 'OTP sai'], 400);
