@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 use App\Models\Account;
+use App\Models\Student;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\ResetPasswordOtpRequest;
@@ -26,12 +27,35 @@ class AuthController extends Controller
 {
     public function register(RegisterRequest $request)
     {
-        $account = Account::create([
+        $payload = [
             'email' => $request->email,
             'password' => Hash::make($request->password),
             'role' => 'student',
             'is_active' => 1,
-        ]);
+        ];
+
+        if ($request->filled('student_code')) {
+            $payload['student_code'] = $request->input('student_code');
+        }
+
+        if ($request->filled('full_name')) {
+            $payload['full_name'] = $request->input('full_name');
+        }
+
+        // If there is an existing student row with same email, link it.
+        $student = Student::where('email', $request->email)->first();
+        if ($student) {
+            $payload['student_id'] = $student->id;
+            // if student_code/full_name were empty in payload, attempt to copy from student (if available)
+            if (empty($payload['student_code']) && isset($student->student_code)) {
+                $payload['student_code'] = $student->student_code;
+            }
+            if (empty($payload['full_name']) && isset($student->full_name)) {
+                $payload['full_name'] = $student->full_name;
+            }
+        }
+
+        $account = Account::create($payload);
 
         return response()->json([
             'message' => 'Đăng ký thành công',
@@ -62,7 +86,13 @@ class AuthController extends Controller
             'user' => [
                 'id' => $account->id,
                 'email' => $account->email,
-                'role' => $account->role
+                'role' => $account->role,
+                'student_id' => $account->student_id,
+                // provide both snake_case and camelCase variants for frontend compatibility
+                'student_code' => $account->student_code,
+                'studentCode' => $account->student_code,
+                'full_name' => $account->full_name,
+                'fullName' => $account->full_name,
             ]
         ]);
     }
@@ -94,7 +124,8 @@ class AuthController extends Controller
 
     public function checkStudentCode(CheckStudentCodeRequest $request)
     {
-        $exists = \App\Models\Student::where('student_code', $request->student_code)->exists();
+        // student_code now stored on accounts table
+        $exists = \App\Models\Account::where('student_code', $request->student_code)->exists();
 
         return response()->json([
             'exists' => $exists

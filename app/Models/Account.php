@@ -13,6 +13,8 @@ class Account extends Model
 
     protected $fillable = [
         'student_id',
+        'student_code',
+        'full_name',
         'email',
         'password',
         'role',

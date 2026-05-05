@@ -25,6 +25,7 @@ class StoreRegistrationRequest extends FormRequest
     public function rules(): array
     {
         $currentStudentId = $this->currentStudentId();
+        $currentAccountId = $this->currentAccountId();
 
         return [
             'email' => ['required', 'email', 'exists:accounts,email'],
@@ -33,17 +34,17 @@ class StoreRegistrationRequest extends FormRequest
                 'required',
                 'string',
                 'max:191',
-                Rule::unique('students', 'student_code')->ignore($currentStudentId),
+                // student_code now unique on accounts
+                Rule::unique('accounts', 'student_code')->ignore($currentAccountId),
             ],
             'full_name' => ['required', 'string', 'max:191'],
             'gender' => ['required', Rule::in(['male', 'female'])],
             'class_name' => ['required', 'string', 'max:191'],
             'faculty' => ['required', 'string', 'max:191'],
-            'phone' => ['required', 'string', 'max:191'],
+            'phone' => ['required', 'digits:10'],
             'cccd' => [
                 'required',
-                'string',
-                'max:191',
+                'digits:12',
                 Rule::unique('students', 'cccd')->ignore($currentStudentId),
             ],
             'permanent_address' => ['required', 'string', 'max:191'],
@@ -53,6 +54,17 @@ class StoreRegistrationRequest extends FormRequest
             'avatar' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
             'cccd_front' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
             'cccd_back' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'phone.required' => 'Vui lòng nhập số điện thoại.',
+            'phone.digits' => 'Số điện thoại phải gồm đúng 10 chữ số.',
+            'cccd.required' => 'Vui lòng nhập số CCCD.',
+            'cccd.digits' => 'Số CCCD phải gồm đúng 12 chữ số.',
+            'cccd.unique' => 'Số CCCD đã tồn tại.',
         ];
     }
 
@@ -70,5 +82,21 @@ class StoreRegistrationRequest extends FormRequest
             ->first();
 
         return $account?->student_id;
+    }
+
+    private function currentAccountId(): ?int
+    {
+        $email = $this->input('email');
+
+        if (!$email) {
+            return null;
+        }
+
+        $account = Account::query()
+            ->select('id')
+            ->where('email', $email)
+            ->first();
+
+        return $account?->id;
     }
 }

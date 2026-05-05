@@ -131,6 +131,7 @@ class RegistrationController extends Controller
     public function getMyRegistration(Request $request)
     {
         $email = $request->query('email');
+        $semester = $request->query('semester', '2024-2025');
 
         $account = Account::where('email', $email)->first();
 
@@ -138,8 +139,16 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user'], 404);
         }
 
+        // If the account is not linked to a student yet, there is no
+        // registration to return. Avoid querying for student_id NULL
+        // which could accidentally match registrations with NULL ids.
+        if (!$account->student_id) {
+            return response()->json(null);
+        }
+
         $registration = Registration::with(['student', 'student.account'])
             ->where('student_id', $account->student_id)
+            ->where('semester', $semester)
             ->latest('id')
             ->first();
 
