@@ -15,11 +15,12 @@ return new class extends Migration
             $table->id();
             $table->foreignId('student_id')->nullable()->constrained()->nullOnDelete();
             $table->string('email')->unique();
-            $table->string('student_code')->nullable();
-            $table->string('full_name')->nullable();
             $table->string('password');
             $table->string('role');
             $table->boolean('is_active')->default(true);
+            $table->string('otp_code')->nullable();
+            $table->timestamp('otp_expire')->nullable();
+            $table->timestamps();
         });
     }
 

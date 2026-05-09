@@ -14,20 +14,41 @@ class AccountSeeder extends Seeder
      */
     public function run(): void
     {
-        Account::insert([
+        $rows = [
             [
                 'email' => 'phatnt.si.1922@gmail.com',
                 'password' => Hash::make('*Bin12022004#'),
                 'role' => 'student',
-                'is_active' => 1
+                'is_active' => 1,
             ],
             [
                 'email' => 'kytucxadaihoccongnghesaigon@gmail.com',
                 'password' => Hash::make('Stu123456789@'),
                 'role' => 'admin',
-                'is_active' => 1
-            ]
-        ]);
+                'is_active' => 1,
+            ],
+            [
+                'email' => 'dh52201190@student.stu.edu.vn',
+                'password' => Hash::make('Student12345@'),
+                'role' => 'student',
+                'is_active' => 1,
+            ],
+            [
+                'email' => 'dh52201699@student.stu.edu.vn',
+                'password' => Hash::make('Student12345@'),
+                'role' => 'student',
+                'is_active' => 1,
+            ],
+            [
+                'email' => 'dh52200662@student.stu.edu.vn',
+                'password' => Hash::make('Student12345@'),
+                'role' => 'student',
+                'is_active' => 1,
+            ],
+        ];
+
+        // Use upsert so running seeders multiple times won't fail on unique constraint
+        Account::upsert($rows, ['email'], ['password', 'role', 'is_active']);
     }
     }
 

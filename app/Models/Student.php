@@ -11,22 +11,27 @@ class Student extends Model
      protected $table = 'students';
 
     protected $fillable = [
-        'avatar',
+        'student_code',
+        'full_name',
+        'date_of_birth',
         'gender',
         'class_name',
         'faculty',
+        'course_year',
         'phone',
         'email',
         'cccd',
+        'cccd_issued_date',
+        'cccd_issued_place',
+        'nationality',
+        'ehtnicity',
+        'religion',
         'permanent_address',
-        'password',
-        'parent_name',
-        'parent_phone',
-        'parent_relationship',
+        'avatar',
         'status',
     ];
 
-    public $timestamps = false;
+    
 
     public function registrations(): HasMany
     {

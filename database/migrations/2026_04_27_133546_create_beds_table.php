@@ -16,7 +16,7 @@ return new class extends Migration
             $table->foreignId('room_id')->constrained()->cascadeOnDelete();
             $table->integer('bed_number');
             $table->string('position')->nullable();
-            $table->enum('status', ['available', 'occupied','damaged'])->default('available');
+            $table->enum('status', ['empty', 'occupied','maintenance'])->default('empty');
 
             $table->unique(['room_id', 'bed_number']);
         });

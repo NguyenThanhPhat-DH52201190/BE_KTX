@@ -20,7 +20,8 @@ return new class extends Migration
             $table->integer('usage_kwh');
             $table->decimal('unit_price', 10, 2);
             $table->decimal('total_amount', 12, 2);
-            $table->string('status')->default('done');
+            $table->timestamps();
+          
         });
     }
 

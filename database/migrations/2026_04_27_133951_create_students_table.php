@@ -13,19 +13,26 @@ return new class extends Migration
     {
         Schema::create('students', function (Blueprint $table) {
             $table->id();
-            $table->string('avatar')->nullable();
+            $table->string('student_code')->unique();
+            $table->string('full_name');
+            $table->date('date_of_birth');
             $table->enum('gender', ['male', 'female'])->default('male');
             $table->string('class_name');
             $table->string('faculty');
+            $table->string('course_year');
             $table->string('phone');
             $table->string('email')->unique();
             $table->string('cccd')->unique();
+            $table->date('cccd_issued_date');
+            $table->string('cccd_issued_place');
+            $table->string('nationality');
+            $table->string('ethnicity');
+            $table->string('religion');
             $table->string('permanent_address');
-            $table->string('password');
-            $table->string('parent_name');
-            $table->string('parent_phone');
-            $table->string('parent_relationship');
+            $table->string('avatar')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
+            $table->timestamps();
+            
         });
     }
 

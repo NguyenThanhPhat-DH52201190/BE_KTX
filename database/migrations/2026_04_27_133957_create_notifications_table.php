@@ -17,7 +17,8 @@ return new class extends Migration
             $table->string('title');
             $table->text('content');
             $table->string('type')->nullable();
-            $table->boolean('is_read')->default(false);
+            $table->string('target_type')->nullable();
+            $table->timestamp('created_at')->nullable();
         });
     }
 

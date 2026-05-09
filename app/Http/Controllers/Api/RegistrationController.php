@@ -8,6 +8,8 @@ use Illuminate\Http\Request;
 use App\Models\Registration;
 use App\Models\Account;
 use App\Models\Student;
+use App\Models\Room;
+use App\Models\Bed;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -187,6 +189,85 @@ class RegistrationController extends Controller
         return response()->json([
             'message' => 'Đã duyệt'
         ]);
+    }
+
+    // Admin: list rooms with basic bed counts
+    public function getRooms()
+    {
+        $rooms = Room::with('beds')->get();
+
+        return $rooms->map(function ($room) {
+            $totalBeds = $room->beds->count();
+            $availableBeds = $room->beds->where('status', 'empty')->count();
+
+            return [
+                'id' => $room->id,
+                'building_code' => $room->building_code,
+                'room_number' => $room->room_number,
+                'totalBeds' => $totalBeds,
+                'availableBeds' => $availableBeds,
+                // backend has no gender column; frontend can treat this optional
+                'gender' => $room->gender ?? null,
+            ];
+        })->values();
+    }
+
+    // Admin: assign room id to a registration
+    public function assignRoom($id, Request $request)
+    {
+        $request->validate([
+            'room_id' => 'required|integer|exists:rooms,id',
+        ]);
+
+        $registration = Registration::find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        $registration->assigned_room_id = $request->room_id;
+        $registration->save();
+
+        return response()->json(['message' => 'Đã phân phòng']);
+    }
+
+    // Student: select a bed by email (frontend uses email-based call)
+    public function selectBed(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email',
+            'bed_id' => 'required|integer|exists:beds,id',
+        ]);
+
+        $account = Account::where('email', $request->email)->first();
+
+        if (!$account || !$account->student_id) {
+            return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
+        }
+
+        $registration = Registration::where('student_id', $account->student_id)
+            ->where('status', 'pending')
+            ->latest('id')
+            ->first();
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn đăng ký'], 404);
+        }
+
+        $bed = Bed::find($request->bed_id);
+        if (!$bed) {
+            return response()->json(['message' => 'Giường không tồn tại'], 404);
+        }
+
+        // Mark bed as occupied and attach to registration
+        $bed->status = 'occupied';
+        $bed->save();
+
+        $registration->assigned_bed_id = $bed->id;
+        $registration->assigned_room_id = $bed->room_id;
+        $registration->save();
+
+        return response()->json(['message' => 'Đã chọn giường']);
     }
 
     public function reject($id, Request $request)

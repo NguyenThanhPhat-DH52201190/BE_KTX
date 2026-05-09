@@ -22,3 +22,9 @@ Route::get('/registration', [RegistrationController::class, 'index']);
 Route::get('/registration/{id}', [RegistrationController::class, 'show']);
 Route::put('/registration/{id}/approve', [RegistrationController::class, 'approve']);
 Route::put('/registration/{id}/reject', [RegistrationController::class, 'reject']);
+// Optional admin actions: assign room and select bed (frontend expects these)
+Route::put('/registration/{id}/assign-room', [RegistrationController::class, 'assignRoom']);
+Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
+
+// Rooms listing used by frontend
+Route::get('/rooms', [RegistrationController::class, 'getRooms']);
