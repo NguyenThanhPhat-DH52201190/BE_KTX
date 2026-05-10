@@ -14,8 +14,8 @@ return new class extends Migration
         Schema::create('registrations', function (Blueprint $table) {
             $table->id();
             $table->foreignId('student_id')->constrained('students')->cascadeOnDelete();
-            $table->string('semester');
-            $table->string('school_year');
+            $table->string('semester')->nullable();
+            $table->string('school_year')->nullable();
             $table->string('father_name');
             $table->string('father_birth_year');
             $table->string('father_job');

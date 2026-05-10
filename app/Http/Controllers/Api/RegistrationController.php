@@ -67,17 +67,20 @@ class RegistrationController extends Controller
                     'student_code' => $data['student_code'],
                     'avatar' => $data['avatar'] ?? optional($currentStudent)->avatar,
                     'full_name' => $data['full_name'],
+                    'date_of_birth' => $data['date_of_birth'],
                     'gender' => $data['gender'],
                     'class_name' => $data['class_name'],
                     'faculty' => $data['faculty'],
+                    'course_year' => $data['course_year'],
                     'phone' => $data['phone'],
                     'email' => $account->email,
                     'cccd' => $data['cccd'],
+                    'cccd_issued_date' => $data['cccd_issued_date'],
+                    'cccd_issued_place' => $data['cccd_issued_place'],
+                    'nationality' => $data['nationality'],
+                    'ethnicity' => $data['ethnicity'],
+                    'religion' => $data['religion'],
                     'permanent_address' => $data['permanent_address'],
-                    'password' => $account->password,
-                    'parent_name' => $data['parent_name'],
-                    'parent_phone' => $data['parent_phone'],
-                    'parent_relationship' => $data['parent_relationship'],
                     'status' => 'active',
                 ];
 
@@ -90,6 +93,9 @@ class RegistrationController extends Controller
                     $account->save();
                 }
 
+                $account->student_code = $data['student_code'];
+                $account->save();
+
                 $hasPendingSameSemester = Registration::where('student_id', $student->id)
                     ->where('semester', $data['semester'])
                     ->where('status', 'pending')
@@ -100,13 +106,57 @@ class RegistrationController extends Controller
                     throw new RuntimeException('DUPLICATE_PENDING_REGISTRATION');
                 }
 
-                $registration = Registration::create([
+                // If there is an earlier rejected registration for this student & semester,
+                // update that record instead of creating a new one. This preserves history
+                // while reusing the rejected row for resubmission.
+                $existingRejected = Registration::where('student_id', $student->id)
+                    ->where('semester', $data['semester'])
+                    ->where('status', 'rejected')
+                    ->lockForUpdate()
+                    ->latest('id')
+                    ->first();
+
+                $registrationPayload = [
                     'student_id' => $student->id,
                     'cccd_front_url' => $data['cccd_front_url'] ?? null,
                     'cccd_back_url' => $data['cccd_back_url'] ?? null,
                     'semester' => $data['semester'],
                     'status' => 'pending',
-                ]);
+                    'father_name' => $data['father_name'] ?? ($data['parent_name'] ?? ''),
+                    'father_birth_year' => $data['father_birth_year'] ?? '',
+                    'father_job' => $data['father_job'] ?? '',
+                    'father_phone' => $data['father_phone'] ?? ($data['parent_phone'] ?? ''),
+                    'mother_name' => $data['mother_name'] ?? '',
+                    'mother_birth_year' => $data['mother_birth_year'] ?? '',
+                    'mother_job' => $data['mother_job'] ?? '',
+                    'mother_phone' => $data['mother_phone'] ?? '',
+                    'parent_address' => $data['parent_address'] ?? ($data['permanent_address'] ?? ''),
+                    'stay_from_date' => $data['stay_from_date'] ?? now()->toDateString(),
+                    'stay_to_date' => $data['stay_to_date'] ?? now()->toDateString(),
+                    'commitment_confirm' => $data['commitment_confirm'] ?? false,
+                ];
+
+                if ($existingRejected) {
+                    // Update file urls only if provided in resubmission payload
+                    if (isset($data['cccd_front_url'])) {
+                        $existingRejected->cccd_front_url = $data['cccd_front_url'];
+                    }
+
+                    if (isset($data['cccd_back_url'])) {
+                        $existingRejected->cccd_back_url = $data['cccd_back_url'];
+                    }
+
+                    // Update the other fields
+                    $existingRejected->fill($registrationPayload);
+                    // Clear previous rejection reason and set to pending
+                    $existingRejected->reason = null;
+                    $existingRejected->status = 'pending';
+                    $existingRejected->save();
+
+                    $registration = $existingRejected;
+                } else {
+                    $registration = Registration::create($registrationPayload);
+                }
 
                 return [
                     'student' => $student,

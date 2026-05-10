@@ -24,7 +24,7 @@ class Student extends Model
         'cccd_issued_date',
         'cccd_issued_place',
         'nationality',
-        'ehtnicity',
+        'ethnicity',
         'religion',
         'permanent_address',
         'avatar',
