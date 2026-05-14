@@ -136,27 +136,21 @@ class RegistrationController extends Controller
                     'commitment_confirm' => $data['commitment_confirm'] ?? false,
                 ];
 
+                // When the student resubmits after a rejection, create a new
+                // registration row and link it to the previous rejected record.
+                // This preserves the rejected record as history instead of
+                // overwriting it.
                 if ($existingRejected) {
-                    // Update file urls only if provided in resubmission payload
                     if (isset($data['cccd_front_url'])) {
-                        $existingRejected->cccd_front_url = $data['cccd_front_url'];
+                        $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
                     }
 
                     if (isset($data['cccd_back_url'])) {
-                        $existingRejected->cccd_back_url = $data['cccd_back_url'];
+                        $registrationPayload['cccd_back_url'] = $data['cccd_back_url'];
                     }
-
-                    // Update the other fields
-                    $existingRejected->fill($registrationPayload);
-                    // Clear previous rejection reason and set to pending
-                    $existingRejected->reason = null;
-                    $existingRejected->status = 'pending';
-                    $existingRejected->save();
-
-                    $registration = $existingRejected;
-                } else {
-                    $registration = Registration::create($registrationPayload);
                 }
+
+                $registration = Registration::create($registrationPayload);
 
                 return [
                     'student' => $student,
