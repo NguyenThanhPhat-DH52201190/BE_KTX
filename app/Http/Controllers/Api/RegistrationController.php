@@ -173,8 +173,6 @@ class RegistrationController extends Controller
                     $registration = Registration::create($registrationPayload);
                 }
 
-                $registration = Registration::create($registrationPayload);
-
                 return [
                     'student' => $student,
                     'registration' => $registration,
