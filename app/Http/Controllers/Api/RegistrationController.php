@@ -147,14 +147,18 @@ class RegistrationController extends Controller
                     'commitment_confirm' => $data['commitment_confirm'] ?? false,
                 ];
 
+                // When the student resubmits after a rejection, create a new
+                // registration row and link it to the previous rejected record.
+                // This preserves the rejected record as history instead of
+                // overwriting it.
                 if ($existingRejected) {
                     // Chỉ cập nhật URL tệp nếu payload nộp lại có cung cấp
                     if (isset($data['cccd_front_url'])) {
-                        $existingRejected->cccd_front_url = $data['cccd_front_url'];
+                        $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
                     }
 
                     if (isset($data['cccd_back_url'])) {
-                        $existingRejected->cccd_back_url = $data['cccd_back_url'];
+                        $registrationPayload['cccd_back_url'] = $data['cccd_back_url'];
                     }
 
                     // Cập nhật các trường còn lại
@@ -168,6 +172,8 @@ class RegistrationController extends Controller
                 } else {
                     $registration = Registration::create($registrationPayload);
                 }
+
+                $registration = Registration::create($registrationPayload);
 
                 return [
                     'student' => $student,
