@@ -19,7 +19,7 @@ class RegistrationController extends Controller
     {
         $registrations = Registration::with(['student', 'student.account'])->get();
         
-        // Map dữ liệu để thêm email vào
+        // Ánh xạ dữ liệu để bổ sung email
         return $registrations->map(function ($registration) {
             return [
                 'id' => $registration->id,
@@ -117,9 +117,9 @@ class RegistrationController extends Controller
                     throw new RuntimeException('DUPLICATE_PENDING_REGISTRATION');
                 }
 
-                // If there is an earlier rejected registration for this student & semester,
-                // update that record instead of creating a new one. This preserves history
-                // while reusing the rejected row for resubmission.
+                // Nếu đã có đơn bị từ chối trước đó cho sinh viên và học kỳ này,
+                // hãy cập nhật bản ghi đó thay vì tạo mới. Cách này giữ lịch sử
+                // nhưng vẫn tái sử dụng hàng bị từ chối cho lần nộp lại.
                 $existingRejected = Registration::where('student_id', $student->id)
                     ->where('semester', $data['semester'])
                     ->where('status', 'rejected')
@@ -148,7 +148,7 @@ class RegistrationController extends Controller
                 ];
 
                 if ($existingRejected) {
-                    // Update file urls only if provided in resubmission payload
+                    // Chỉ cập nhật URL tệp nếu payload nộp lại có cung cấp
                     if (isset($data['cccd_front_url'])) {
                         $existingRejected->cccd_front_url = $data['cccd_front_url'];
                     }
@@ -157,9 +157,9 @@ class RegistrationController extends Controller
                         $existingRejected->cccd_back_url = $data['cccd_back_url'];
                     }
 
-                    // Update the other fields
+                    // Cập nhật các trường còn lại
                     $existingRejected->fill($registrationPayload);
-                    // Clear previous rejection reason and set to pending
+                    // Xóa lý do từ chối trước đó và đưa trạng thái về chờ duyệt
                     $existingRejected->reason = null;
                     $existingRejected->status = 'pending';
                     $existingRejected->save();
@@ -202,9 +202,9 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user'], 404);
         }
 
-        // If the account is not linked to a student yet, there is no
-        // registration to return. Avoid querying for student_id NULL
-        // which could accidentally match registrations with NULL ids.
+        // Nếu tài khoản chưa liên kết với sinh viên thì không có
+        // đơn đăng ký nào để trả về. Tránh truy vấn student_id NULL
+        // vì có thể vô tình khớp các đơn có id NULL.
         if (!$account->student_id) {
             return response()->json(null);
         }
@@ -263,7 +263,7 @@ class RegistrationController extends Controller
         ]);
     }
 
-    // Admin: list rooms with basic bed counts
+    // Quản trị: liệt kê phòng với số giường cơ bản
     public function getRooms()
     {
         $rooms = Room::with('beds')->get();
@@ -278,13 +278,13 @@ class RegistrationController extends Controller
                 'room_number' => $room->room_number,
                 'totalBeds' => $totalBeds,
                 'availableBeds' => $availableBeds,
-                // backend has no gender column; frontend can treat this optional
+                // backend không có cột giới tính; frontend có thể xem đây là trường tùy chọn
                 'gender' => $room->gender ?? null,
             ];
         })->values();
     }
 
-    // Admin: assign room id to a registration
+    // Quản trị: gán phòng cho đơn đăng ký
     public function assignRoom($id, Request $request)
     {
         $request->validate([
@@ -303,7 +303,7 @@ class RegistrationController extends Controller
         return response()->json(['message' => 'Đã phân phòng']);
     }
 
-    // Student: select a bed by email (frontend uses email-based call)
+    // Sinh viên: chọn giường theo email (frontend gọi theo email)
     public function selectBed(Request $request)
     {
         $request->validate([
@@ -331,7 +331,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường không tồn tại'], 404);
         }
 
-        // Mark bed as occupied and attach to registration
+        // Đánh dấu giường là đã có người ở và gắn vào đơn đăng ký
         $bed->status = 'occupied';
         $bed->save();
 

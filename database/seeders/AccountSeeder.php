@@ -47,7 +47,7 @@ class AccountSeeder extends Seeder
             ],
         ];
 
-        // Use upsert so running seeders multiple times won't fail on unique constraint
+        // Dùng upsert để chạy seeder nhiều lần mà không lỗi ràng buộc duy nhất
         Account::upsert($rows, ['email'], ['password', 'role', 'is_active']);
     }
     }

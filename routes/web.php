@@ -7,8 +7,8 @@ Route::get('/', function () {
     return view('welcome');
 });
 
-// Serve files stored on the "public" disk even when `public/storage` symlink is missing.
-// Frontend expects URLs like: http://127.0.0.1:8000/storage/<path>
+// Phục vụ tệp lưu trên đĩa "public" ngay cả khi thiếu liên kết tượng trưng public/storage.
+// Frontend mong đợi các URL như: http://127.0.0.1:8000/storage/<path>
 Route::get('/storage/{path}', function (string $path) {
     if ($path === '' || str_contains($path, '..')) {
         abort(404);

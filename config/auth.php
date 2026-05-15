@@ -76,10 +76,6 @@ return [
             'model' => env('AUTH_ACCOUNT_MODEL', 'App\Models\Account'),
         ],
 
-        // 'users' => [
-        //     'driver' => 'database',
-        //     'table' => 'users',
-        // ],
     ],
 
     /*

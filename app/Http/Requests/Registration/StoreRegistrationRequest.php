@@ -29,7 +29,7 @@ class StoreRegistrationRequest extends FormRequest
             'course_year' => $this->input('course_year', $this->input('class')),
             'parent_relationship' => $this->input('parent_relationship', $this->input('relationship')),
         ]);
-            // Map parent/family fields from frontend naming conventions
+            // Ánh xạ các trường cha mẹ/gia đình theo quy ước đặt tên của frontend
             $this->merge([
                 'father_name' => $this->input('father_name', $this->input('fatherName')),
                 'father_birth_year' => $this->input('father_birth_year', $this->input('fatherBirthYear')),
@@ -58,7 +58,7 @@ class StoreRegistrationRequest extends FormRequest
                 'required',
                 'string',
                 'max:191',
-                // student_code now unique on accounts
+                // student_code hiện là duy nhất trong bảng accounts
                 Rule::unique('accounts', 'student_code')->ignore($currentAccountId),
             ],
             'full_name' => ['required', 'string', 'max:191'],
@@ -159,7 +159,7 @@ class StoreRegistrationRequest extends FormRequest
             return null;
         }
 
-        // Accept both dd/mm/yyyy and yyyy-mm-dd from frontend.
+        // Chấp nhận cả dd/mm/yyyy và yyyy-mm-dd từ frontend.
         if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $trimmed) === 1) {
             [$day, $month, $year] = explode('/', $trimmed);
             return sprintf('%04d-%02d-%02d', (int) $year, (int) $month, (int) $day);

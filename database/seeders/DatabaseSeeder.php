@@ -15,7 +15,7 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // User::factory(10)->create();
+        // Nếu cần, tạo 10 user bằng factory.
          $this->call([
         AccountSeeder::class,
     ]);

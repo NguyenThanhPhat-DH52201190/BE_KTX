@@ -42,11 +42,11 @@ class AuthController extends Controller
             $payload['full_name'] = $request->input('full_name');
         }
 
-        // If there is an existing student row with same email, link it.
+        // Nếu đã có bản ghi sinh viên cùng email thì liên kết vào đó.
         $student = Student::where('email', $request->email)->first();
         if ($student) {
             $payload['student_id'] = $student->id;
-            // if student_code/full_name were empty in payload, attempt to copy from student (if available)
+            // Nếu payload thiếu student_code/full_name thì thử sao chép từ sinh viên (nếu có).
             if (empty($payload['student_code']) && isset($student->student_code)) {
                 $payload['student_code'] = $student->student_code;
             }
@@ -88,7 +88,7 @@ class AuthController extends Controller
                 'email' => $account->email,
                 'role' => $account->role,
                 'student_id' => $account->student_id,
-                // provide both snake_case and camelCase variants for frontend compatibility
+                // Trả về cả biến thể snake_case và camelCase để tương thích với frontend.
                 'student_code' => $account->student_code,
                 'studentCode' => $account->student_code,
                 'full_name' => $account->full_name,
@@ -97,7 +97,7 @@ class AuthController extends Controller
         ]);
     }
 
-    // ✅ FORGOT PASSWORD
+    // Quên mật khẩu
     public function forgotPassword(Request $request)
     {
         $request->validate([
@@ -124,7 +124,7 @@ class AuthController extends Controller
 
     public function checkStudentCode(CheckStudentCodeRequest $request)
     {
-        // student_code now stored on accounts table
+        // student_code hiện được lưu trong bảng accounts
         $exists = \App\Models\Account::where('student_code', $request->student_code)->exists();
 
         return response()->json([
@@ -146,12 +146,12 @@ class AuthController extends Controller
             ], 400);
         }
 
-        // cập nhật password
+        // Cập nhật mật khẩu
         Account::where('email', $request->email)->update([
             'password' => Hash::make($request->password)
         ]);
 
-        // xóa token
+        // Xóa token
         DB::table('password_resets')->where('email', $request->email)->delete();
 
         return response()->json([

@@ -2,7 +2,7 @@
 
 namespace Tests\Feature;
 
-// use Illuminate\Foundation\Testing\RefreshDatabase;
+// Dùng Illuminate\Foundation\Testing\RefreshDatabase nếu cần làm mới CSDL giữa các test.
 use Tests\TestCase;
 
 class ExampleTest extends TestCase

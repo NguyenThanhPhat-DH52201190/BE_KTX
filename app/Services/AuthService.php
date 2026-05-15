@@ -9,6 +9,5 @@ class AuthService
      */
     public function __construct()
     {
-        //
     }
 }
