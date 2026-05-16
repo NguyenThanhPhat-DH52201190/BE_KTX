@@ -15,9 +15,10 @@ Route::post('/reset-password-otp', [AuthController::class, 'resetWithOtp']);
 Route::post('/check-email', [AuthController::class, 'checkEmail']);
 Route::post('/check-student-code', [AuthController::class, 'checkStudentCode']);
 
-// Tuyến đăng ký - phải đặt /me trước /{id}
+// Tuyến đăng ký - phải đặt /me và /history trước /{id}
 Route::post('/registration', [RegistrationController::class, 'store']);
 Route::get('/registration/me', [RegistrationController::class, 'getMyRegistration']);
+Route::get('/registration/history/{email}/{semester}', [RegistrationController::class, 'getRegistrationHistory']);
 Route::get('/registration', [RegistrationController::class, 'index']);
 Route::get('/registration/{id}', [RegistrationController::class, 'show']);
 Route::put('/registration/{id}/approve', [RegistrationController::class, 'approve']);

@@ -11,6 +11,7 @@ use App\Models\Student;
 use App\Models\Room;
 use App\Models\Bed;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class RegistrationController extends Controller
@@ -21,10 +22,19 @@ class RegistrationController extends Controller
         
         // Ánh xạ dữ liệu để bổ sung email
         return $registrations->map(function ($registration) {
+            $formData = null;
+            if (!empty($registration->form_data)) {
+                $decoded = json_decode($registration->form_data, true);
+                if (is_array($decoded)) {
+                    $formData = $decoded;
+                }
+            }
+
             return [
                 'id' => $registration->id,
                 'student_id' => $registration->student_id,
                 'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
+                'formData' => $formData,
                 'status' => $registration->status,
                 'semester' => $registration->semester,
                 'cccd_front_url' => $registration->cccd_front_url,
@@ -132,6 +142,30 @@ class RegistrationController extends Controller
                     'cccd_front_url' => $data['cccd_front_url'] ?? null,
                     'cccd_back_url' => $data['cccd_back_url'] ?? null,
                     'semester' => $data['semester'],
+                    // Lưu snapshot dữ liệu form để giữ lịch sử độc lập với bảng `students`
+                    'form_data' => json_encode([
+                        'mssv' => $data['student_code'] ?? null,
+                        'fullName' => $data['full_name'] ?? null,
+                        'birthDate' => $data['date_of_birth'] ?? null,
+                        'gender' => $data['gender'] ?? null,
+                        'class' => $data['class_name'] ?? null,
+                        'department' => $data['faculty'] ?? null,
+                        'nationality' => $data['nationality'] ?? null,
+                        'ethnicity' => $data['ethnicity'] ?? null,
+                        'religion' => $data['religion'] ?? null,
+                        'phone' => $data['phone'] ?? null,
+                        'cccd' => $data['cccd'] ?? null,
+                        'cccdIssueDate' => $data['cccd_issued_date'] ?? null,
+                        'cccdIssuePlace' => $data['cccd_issued_place'] ?? null,
+                        'address' => $data['permanent_address'] ?? null,
+                        'father_name' => $data['father_name'] ?? null,
+                        'father_phone' => $data['father_phone'] ?? null,
+                        'father_job' => $data['father_job'] ?? null,
+                        'mother_name' => $data['mother_name'] ?? null,
+                        'mother_phone' => $data['mother_phone'] ?? null,
+                        'mother_job' => $data['mother_job'] ?? null,
+                        'familyContactAddress' => $data['parent_address'] ?? null,
+                    ]),
                     'status' => 'pending',
                     'father_name' => $data['father_name'] ?? ($data['parent_name'] ?? ''),
                     'father_birth_year' => $data['father_birth_year'] ?? '',
@@ -147,12 +181,10 @@ class RegistrationController extends Controller
                     'commitment_confirm' => $data['commitment_confirm'] ?? false,
                 ];
 
-                // When the student resubmits after a rejection, create a new
-                // registration row and link it to the previous rejected record.
-                // This preserves the rejected record as history instead of
-                // overwriting it.
+                // Nếu đã có đơn bị từ chối trước đó cho sinh viên và học kỳ này,
+                // hãy giữ bản bị từ chối nguyên vẹn (lưu lịch sử) và tạo một
+                // bản ghi mới với trạng thái 'pending' cho lần nộp lại.
                 if ($existingRejected) {
-                    // Chỉ cập nhật URL tệp nếu payload nộp lại có cung cấp
                     if (isset($data['cccd_front_url'])) {
                         $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
                     }
@@ -161,14 +193,7 @@ class RegistrationController extends Controller
                         $registrationPayload['cccd_back_url'] = $data['cccd_back_url'];
                     }
 
-                    // Cập nhật các trường còn lại
-                    $existingRejected->fill($registrationPayload);
-                    // Xóa lý do từ chối trước đó và đưa trạng thái về chờ duyệt
-                    $existingRejected->reason = null;
-                    $existingRejected->status = 'pending';
-                    $existingRejected->save();
-
-                    $registration = $existingRejected;
+                    $registration = Registration::create($registrationPayload);
                 } else {
                     $registration = Registration::create($registrationPayload);
                 }
@@ -226,6 +251,7 @@ class RegistrationController extends Controller
         return response()->json([
             'id' => $registration->id,
             'student_id' => $registration->student_id,
+            'formData' => (!empty($registration->form_data) ? json_decode($registration->form_data, true) : null),
             'email' => $registration->student?->email ?? $email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
@@ -369,15 +395,32 @@ class RegistrationController extends Controller
 
     public function show($id)
     {
+        Log::info("RegistrationController.show($id) - fetching registration with id: $id");
+        
         $registration = Registration::with(['student', 'student.account'])->find($id);
+        
+        Log::info("RegistrationController.show($id) - found registration", [
+            'id' => $registration?->id,
+            'status' => $registration?->status,
+            'student_id' => $registration?->student_id,
+        ]);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy'], 404);
         }
 
+        $formData = null;
+        if (!empty($registration->form_data)) {
+            $decoded = json_decode($registration->form_data, true);
+            if (is_array($decoded)) {
+                $formData = $decoded;
+            }
+        }
+
         return response()->json([
             'id' => $registration->id,
             'student_id' => $registration->student_id,
+            'formData' => $formData,
             'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
@@ -400,5 +443,70 @@ class RegistrationController extends Controller
             'created_at' => $registration->created_at,
             'student' => $registration->student,
         ]);
+    }
+
+    //Tìm hiểu kỹ
+    /**
+     * Get all registrations for a specific student and semester (for history)
+     * Used by admin to view student's submission history
+     */
+    public function getRegistrationHistory($email, $semester)
+    {
+        Log::info("RegistrationController.getRegistrationHistory - email: $email, semester: $semester");
+        
+        $account = Account::where('email', $email)->first();
+
+        if (!$account || !$account->student_id) {
+            Log::info("RegistrationController.getRegistrationHistory - student not found");
+            return response()->json([]);
+        }
+
+        $registrations = Registration::with(['student', 'student.account'])
+            ->where('student_id', $account->student_id)
+            ->where('semester', $semester)
+            ->orderBy('id', 'asc')  // chronological order
+            ->get();
+
+        Log::info("RegistrationController.getRegistrationHistory - found registrations", [
+            'count' => $registrations->count(),
+            'student_id' => $account->student_id,
+        ]);
+
+        return $registrations->map(function ($registration) {
+            $formData = null;
+            if (!empty($registration->form_data)) {
+                $decoded = json_decode($registration->form_data, true);
+                if (is_array($decoded)) {
+                    $formData = $decoded;
+                }
+            }
+
+            return [
+                'id' => $registration->id,
+                'student_id' => $registration->student_id,
+                'email' => $registration->student?->email ?? '',
+                'formData' => $formData,
+                'status' => $registration->status,
+                'semester' => $registration->semester,
+                'cccd_front_url' => $registration->cccd_front_url,
+                'cccd_back_url' => $registration->cccd_back_url,
+                'father_name' => $registration->father_name,
+                'father_phone' => $registration->father_phone,
+                'father_job' => $registration->father_job,
+                'mother_name' => $registration->mother_name,
+                'mother_phone' => $registration->mother_phone,
+                'mother_job' => $registration->mother_job,
+                'parent_address' => $registration->parent_address,
+                'stay_from_date' => $registration->stay_from_date,
+                'stay_to_date' => $registration->stay_to_date,
+                'commitment_confirm' => $registration->commitment_confirm,
+                'reason' => $registration->reason,
+                'assigned_room_id' => $registration->assigned_room_id,
+                'assigned_bed_id' => $registration->assigned_bed_id,
+                'note' => $registration->note,
+                'created_at' => $registration->created_at,
+                'student' => $registration->student,
+            ];
+        });
     }
 }

@@ -15,10 +15,12 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // Nếu cần, tạo 10 user bằng factory.
-         $this->call([
-        AccountSeeder::class,
-    ]);
+        // Gọi các seeder mẫu để mọi máy dev có dữ liệu giống nhau
+        $this->call([
+            AccountSeeder::class,
+            StudentSeeder::class,
+            RegistrationSeeder::class,
+        ]);
 
     }
 }

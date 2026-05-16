@@ -1,0 +1,156 @@
+<?php
+
+namespace Database\Seeders;
+
+use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+use Illuminate\Database\Seeder;
+use App\Models\Student;
+
+class StudentSeeder extends Seeder
+{
+    /**
+     * Run the database seeds.
+     */
+    public function run(): void
+    {
+        $rows = [
+            [
+                'student_code' => 'DH12234456',
+                'full_name' => 'Nguyễn Văn A',
+                'date_of_birth' => '2004-02-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH03',
+                'faculty' => 'Kinh tế - Quản trị',
+                'course_year' => 'D22_TH03',
+                'phone' => '0123456789',
+                'email' => 'dh12234456@student.stu.edu.vn',
+                'cccd' => '021258123654',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'Bình Dương',
+                'nationality' => 'Việt Nam',
+                'ethnicity' => 'Kinh',
+                'religion' => 'Không',
+                'permanent_address' => '180 Cao Lo, Quan 8, Ho Chi Minh',
+                'avatar' => 'students/avatar/eSmQs4WqDm4X5WdMC03LbQIFybf5hUTz80RRFaNJ.jpg',
+                'status' => 'active',
+                'created_at' => '2026-05-10 05:06:32',
+                'updated_at' => '2026-05-10 05:23:09',
+            ],
+            [
+                'student_code' => 'DH52201190',
+                'full_name' => 'Phát Nguyễn Thanh',
+                'date_of_birth' => '2004-02-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH03',
+                'faculty' => 'Xây Dựng',
+                'course_year' => 'D22_TH03',
+                'phone' => '0123465788',
+                'email' => 'dh52201190@student.stu.edu.vn',
+                'cccd' => '036996336978',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'Bình Dương',
+                'nationality' => 'Việt Nam',
+                'ethnicity' => 'Kinh',
+                'religion' => 'Không',
+                'permanent_address' => 'xyz,abc,mnop',
+                'avatar' => 'students/avatar/zP2msfwijnYjfDKlNeOafx2xgX63ShgzIBbz4Jdi.png',
+                'status' => 'active',
+                'created_at' => '2026-05-14 01:12:56',
+                'updated_at' => '2026-05-14 01:16:45',
+            ],
+            [
+                'student_code' => 'DH52201699',
+                'full_name' => 'Nguyễn Thị Cẩm Tú',
+                'date_of_birth' => '2004-08-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH14',
+                'faculty' => 'Công nghệ thực phẩm',
+                'course_year' => 'D22_TH14',
+                'phone' => '0258852963',
+                'email' => 'dh52201699@student.stu.edu.vn',
+                'cccd' => '045698712336',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'Bình Dương',
+                'nationality' => 'Hoa Kỳ',
+                'ethnicity' => 'Kinh',
+                'religion' => 'Không',
+                'permanent_address' => 'abc,xyz,mnpq',
+                'avatar' => 'students/avatar/8E3rrk2ytHbDpt5OCUNpTjcalpWKQFx3HV7EZhya.jpg',
+                'status' => 'active',
+                'created_at' => '2026-05-14 01:27:29',
+                'updated_at' => '2026-05-14 01:31:44',
+            ],
+            [
+                'student_code' => 'DH52200662',
+                'full_name' => 'Nguyễn Minh Hiền',
+                'date_of_birth' => '2004-02-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH03',
+                'faculty' => 'Kinh tế - Quản trị',
+                'course_year' => 'D22_TH03',
+                'phone' => '0123456789',
+                'email' => 'dh52200662@student.stu.edu.vn',
+                'cccd' => '022233366664',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'Bình Dương',
+                'nationality' => 'Hoa Kỳ',
+                'ethnicity' => 'Kinh',
+                'religion' => 'Không',
+                'permanent_address' => '250 Nguyễn Tri Phương , Quận 5, TP. Hồ Chí Minh',
+                'avatar' => 'students/avatar/zHT9StAbRLFWKyWhdDm40GPgcfU92n09MemxcF0o.webp',
+                'status' => 'active',
+                'created_at' => '2026-05-14 01:37:47',
+                'updated_at' => '2026-05-14 01:37:47',
+            ],
+            [
+                'student_code' => 'DH85236936',
+                'full_name' => 'Nguyễn Văn A',
+                'date_of_birth' => '2004-08-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH03',
+                'faculty' => 'Kinh tế - Quản trị',
+                'course_year' => 'D22_TH03',
+                'phone' => '0987898778',
+                'email' => 'dh85236936@student.stu.edu.vn',
+                'cccd' => '014774117891',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'Bình Dương',
+                'nationality' => 'Hoa Kỳ',
+                'ethnicity' => 'Kinh',
+                'religion' => 'Không',
+                'permanent_address' => 'abc,xyz,mnpq',
+                'avatar' => 'students/avatar/kirpHskTgtQE8t5zfouIBJ0SfD6mN1yF64Fs7ZiH.jpg',
+                'status' => 'active',
+                'created_at' => '2026-05-15 03:36:54',
+                'updated_at' => '2026-05-15 04:00:23',
+            ],
+            [
+                'student_code' => 'DH52201202',
+                'full_name' => 'Phát Nguyễn Thanh',
+                'date_of_birth' => '2004-08-12',
+                'gender' => 'male',
+                'class_name' => 'D22_TH14',
+                'faculty' => 'Cơ khí',
+                'course_year' => 'D22_TH14',
+                'phone' => '0222222222',
+                'email' => 'dh52201202@student.stu.edu.vn',
+                'cccd' => '036985214723',
+                'cccd_issued_date' => '2020-02-01',
+                'cccd_issued_place' => 'SG',
+                'nationality' => 'Hoa Kỳ',
+                'ethnicity' => 'Hoa',
+                'religion' => 'Phật giáo',
+                'permanent_address' => '180 Phạm Thế Hiển, quận 8 , thành phố Hồ Chí Minh',
+                'avatar' => 'students/avatar/vm7xVZVnyyUAtPu3rNJ68d4ACWhcgfkrC4UDst3b.png',
+                'status' => 'active',
+                'created_at' => '2026-05-15 08:06:00',
+                'updated_at' => '2026-05-15 08:42:32',
+            ],
+        ];
+
+        // upsert để chạy nhiều lần không tạo duplicate; key là student_code
+        Student::upsert($rows, ['student_code'], [
+            'full_name', 'date_of_birth', 'gender', 'class_name', 'faculty', 'course_year', 'phone', 'email', 'cccd', 'cccd_issued_date', 'cccd_issued_place', 'nationality', 'ethnicity', 'religion', 'permanent_address', 'avatar', 'status', 'created_at', 'updated_at'
+        ]);
+    }
+}
