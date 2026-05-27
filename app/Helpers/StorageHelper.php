@@ -34,9 +34,16 @@ class StorageHelper
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
         // Check if Railway environment and volume path exists
-        return env('RAILWAY_ENVIRONMENT') === 'production' 
+        $isRailway = env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
+        
+        // Also check if APP_URL contains railway.app (fallback)
+        if (!$isRailway && strpos(env('APP_URL', ''), 'railway.app') !== false) {
+            return true;
+        }
+        
+        return $isRailway;
     }
     
     /**
@@ -66,38 +73,30 @@ class StorageHelper
             return null;
         }
         
-        // Get the base URL from config (more reliable than url() helper)
-        $baseUrl = rtrim(config('app.url'), '/');
-        
-        // Check if we're on Railway (by environment or domain)
-        $isRailway = self::isRailwayWithVolume() || strpos($baseUrl, 'railway.app') !== false;
-        
-        // If it's already a full URL
+        // FIX: If it's a full URL that's missing /api/ (like avatar), fix it
         if (filter_var($path, FILTER_VALIDATE_URL)) {
-            // If it's a Railway URL missing /api/, fix it
-            if ($isRailway && strpos($path, '/storage/') !== false && strpos($path, '/api/') === false) {
+            // If it's a Railway storage URL missing /api/, convert it
+            if (strpos($path, 'railway.app') !== false && 
+                strpos($path, '/storage/') !== false && 
+                strpos($path, '/api/') === false) {
+                
                 $fixed = str_replace('/storage/', '/api/storage/', $path);
-                Log::info('Fixed missing /api/ in existing URL', ['original' => $path, 'fixed' => $fixed]);
+                Log::info('Fixed avatar URL missing /api/', ['original' => $path, 'fixed' => $fixed]);
                 return $fixed;
             }
             return $path;
         }
         
-        // Clean the path - remove any leading slashes or storage prefixes
-        $cleanPath = ltrim($path, '/');
-        $cleanPath = preg_replace('/^(storage\/|api\/storage\/)/', '', $cleanPath);
-        
-        // Generate URL based on environment
-        if ($isRailway) {
-            // Railway production - use API storage endpoint
-            $url = $baseUrl . '/api/storage/' . $cleanPath;
-            Log::info('Generated Railway URL', ['path' => $cleanPath, 'url' => $url]);
+        // If using Railway volume, return API endpoint URL
+        if (self::isRailwayWithVolume()) {
+            $url = url('/api/storage/' . ltrim($path, '/'));
+            Log::info('Generated Railway URL', ['path' => $path, 'url' => $url]);
             return $url;
         }
         
         // Local development - use storage URL
-        $url = $baseUrl . '/storage/' . $cleanPath;
-        Log::info('Generated local URL', ['path' => $cleanPath, 'url' => $url]);
+        $url = Storage::url($path);
+        Log::info('Generated local URL', ['path' => $path, 'url' => $url]);
         return $url;
     }
     
