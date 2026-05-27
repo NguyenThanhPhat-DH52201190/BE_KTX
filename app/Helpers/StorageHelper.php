@@ -12,7 +12,6 @@ class StorageHelper
      */
     public static function getStorageDisk()
     {
-        // Check if running on Railway with volume
         if (self::isRailwayWithVolume()) {
             Log::info('Using railway_volume disk', [
                 'path' => env('RAILWAY_VOLUME_PATH'),
@@ -21,7 +20,6 @@ class StorageHelper
             return Storage::disk('railway_volume');
         }
         
-        // Local development - use public disk
         Log::info('Using public disk for local development');
         return Storage::disk('public');
     }
@@ -33,20 +31,9 @@ class StorageHelper
     {
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
-        // Check if Railway environment and volume path exists
-        $result = env('RAILWAY_ENVIRONMENT') === 'production' 
+        return env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
-        
-        // Log the check
-        Log::info('isRailwayWithVolume check', [
-            'railway_environment' => env('RAILWAY_ENVIRONMENT'),
-            'volume_path' => $volumePath,
-            'volume_exists' => $volumePath ? file_exists($volumePath) : false,
-            'result' => $result
-        ]);
-        
-        return $result;
     }
     
     /**
@@ -57,12 +44,10 @@ class StorageHelper
         $disk = self::getStorageDisk();
         
         if ($customFilename) {
-            // Store with custom filename
             $filePath = $path . '/' . $customFilename;
             $disk->put($filePath, file_get_contents($file));
             return $filePath;
         } else {
-            // Store with generated filename
             return $disk->putFile($path, $file);
         }
     }
@@ -72,71 +57,34 @@ class StorageHelper
      */
     public static function getPublicUrl($path)
     {
-        // Log the input
-        Log::info('===== getPublicUrl START =====');
-        Log::info('Input path', [
-            'original_path' => $path,
-            'path_type' => gettype($path),
-            'is_empty' => empty($path)
-        ]);
-        
         if (empty($path)) {
-            Log::info('Path is empty, returning null');
             return null;
         }
         
-        // Check if it contains /storage/
-        $hasStorage = strpos($path, '/storage/') !== false;
-        Log::info('Path analysis', [
-            'contains_storage_slash' => $hasStorage,
-            'contains_http' => strpos($path, 'http') === 0,
-            'is_url' => filter_var($path, FILTER_VALIDATE_URL)
-        ]);
-        
         // If it's a full URL, extract just the relative path
-        if ($hasStorage) {
-            $originalPath = $path;
-            $parts = explode('/storage/', $path, 2);
-            $path = $parts[1] ?? $path;
-            Log::info('Extracted relative path', [
-                'original' => $originalPath,
-                'extracted_path' => $path,
-                'extraction_success' => isset($parts[1])
-            ]);
-        } else {
-            Log::info('Path does not contain /storage/, keeping as-is', ['path' => $path]);
+        if (strpos($path, '/storage/') !== false) {
+            $path = explode('/storage/', $path, 2)[1] ?? $path;
         }
         
         // Clean the path
         $cleanPath = ltrim($path, '/');
-        Log::info('Cleaned path', ['clean_path' => $cleanPath]);
         
-        // Check Railway volume status
-        $isRailway = self::isRailwayWithVolume();
-        Log::info('Railway status', [
-            'is_railway_with_volume' => $isRailway,
-            'will_use_railway_logic' => $isRailway
-        ]);
-        
-        // If using Railway volume, return API endpoint URL
-        if ($isRailway) {
-            $generatedUrl = url('/api/storage/' . $cleanPath);
-            Log::info('Generated Railway URL', [
-                'base_url' => url('/'),
-                'constructed_url' => $generatedUrl,
-                'final_url' => $generatedUrl
+        // If using Railway volume, return ABSOLUTE API endpoint URL
+        if (self::isRailwayWithVolume()) {
+            // Get the absolute URL - THIS IS THE KEY FIX
+            $baseUrl = rtrim(env('APP_URL', 'https://be-ktx-production.up.railway.app'), '/');
+            $absoluteUrl = $baseUrl . '/api/storage/' . $cleanPath;
+            
+            Log::info('Generated absolute Railway URL', [
+                'clean_path' => $cleanPath,
+                'url' => $absoluteUrl
             ]);
-            Log::info('===== getPublicUrl END =====');
-            return $generatedUrl;
+            
+            return $absoluteUrl;
         }
         
         // Local development - use storage URL
         $localUrl = Storage::url($cleanPath);
-        Log::info('Generated local URL', [
-            'storage_url' => $localUrl,
-            'final_url' => $localUrl
-        ]);
-        Log::info('===== getPublicUrl END =====');
         return $localUrl;
     }
     
