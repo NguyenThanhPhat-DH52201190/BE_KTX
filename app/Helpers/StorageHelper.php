@@ -66,7 +66,17 @@ class StorageHelper
             return null;
         }
         
-        // If it's already a full URL
+        // FIX FOR AVATAR: Convert full URLs to relative paths first
+        if (strpos($path, '/storage/') !== false) {
+            // Extract everything after '/storage/'
+            $parts = explode('/storage/', $path, 2);
+            if (isset($parts[1])) {
+                $path = $parts[1];
+                Log::info('Converted URL to relative path', ['relative' => $path]);
+            }
+        }
+        
+        // If it's already a full URL (but not a storage URL anymore)
         if (filter_var($path, FILTER_VALIDATE_URL)) {
             return $path;
         }
@@ -75,7 +85,9 @@ class StorageHelper
         if (self::isRailwayWithVolume()) {
             // FIXED: Keep the full path intact for nested directories
             // Don't split into directory and filename - just pass the full path
-            return url('/api/storage/' . ltrim($path, '/'));
+            $url = url('/api/storage/' . ltrim($path, '/'));
+            Log::info('Generated Railway URL', ['path' => $path, 'url' => $url]);
+            return $url;
         }
         
         // Local development - use storage URL
