@@ -12,6 +12,7 @@ class StorageHelper
      */
     public static function getStorageDisk()
     {
+        // Check if running on Railway with volume
         if (self::isRailwayWithVolume()) {
             Log::info('Using railway_volume disk', [
                 'path' => env('RAILWAY_VOLUME_PATH'),
@@ -20,6 +21,7 @@ class StorageHelper
             return Storage::disk('railway_volume');
         }
         
+        // Local development - use public disk
         Log::info('Using public disk for local development');
         return Storage::disk('public');
     }
@@ -31,15 +33,10 @@ class StorageHelper
     {
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
-        $isRailway = env('RAILWAY_ENVIRONMENT') === 'production' 
+        // Check if Railway environment and volume path exists
+        return env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
-        
-        if (!$isRailway && strpos(env('APP_URL', ''), 'railway.app') !== false) {
-            return true;
-        }
-        
-        return $isRailway;
     }
     
     /**
@@ -50,10 +47,12 @@ class StorageHelper
         $disk = self::getStorageDisk();
         
         if ($customFilename) {
+            // Store with custom filename
             $filePath = $path . '/' . $customFilename;
             $disk->put($filePath, file_get_contents($file));
             return $filePath;
         } else {
+            // Store with generated filename
             return $disk->putFile($path, $file);
         }
     }
@@ -67,30 +66,20 @@ class StorageHelper
             return null;
         }
         
-        // SIMPLE FIX: If it's a URL, extract everything after '/storage/'
-        if (strpos($path, 'https://') === 0 || strpos($path, 'http://') === 0) {
-            // Find the position of '/storage/'
-            $storagePos = strpos($path, '/storage/');
-            if ($storagePos !== false) {
-                // Get everything after '/storage/'
-                $path = substr($path, $storagePos + 9); // +9 for '/storage/'
-                Log::info('Extracted path from URL', ['original' => $originalPath ?? $path, 'extracted' => $path]);
-            }
+        // If it's already a full URL
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
         }
         
-        // Remove any leading slashes
-        $cleanPath = ltrim($path, '/');
-        
-        // For Railway: Always use the correct base URL with /api/storage/
+        // If using Railway volume, return API endpoint URL
         if (self::isRailwayWithVolume()) {
-            // Use the correct Railway app URL (be-ktx-production, not bektx-production)
-            $baseUrl = 'https://be-ktx-production.up.railway.app';
-            return $baseUrl . '/api/storage/' . $cleanPath;
+            // FIXED: Keep the full path intact for nested directories
+            // Don't split into directory and filename - just pass the full path
+            return url('/api/storage/' . ltrim($path, '/'));
         }
         
-        // Local development
-        $baseUrl = rtrim(env('APP_URL', 'http://localhost:8000'), '/');
-        return $baseUrl . '/storage/' . $cleanPath;
+        // Local development - use storage URL
+        return Storage::url($path);
     }
     
     /**
