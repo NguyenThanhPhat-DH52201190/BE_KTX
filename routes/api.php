@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\RegistrationController;
+use App\Http\Controllers\Api\StorageController;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -14,6 +15,10 @@ Route::post('/send-otp', [AuthController::class, 'sendOtp']);
 Route::post('/reset-password-otp', [AuthController::class, 'resetWithOtp']);
 Route::post('/check-email', [AuthController::class, 'checkEmail']);
 Route::post('/check-student-code', [AuthController::class, 'checkStudentCode']);
+
+// Storage routes for Railway volume (must be before any wildcard routes)
+Route::get('/storage/debug', [StorageController::class, 'debug']);
+Route::get('/storage/{path}', [StorageController::class, 'serveImage'])->where('path', '.*');
 
 // Tuyến đăng ký - phải đặt /me và /history trước /{id}
 Route::post('/registration', [RegistrationController::class, 'store']);

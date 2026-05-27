@@ -47,6 +47,16 @@ return [
             'report' => false,
         ],
 
+        // ADD THIS NEW DISK FOR RAILWAY VOLUME
+        'railway_volume' => [
+            'driver' => 'local',
+            'root' => env('RAILWAY_VOLUME_PATH', storage_path('app/railway')),
+            'url' => env('APP_URL') . '/api/storage', // Will be handled by our controller
+            'visibility' => 'public',
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

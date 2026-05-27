@@ -10,6 +10,7 @@ use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
 use App\Models\Bed;
+use App\Helpers\StorageHelper;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -37,8 +38,8 @@ class RegistrationController extends Controller
                 'formData' => $formData,
                 'status' => $registration->status,
                 'semester' => $registration->semester,
-                'cccd_front_url' => $registration->cccd_front_url,
-                'cccd_back_url' => $registration->cccd_back_url,
+                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
+                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
@@ -70,16 +71,68 @@ class RegistrationController extends Controller
         $currentStudent = $account->student_id ? Student::find($account->student_id) : null;
         $data = $request->validated();
 
+        // Handle file uploads with Railway volume support
         if ($request->hasFile('avatar')) {
-            $data['avatar'] = $request->file('avatar')->store('students/avatar', 'public');
+            $file = $request->file('avatar');
+            $filename = 'avatar_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $path = 'students/avatar';
+            
+            if (StorageHelper::isRailwayWithVolume()) {
+                // Save to Railway volume
+                $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+                $fullDir = $volumePath . '/' . $path;
+                
+                // Create directory if it doesn't exist
+                if (!file_exists($fullDir)) {
+                    mkdir($fullDir, 0755, true);
+                }
+                
+                $file->move($fullDir, $filename);
+                $data['avatar'] = $path . '/' . $filename;
+            } else {
+                // Local development
+                $data['avatar'] = $file->store($path, 'public');
+            }
         }
 
         if ($request->hasFile('cccd_front')) {
-            $data['cccd_front_url'] = $request->file('cccd_front')->store('registrations/cccd', 'public');
+            $file = $request->file('cccd_front');
+            $filename = 'cccd_front_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $path = 'registrations/cccd';
+            
+            if (StorageHelper::isRailwayWithVolume()) {
+                $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+                $fullDir = $volumePath . '/' . $path;
+                
+                if (!file_exists($fullDir)) {
+                    mkdir($fullDir, 0755, true);
+                }
+                
+                $file->move($fullDir, $filename);
+                $data['cccd_front_url'] = $path . '/' . $filename;
+            } else {
+                $data['cccd_front_url'] = $file->store($path, 'public');
+            }
         }
 
         if ($request->hasFile('cccd_back')) {
-            $data['cccd_back_url'] = $request->file('cccd_back')->store('registrations/cccd', 'public');
+            $file = $request->file('cccd_back');
+            $filename = 'cccd_back_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $path = 'registrations/cccd';
+            
+            if (StorageHelper::isRailwayWithVolume()) {
+                $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+                $fullDir = $volumePath . '/' . $path;
+                
+                if (!file_exists($fullDir)) {
+                    mkdir($fullDir, 0755, true);
+                }
+                
+                $file->move($fullDir, $filename);
+                $data['cccd_back_url'] = $path . '/' . $filename;
+            } else {
+                $data['cccd_back_url'] = $file->store($path, 'public');
+            }
         }
 
         try {
@@ -255,8 +308,8 @@ class RegistrationController extends Controller
             'email' => $registration->student?->email ?? $email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
-            'cccd_front_url' => $registration->cccd_front_url,
-            'cccd_back_url' => $registration->cccd_back_url,
+            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
+            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -424,8 +477,9 @@ class RegistrationController extends Controller
             'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
-            'cccd_front_url' => $registration->cccd_front_url,
-            'cccd_back_url' => $registration->cccd_back_url,
+            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
+            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
+            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -488,8 +542,8 @@ class RegistrationController extends Controller
                 'formData' => $formData,
                 'status' => $registration->status,
                 'semester' => $registration->semester,
-                'cccd_front_url' => $registration->cccd_front_url,
-                'cccd_back_url' => $registration->cccd_back_url,
+                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
+                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
