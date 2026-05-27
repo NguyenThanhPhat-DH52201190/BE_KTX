@@ -7,26 +7,15 @@ use Illuminate\Support\Facades\Log;
 
 class StorageHelper
 {
-    /**
-     * Get the appropriate disk based on environment
-     */
     public static function getStorageDisk()
     {
         if (self::isRailwayWithVolume()) {
-            Log::info('Using railway_volume disk', [
-                'path' => env('RAILWAY_VOLUME_PATH'),
-                'exists' => file_exists(env('RAILWAY_VOLUME_PATH', '/data/storage'))
-            ]);
             return Storage::disk('railway_volume');
         }
         
-        Log::info('Using public disk for local development');
         return Storage::disk('public');
     }
     
-    /**
-     * Check if we're running on Railway with a volume mounted
-     */
     public static function isRailwayWithVolume()
     {
         $volumePath = env('RAILWAY_VOLUME_PATH');
@@ -36,9 +25,6 @@ class StorageHelper
             && file_exists($volumePath);
     }
     
-    /**
-     * Store a file using the appropriate disk
-     */
     public static function storeFile($file, $path, $customFilename = null)
     {
         $disk = self::getStorageDisk();
@@ -52,38 +38,31 @@ class StorageHelper
         }
     }
     
-    /**
-     * Get public URL for stored file
-     */
     public static function getPublicUrl($path)
     {
         if (empty($path)) {
             return null;
         }
         
-        // 🔧 FIX: If path contains /storage/ without /api/, extract the relative path
-        if (strpos($path, '/storage/') !== false && strpos($path, '/api/') === false) {
+        // FORCE FIX: Extract relative path from any URL
+        if (strpos($path, '/storage/') !== false) {
             $parts = explode('/storage/', $path, 2);
             $path = $parts[1] ?? $path;
         }
         
-        // If it's already a full URL
-        if (filter_var($path, FILTER_VALIDATE_URL)) {
-            return $path;
-        }
+        // Remove any leading slashes
+        $cleanPath = ltrim($path, '/');
         
-        // If using Railway volume, return API endpoint URL
+        // On Railway, always use the absolute URL with /api/storage/
         if (self::isRailwayWithVolume()) {
-            return url('/api/storage/' . ltrim($path, '/'));
+            $baseUrl = 'https://be-ktx-production.up.railway.app';
+            return $baseUrl . '/api/storage/' . $cleanPath;
         }
         
-        // Local development - use storage URL
-        return Storage::url($path);
+        // Local development
+        return url('/storage/' . $cleanPath);
     }
     
-    /**
-     * Get the full filesystem path for a stored file
-     */
     public static function getFullPath($path)
     {
         if (empty($path)) {
