@@ -61,44 +61,26 @@ class StorageHelper
      * Get public URL for stored file
      */
     public static function getPublicUrl($path)
-{
-    if (empty($path)) {
-        return null;
-    }
-    
-    // Store original for logging
-    $originalPath = $path;
-    
-    // If it's a full URL, extract the relative path
-    if (strpos($path, '/storage/') !== false) {
-        $parts = explode('/storage/', $path, 2);
-        if (isset($parts[1])) {
-            $path = $parts[1];
-            Log::info('Extracted relative path', ['original' => $originalPath, 'relative' => $path]);
+    {
+        if (empty($path)) {
+            return null;
         }
-    }
-    
-    // Remove any leading slashes
-    $cleanPath = ltrim($path, '/');
-    
-    // If using Railway volume, return ABSOLUTE API endpoint URL
-    if (self::isRailwayWithVolume()) {
-        // Use absolute URL to ensure /api/ is always present
-        $baseUrl = rtrim(env('APP_URL', 'https://be-ktx-production.up.railway.app'), '/');
-        $absoluteUrl = $baseUrl . '/api/storage/' . $cleanPath;
         
-        Log::info('Generated Railway URL', [
-            'clean_path' => $cleanPath,
-            'url' => $absoluteUrl
-        ]);
+        // If it's already a full URL
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
         
-        return $absoluteUrl;
+        // If using Railway volume, return API endpoint URL
+        if (self::isRailwayWithVolume()) {
+            // FIXED: Keep the full path intact for nested directories
+            // Don't split into directory and filename - just pass the full path
+            return url('/api/storage/' . ltrim($path, '/'));
+        }
+        
+        // Local development - use storage URL
+        return Storage::url($path);
     }
-    
-    // Local development
-    $baseUrl = rtrim(env('APP_URL', 'http://localhost:8000'), '/');
-    return $baseUrl . '/storage/' . $cleanPath;
-}
     
     /**
      * Get the full filesystem path for a stored file
