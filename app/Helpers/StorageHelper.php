@@ -34,9 +34,16 @@ class StorageHelper
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
         // Check if Railway environment and volume path exists
-        return env('RAILWAY_ENVIRONMENT') === 'production' 
+        $isRailway = env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
+        
+        // Also check if APP_URL contains railway.app (fallback)
+        if (!$isRailway && strpos(env('APP_URL', ''), 'railway.app') !== false) {
+            return true;
+        }
+        
+        return $isRailway;
     }
     
     /**
@@ -66,20 +73,31 @@ class StorageHelper
             return null;
         }
         
-        // If it's already a full URL
+        // FIX: If it's a full URL that's missing /api/ (like avatar), fix it
         if (filter_var($path, FILTER_VALIDATE_URL)) {
+            // If it's a Railway storage URL missing /api/, convert it
+            if (strpos($path, 'railway.app') !== false && 
+                strpos($path, '/storage/') !== false && 
+                strpos($path, '/api/') === false) {
+                
+                $fixed = str_replace('/storage/', '/api/storage/', $path);
+                Log::info('Fixed avatar URL missing /api/', ['original' => $path, 'fixed' => $fixed]);
+                return $fixed;
+            }
             return $path;
         }
         
         // If using Railway volume, return API endpoint URL
         if (self::isRailwayWithVolume()) {
-            // FIXED: Keep the full path intact for nested directories
-            // Don't split into directory and filename - just pass the full path
-            return url('/api/storage/' . ltrim($path, '/'));
+            $url = url('/api/storage/' . ltrim($path, '/'));
+            Log::info('Generated Railway URL', ['path' => $path, 'url' => $url]);
+            return $url;
         }
         
         // Local development - use storage URL
-        return Storage::url($path);
+        $url = Storage::url($path);
+        Log::info('Generated local URL', ['path' => $path, 'url' => $url]);
+        return $url;
     }
     
     /**
