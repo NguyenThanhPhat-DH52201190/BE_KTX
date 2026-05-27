@@ -34,3 +34,20 @@ Route::put('/registration/select-bed', [RegistrationController::class, 'selectBe
 
 // Danh sách phòng dùng cho frontend
 Route::get('/rooms', [RegistrationController::class, 'getRooms']);
+
+
+//Clear config
+Route::get('/clear-config', function() {
+    try {
+        \Illuminate\Support\Facades\Artisan::call('config:clear');
+        return response()->json([
+            'success' => true,
+            'message' => 'Config cache cleared successfully'
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'error' => $e->getMessage()
+        ], 500);
+    }
+});
