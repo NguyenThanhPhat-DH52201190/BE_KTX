@@ -17,6 +17,34 @@ use RuntimeException;
 
 class RegistrationController extends Controller
 {
+    /**
+     * Helper to get the correct URL based on environment
+     */
+    private function getImageUrl($path)
+    {
+        if (empty($path)) {
+            return null;
+        }
+        
+        // If it's already a full URL, return as-is
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
+        
+        $cleanPath = ltrim($path, '/');
+        
+        // Check if we're in production (Railway)
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+        
+        if ($isProduction) {
+            // Railway: use /api/storage/
+            return url('/api/storage/' . $cleanPath);
+        }
+        
+        // Local development: use /storage/
+        return url('/storage/' . $cleanPath);
+    }
+    
     public function index()
     {
         $registrations = Registration::with(['student', 'student.account'])->get();
@@ -37,9 +65,9 @@ class RegistrationController extends Controller
                 'formData' => $formData,
                 'status' => $registration->status,
                 'semester' => $registration->semester,
-                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-                'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
+                'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+                'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+                'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
@@ -304,9 +332,9 @@ class RegistrationController extends Controller
             'email' => $registration->student?->email ?? $email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
-            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
+            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+            'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -468,9 +496,9 @@ class RegistrationController extends Controller
             'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
             'status' => $registration->status,
             'semester' => $registration->semester,
-            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
+            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+            'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -528,9 +556,9 @@ class RegistrationController extends Controller
                 'formData' => $formData,
                 'status' => $registration->status,
                 'semester' => $registration->semester,
-                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-                'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
+                'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+                'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+                'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
