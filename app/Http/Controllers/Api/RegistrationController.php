@@ -21,7 +21,6 @@ class RegistrationController extends Controller
     {
         $registrations = Registration::with(['student', 'student.account'])->get();
         
-        // Ánh xạ dữ liệu để bổ sung email
         return $registrations->map(function ($registration) {
             $formData = null;
             if (!empty($registration->form_data)) {
@@ -78,19 +77,17 @@ class RegistrationController extends Controller
             $path = 'students/avatar';
             
             if (StorageHelper::isRailwayWithVolume()) {
-                // Save to Railway volume
                 $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
                 $fullDir = $volumePath . '/' . $path;
                 
-                // Create directory if it doesn't exist
                 if (!file_exists($fullDir)) {
                     mkdir($fullDir, 0755, true);
                 }
                 
                 $file->move($fullDir, $filename);
                 $data['avatar'] = $path . '/' . $filename;
+                Log::info('Saved new avatar', ['path' => $data['avatar']]);
             } else {
-                // Local development
                 $data['avatar'] = $file->store($path, 'public');
             }
         }
@@ -137,9 +134,21 @@ class RegistrationController extends Controller
 
         try {
             $result = DB::transaction(function () use ($account, $currentStudent, $data) {
+                // FIX: Clean the existing avatar path if it's a URL
+                $existingAvatar = null;
+                if ($currentStudent && $currentStudent->avatar) {
+                    $existingAvatar = $currentStudent->avatar;
+                    // If it's a full URL, extract the relative path
+                    if (strpos($existingAvatar, '://') !== false && strpos($existingAvatar, '/storage/') !== false) {
+                        $parts = explode('/storage/', $existingAvatar, 2);
+                        $existingAvatar = $parts[1] ?? $existingAvatar;
+                        Log::info('Cleaned existing avatar URL to relative path', ['original' => $currentStudent->avatar, 'cleaned' => $existingAvatar]);
+                    }
+                }
+                
                 $studentPayload = [
                     'student_code' => $data['student_code'],
-                    'avatar' => $data['avatar'] ?? optional($currentStudent)->avatar,
+                    'avatar' => $data['avatar'] ?? $existingAvatar,
                     'full_name' => $data['full_name'],
                     'date_of_birth' => $data['date_of_birth'],
                     'gender' => $data['gender'],
@@ -161,10 +170,12 @@ class RegistrationController extends Controller
                 if ($currentStudent) {
                     $currentStudent->update($studentPayload);
                     $student = $currentStudent;
+                    Log::info('Updated existing student', ['student_id' => $student->id, 'avatar' => $student->avatar]);
                 } else {
                     $student = Student::create($studentPayload);
                     $account->student_id = $student->id;
                     $account->save();
+                    Log::info('Created new student', ['student_id' => $student->id, 'avatar' => $student->avatar]);
                 }
 
                 $account->student_code = $data['student_code'];
@@ -180,9 +191,6 @@ class RegistrationController extends Controller
                     throw new RuntimeException('DUPLICATE_PENDING_REGISTRATION');
                 }
 
-                // Nếu đã có đơn bị từ chối trước đó cho sinh viên và học kỳ này,
-                // hãy cập nhật bản ghi đó thay vì tạo mới. Cách này giữ lịch sử
-                // nhưng vẫn tái sử dụng hàng bị từ chối cho lần nộp lại.
                 $existingRejected = Registration::where('student_id', $student->id)
                     ->where('semester', $data['semester'])
                     ->where('status', 'rejected')
@@ -195,7 +203,6 @@ class RegistrationController extends Controller
                     'cccd_front_url' => $data['cccd_front_url'] ?? null,
                     'cccd_back_url' => $data['cccd_back_url'] ?? null,
                     'semester' => $data['semester'],
-                    // Lưu snapshot dữ liệu form để giữ lịch sử độc lập với bảng `students`
                     'form_data' => json_encode([
                         'mssv' => $data['student_code'] ?? null,
                         'fullName' => $data['full_name'] ?? null,
@@ -234,9 +241,6 @@ class RegistrationController extends Controller
                     'commitment_confirm' => $data['commitment_confirm'] ?? false,
                 ];
 
-                // Nếu đã có đơn bị từ chối trước đó cho sinh viên và học kỳ này,
-                // hãy giữ bản bị từ chối nguyên vẹn (lưu lịch sử) và tạo một
-                // bản ghi mới với trạng thái 'pending' cho lần nộp lại.
                 if ($existingRejected) {
                     if (isset($data['cccd_front_url'])) {
                         $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
@@ -272,7 +276,6 @@ class RegistrationController extends Controller
         ], 201);
     }
 
-
     public function getMyRegistration(Request $request)
     {
         $email = $request->query('email');
@@ -284,9 +287,6 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user'], 404);
         }
 
-        // Nếu tài khoản chưa liên kết với sinh viên thì không có
-        // đơn đăng ký nào để trả về. Tránh truy vấn student_id NULL
-        // vì có thể vô tình khớp các đơn có id NULL.
         if (!$account->student_id) {
             return response()->json(null);
         }
@@ -310,6 +310,7 @@ class RegistrationController extends Controller
             'semester' => $registration->semester,
             'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
             'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
+            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -329,7 +330,6 @@ class RegistrationController extends Controller
         ]);
     }
 
-
     public function approve($id, Request $request)
     {
         $registration = Registration::find($id);
@@ -346,7 +346,6 @@ class RegistrationController extends Controller
         ]);
     }
 
-    // Quản trị: liệt kê phòng với số giường cơ bản
     public function getRooms()
     {
         $rooms = Room::with('beds')->get();
@@ -361,13 +360,11 @@ class RegistrationController extends Controller
                 'room_number' => $room->room_number,
                 'totalBeds' => $totalBeds,
                 'availableBeds' => $availableBeds,
-                // backend không có cột giới tính; frontend có thể xem đây là trường tùy chọn
                 'gender' => $room->gender ?? null,
             ];
         })->values();
     }
 
-    // Quản trị: gán phòng cho đơn đăng ký
     public function assignRoom($id, Request $request)
     {
         $request->validate([
@@ -386,7 +383,6 @@ class RegistrationController extends Controller
         return response()->json(['message' => 'Đã phân phòng']);
     }
 
-    // Sinh viên: chọn giường theo email (frontend gọi theo email)
     public function selectBed(Request $request)
     {
         $request->validate([
@@ -414,7 +410,6 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường không tồn tại'], 404);
         }
 
-        // Đánh dấu giường là đã có người ở và gắn vào đơn đăng ký
         $bed->status = 'occupied';
         $bed->save();
 
@@ -462,6 +457,14 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy'], 404);
         }
 
+        // FIX: Clean avatar path if it's a URL before returning
+        $avatarPath = $registration->student?->avatar;
+        if ($avatarPath && strpos($avatarPath, '://') !== false && strpos($avatarPath, '/storage/') !== false) {
+            $parts = explode('/storage/', $avatarPath, 2);
+            $avatarPath = $parts[1] ?? $avatarPath;
+            Log::info('Cleaned avatar URL in show method', ['original' => $registration->student?->avatar, 'cleaned' => $avatarPath]);
+        }
+
         $formData = null;
         if (!empty($registration->form_data)) {
             $decoded = json_decode($registration->form_data, true);
@@ -479,7 +482,7 @@ class RegistrationController extends Controller
             'semester' => $registration->semester,
             'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
             'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
+            'avatarUrl' => StorageHelper::getPublicUrl($avatarPath),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -499,11 +502,6 @@ class RegistrationController extends Controller
         ]);
     }
 
-    //Tìm hiểu kỹ
-    /**
-     * Get all registrations for a specific student and semester (for history)
-     * Used by admin to view student's submission history
-     */
     public function getRegistrationHistory($email, $semester)
     {
         Log::info("RegistrationController.getRegistrationHistory - email: $email, semester: $semester");
@@ -518,7 +516,7 @@ class RegistrationController extends Controller
         $registrations = Registration::with(['student', 'student.account'])
             ->where('student_id', $account->student_id)
             ->where('semester', $semester)
-            ->orderBy('id', 'asc')  // chronological order
+            ->orderBy('id', 'asc')
             ->get();
 
         Log::info("RegistrationController.getRegistrationHistory - found registrations", [
@@ -527,6 +525,13 @@ class RegistrationController extends Controller
         ]);
 
         return $registrations->map(function ($registration) {
+            // FIX: Clean avatar path if it's a URL
+            $avatarPath = $registration->student?->avatar;
+            if ($avatarPath && strpos($avatarPath, '://') !== false && strpos($avatarPath, '/storage/') !== false) {
+                $parts = explode('/storage/', $avatarPath, 2);
+                $avatarPath = $parts[1] ?? $avatarPath;
+            }
+            
             $formData = null;
             if (!empty($registration->form_data)) {
                 $decoded = json_decode($registration->form_data, true);
@@ -544,6 +549,7 @@ class RegistrationController extends Controller
                 'semester' => $registration->semester,
                 'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
                 'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
+                'avatarUrl' => StorageHelper::getPublicUrl($avatarPath),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
