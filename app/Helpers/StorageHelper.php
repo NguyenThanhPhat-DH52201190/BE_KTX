@@ -65,29 +65,20 @@ class StorageHelper
         if (strpos($path, '/storage/') !== false && strpos($path, '/api/') === false) {
             $parts = explode('/storage/', $path, 2);
             $path = $parts[1] ?? $path;
-            Log::info('Extracted relative path', ['new_path' => $path]);
         }
         
-        // If it's already a full URL (but not after extraction)
+        // If it's already a full URL
         if (filter_var($path, FILTER_VALIDATE_URL)) {
-            Log::info('Returning existing URL', ['url' => $path]);
             return $path;
         }
         
-        // Clean the path
-        $cleanPath = ltrim($path, '/');
-        
         // If using Railway volume, return API endpoint URL
         if (self::isRailwayWithVolume()) {
-            // FORCE HTTPS and correct domain - DON'T use url() helper
-            $baseUrl = 'https://be-ktx-production.up.railway.app';
-            $finalUrl = $baseUrl . '/api/storage/' . $cleanPath;
-            Log::info('Generated Railway URL', ['url' => $finalUrl]);
-            return $finalUrl;
+            return url('/api/storage/' . ltrim($path, '/'));
         }
         
         // Local development - use storage URL
-        return Storage::url($cleanPath);
+        return Storage::url($path);
     }
     
     /**
