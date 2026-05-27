@@ -67,29 +67,25 @@ class StorageHelper
             return null;
         }
         
-        // FORCE FIX: Extract relative path from any URL
-        if (is_string($path) && (strpos($path, 'http://') === 0 || strpos($path, 'https://') === 0)) {
-            // Try to extract the relative path from the URL
-            // Look for patterns like /storage/... or /api/storage/...
-            if (preg_match('/(?:storage|api\/storage)\/(.+)$/', $path, $matches)) {
-                $relativePath = $matches[1];
-                Log::info('Extracted relative path from URL', ['original' => $path, 'relative' => $relativePath]);
-                $path = $relativePath;
-            } else {
-                // Not a storage URL, return as-is
-                return $path;
+        // SIMPLE FIX: If it's a URL, extract everything after '/storage/'
+        if (strpos($path, 'https://') === 0 || strpos($path, 'http://') === 0) {
+            // Find the position of '/storage/'
+            $storagePos = strpos($path, '/storage/');
+            if ($storagePos !== false) {
+                // Get everything after '/storage/'
+                $path = substr($path, $storagePos + 9); // +9 for '/storage/'
+                Log::info('Extracted path from URL', ['original' => $originalPath ?? $path, 'extracted' => $path]);
             }
         }
         
-        // Now path should be relative like: students/avatar/avatar_xxx.png
+        // Remove any leading slashes
         $cleanPath = ltrim($path, '/');
         
-        // Generate correct URL based on environment
+        // For Railway: Always use the correct base URL with /api/storage/
         if (self::isRailwayWithVolume()) {
-            $baseUrl = rtrim(env('APP_URL', 'https://be-ktx-production.up.railway.app'), '/');
-            $finalUrl = $baseUrl . '/api/storage/' . $cleanPath;
-            Log::info('Generated Railway URL', ['path' => $cleanPath, 'url' => $finalUrl]);
-            return $finalUrl;
+            // Use the correct Railway app URL (be-ktx-production, not bektx-production)
+            $baseUrl = 'https://be-ktx-production.up.railway.app';
+            return $baseUrl . '/api/storage/' . $cleanPath;
         }
         
         // Local development
