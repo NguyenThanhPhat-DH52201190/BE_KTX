@@ -66,15 +66,27 @@ class StorageHelper
             return null;
         }
         
-        // If it's already a full URL
+        // FIX: Convert full URLs to relative paths before processing
         if (filter_var($path, FILTER_VALIDATE_URL)) {
-            return $path;
+            // If it's a storage URL, extract the relative path
+            if (strpos($path, '/storage/') !== false) {
+                // Extract everything after '/storage/'
+                $parts = explode('/storage/', $path, 2);
+                if (isset($parts[1])) {
+                    $path = $parts[1];
+                    Log::info('Converted URL to relative path', ['original' => $originalPath ?? $path, 'relative' => $path]);
+                } else {
+                    return $path;
+                }
+            } else {
+                // Not a storage URL, return as-is
+                return $path;
+            }
         }
         
         // If using Railway volume, return API endpoint URL
         if (self::isRailwayWithVolume()) {
-            // FIXED: Keep the full path intact for nested directories
-            // Don't split into directory and filename - just pass the full path
+            // Keep the full path intact for nested directories
             return url('/api/storage/' . ltrim($path, '/'));
         }
         
