@@ -66,20 +66,39 @@ class StorageHelper
             return null;
         }
         
+        // Get the base URL from config (more reliable than url() helper)
+        $baseUrl = rtrim(config('app.url'), '/');
+        
+        // Check if we're on Railway (by environment or domain)
+        $isRailway = self::isRailwayWithVolume() || strpos($baseUrl, 'railway.app') !== false;
+        
         // If it's already a full URL
         if (filter_var($path, FILTER_VALIDATE_URL)) {
+            // If it's a Railway URL missing /api/, fix it
+            if ($isRailway && strpos($path, '/storage/') !== false && strpos($path, '/api/') === false) {
+                $fixed = str_replace('/storage/', '/api/storage/', $path);
+                Log::info('Fixed missing /api/ in existing URL', ['original' => $path, 'fixed' => $fixed]);
+                return $fixed;
+            }
             return $path;
         }
         
-        // If using Railway volume, return API endpoint URL
-        if (self::isRailwayWithVolume()) {
-            // FIXED: Keep the full path intact for nested directories
-            // Don't split into directory and filename - just pass the full path
-            return url('/api/storage/' . ltrim($path, '/'));
+        // Clean the path - remove any leading slashes or storage prefixes
+        $cleanPath = ltrim($path, '/');
+        $cleanPath = preg_replace('/^(storage\/|api\/storage\/)/', '', $cleanPath);
+        
+        // Generate URL based on environment
+        if ($isRailway) {
+            // Railway production - use API storage endpoint
+            $url = $baseUrl . '/api/storage/' . $cleanPath;
+            Log::info('Generated Railway URL', ['path' => $cleanPath, 'url' => $url]);
+            return $url;
         }
         
         // Local development - use storage URL
-        return Storage::url($path);
+        $url = $baseUrl . '/storage/' . $cleanPath;
+        Log::info('Generated local URL', ['path' => $cleanPath, 'url' => $url]);
+        return $url;
     }
     
     /**
