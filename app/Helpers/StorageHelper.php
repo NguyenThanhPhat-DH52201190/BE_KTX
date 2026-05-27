@@ -12,7 +12,6 @@ class StorageHelper
      */
     public static function getStorageDisk()
     {
-        // Check if running on Railway with volume
         if (self::isRailwayWithVolume()) {
             Log::info('Using railway_volume disk', [
                 'path' => env('RAILWAY_VOLUME_PATH'),
@@ -21,7 +20,6 @@ class StorageHelper
             return Storage::disk('railway_volume');
         }
         
-        // Local development - use public disk
         Log::info('Using public disk for local development');
         return Storage::disk('public');
     }
@@ -33,12 +31,10 @@ class StorageHelper
     {
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
-        // Check if Railway environment and volume path exists
         $isRailway = env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
         
-        // Also check if APP_URL contains railway.app (fallback)
         if (!$isRailway && strpos(env('APP_URL', ''), 'railway.app') !== false) {
             return true;
         }
@@ -54,12 +50,10 @@ class StorageHelper
         $disk = self::getStorageDisk();
         
         if ($customFilename) {
-            // Store with custom filename
             $filePath = $path . '/' . $customFilename;
             $disk->put($filePath, file_get_contents($file));
             return $filePath;
         } else {
-            // Store with generated filename
             return $disk->putFile($path, $file);
         }
     }
@@ -73,31 +67,34 @@ class StorageHelper
             return null;
         }
         
-        // FIX: If it's a full URL that's missing /api/ (like avatar), fix it
-        if (filter_var($path, FILTER_VALIDATE_URL)) {
-            // If it's a Railway storage URL missing /api/, convert it
-            if (strpos($path, 'railway.app') !== false && 
-                strpos($path, '/storage/') !== false && 
-                strpos($path, '/api/') === false) {
-                
-                $fixed = str_replace('/storage/', '/api/storage/', $path);
-                Log::info('Fixed avatar URL missing /api/', ['original' => $path, 'fixed' => $fixed]);
-                return $fixed;
+        // FORCE FIX: Extract relative path from any URL
+        if (is_string($path) && (strpos($path, 'http://') === 0 || strpos($path, 'https://') === 0)) {
+            // Try to extract the relative path from the URL
+            // Look for patterns like /storage/... or /api/storage/...
+            if (preg_match('/(?:storage|api\/storage)\/(.+)$/', $path, $matches)) {
+                $relativePath = $matches[1];
+                Log::info('Extracted relative path from URL', ['original' => $path, 'relative' => $relativePath]);
+                $path = $relativePath;
+            } else {
+                // Not a storage URL, return as-is
+                return $path;
             }
-            return $path;
         }
         
-        // If using Railway volume, return API endpoint URL
+        // Now path should be relative like: students/avatar/avatar_xxx.png
+        $cleanPath = ltrim($path, '/');
+        
+        // Generate correct URL based on environment
         if (self::isRailwayWithVolume()) {
-            $url = url('/api/storage/' . ltrim($path, '/'));
-            Log::info('Generated Railway URL', ['path' => $path, 'url' => $url]);
-            return $url;
+            $baseUrl = rtrim(env('APP_URL', 'https://be-ktx-production.up.railway.app'), '/');
+            $finalUrl = $baseUrl . '/api/storage/' . $cleanPath;
+            Log::info('Generated Railway URL', ['path' => $cleanPath, 'url' => $finalUrl]);
+            return $finalUrl;
         }
         
-        // Local development - use storage URL
-        $url = Storage::url($path);
-        Log::info('Generated local URL', ['path' => $path, 'url' => $url]);
-        return $url;
+        // Local development
+        $baseUrl = rtrim(env('APP_URL', 'http://localhost:8000'), '/');
+        return $baseUrl . '/storage/' . $cleanPath;
     }
     
     /**
