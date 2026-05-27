@@ -12,7 +12,6 @@ class StorageHelper
      */
     public static function getStorageDisk()
     {
-        // Check if running on Railway with volume
         if (self::isRailwayWithVolume()) {
             Log::info('Using railway_volume disk', [
                 'path' => env('RAILWAY_VOLUME_PATH'),
@@ -21,7 +20,6 @@ class StorageHelper
             return Storage::disk('railway_volume');
         }
         
-        // Local development - use public disk
         Log::info('Using public disk for local development');
         return Storage::disk('public');
     }
@@ -33,7 +31,6 @@ class StorageHelper
     {
         $volumePath = env('RAILWAY_VOLUME_PATH');
         
-        // Check if Railway environment and volume path exists
         return env('RAILWAY_ENVIRONMENT') === 'production' 
             && $volumePath 
             && file_exists($volumePath);
@@ -47,12 +44,10 @@ class StorageHelper
         $disk = self::getStorageDisk();
         
         if ($customFilename) {
-            // Store with custom filename
             $filePath = $path . '/' . $customFilename;
             $disk->put($filePath, file_get_contents($file));
             return $filePath;
         } else {
-            // Store with generated filename
             return $disk->putFile($path, $file);
         }
     }
@@ -66,28 +61,20 @@ class StorageHelper
             return null;
         }
         
-        // FIX FOR AVATAR: Convert full URLs to relative paths first
-        if (strpos($path, '/storage/') !== false) {
-            // Extract everything after '/storage/'
+        // 🔧 FIX: If path contains /storage/ without /api/, extract the relative path
+        if (strpos($path, '/storage/') !== false && strpos($path, '/api/') === false) {
             $parts = explode('/storage/', $path, 2);
-            if (isset($parts[1])) {
-                $path = $parts[1];
-                Log::info('Converted URL to relative path', ['relative' => $path]);
-            }
+            $path = $parts[1] ?? $path;
         }
         
-        // If it's already a full URL (but not a storage URL anymore)
+        // If it's already a full URL
         if (filter_var($path, FILTER_VALIDATE_URL)) {
             return $path;
         }
         
         // If using Railway volume, return API endpoint URL
         if (self::isRailwayWithVolume()) {
-            // FIXED: Keep the full path intact for nested directories
-            // Don't split into directory and filename - just pass the full path
-            $url = url('/api/storage/' . ltrim($path, '/'));
-            Log::info('Generated Railway URL', ['path' => $path, 'url' => $url]);
-            return $url;
+            return url('/api/storage/' . ltrim($path, '/'));
         }
         
         // Local development - use storage URL
