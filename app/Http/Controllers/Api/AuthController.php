@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 use App\Models\Account;
@@ -58,14 +59,34 @@ class AuthController extends Controller
 
     public function login(LoginRequest $request)
     {
-        // Hỗ trợ đăng nhập bằng student_code hoặc email của sinh viên
+        $student = null;
+        $account = null;
+
+        // Ưu tiên luồng sinh viên hiện có để giữ tương thích dữ liệu hiện tại.
         if ($request->filled('student_code')) {
             $student = Student::where('student_code', $request->student_code)->first();
+            $account = $student?->account;
         } else {
             $student = Student::where('email', $request->email)->first();
+            $account = $student?->account;
+
+            // Fallback cho tài khoản quản trị chưa liên kết sinh viên.
+            if (!$account && Schema::hasColumn('accounts', 'email')) {
+                $account = Account::where('email', $request->email)->first();
+            }
+
+            if (!$account) {
+                $adminLoginEmail = config('auth.admin_login_email');
+
+                if (!empty($adminLoginEmail) && strcasecmp((string) $request->email, (string) $adminLoginEmail) === 0) {
+                    $account = Account::where('role', 'admin')->orderBy('id')->first();
+                }
+            }
         }
 
-        $account = $student?->account;
+        if (!$student && $account?->student_id) {
+            $student = Student::find($account->student_id);
+        }
 
         if (!$account || !Hash::check($request->password, $account->password)) {
             return response()->json(['message' => 'Sai thông tin đăng nhập hoặc mật khẩu'], 401);
@@ -77,7 +98,7 @@ class AuthController extends Controller
             'token' => $token,
             'user' => [
                 'id' => $account->id,
-                'email' => $student?->email,
+                'email' => $student?->email ?? ($request->email ?? null),
                 'role' => $account->role,
                 'student_id' => $account->student_id,
                 'student_code' => $student?->student_code,
