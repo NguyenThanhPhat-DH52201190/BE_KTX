@@ -23,7 +23,7 @@ class RegisterRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'student_code' => 'required|string|exists:students,student_code|unique:accounts,student_code',
+            'student_code' => 'required|string|exists:students,student_code',
             'password' => 'required|min:6|confirmed',
         ];
     }
@@ -33,7 +33,6 @@ class RegisterRequest extends FormRequest
         return [
             'student_code.required' => 'Vui lòng nhập MSSV.',
             'student_code.exists' => 'MSSV không tồn tại trong hệ thống.',
-            'student_code.unique' => 'Tài khoản cho MSSV này đã tồn tại.',
             'password.required' => 'Vui lòng nhập mật khẩu.',
             'password.min' => 'Mật khẩu phải ít nhất :min ký tự.',
             'password.confirmed' => 'Xác nhận mật khẩu không khớp.',

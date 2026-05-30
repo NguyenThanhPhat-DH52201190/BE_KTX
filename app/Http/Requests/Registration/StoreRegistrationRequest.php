@@ -2,7 +2,7 @@
 
 namespace App\Http\Requests\Registration;
 
-use App\Models\Account;
+use App\Models\Student;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -29,37 +29,34 @@ class StoreRegistrationRequest extends FormRequest
             'course_year' => $this->input('course_year', $this->input('class')),
             'parent_relationship' => $this->input('parent_relationship', $this->input('relationship')),
         ]);
-            // Ánh xạ các trường cha mẹ/gia đình theo quy ước đặt tên của frontend
-            $this->merge([
-                'father_name' => $this->input('father_name', $this->input('fatherName')),
-                'father_birth_year' => $this->input('father_birth_year', $this->input('fatherBirthYear')),
-                'father_job' => $this->input('father_job', $this->input('fatherJob')),
-                'father_phone' => $this->input('father_phone', $this->input('fatherPhone')),
-                'mother_name' => $this->input('mother_name', $this->input('motherName')),
-                'mother_birth_year' => $this->input('mother_birth_year', $this->input('motherBirthYear')),
-                'mother_job' => $this->input('mother_job', $this->input('motherJob')),
-                'mother_phone' => $this->input('mother_phone', $this->input('motherPhone')),
-                'parent_address' => $this->input('parent_address', $this->input('familyContactAddress')),
-                'stay_from_date' => $this->normalizeDate($this->input('stay_from_date', $this->input('dormStartDate'))),
-                'stay_to_date' => $this->normalizeDate($this->input('stay_to_date', $this->input('dormEndDate'))),
-                'commitment_confirm' => $this->boolean('commitment_confirm', $this->input('commitment_confirmed')),
-            ]);
+        // Ánh xạ các trường cha mẹ/gia đình theo quy ước đặt tên của frontend
+        $this->merge([
+            'father_name' => $this->input('father_name', $this->input('fatherName')),
+            'father_birth_year' => $this->input('father_birth_year', $this->input('fatherBirthYear')),
+            'father_job' => $this->input('father_job', $this->input('fatherJob')),
+            'father_phone' => $this->input('father_phone', $this->input('fatherPhone')),
+            'mother_name' => $this->input('mother_name', $this->input('motherName')),
+            'mother_birth_year' => $this->input('mother_birth_year', $this->input('motherBirthYear')),
+            'mother_job' => $this->input('mother_job', $this->input('motherJob')),
+            'mother_phone' => $this->input('mother_phone', $this->input('motherPhone')),
+            'parent_address' => $this->input('parent_address', $this->input('familyContactAddress')),
+            'stay_from_date' => $this->normalizeDate($this->input('stay_from_date', $this->input('dormStartDate'))),
+            'stay_to_date' => $this->normalizeDate($this->input('stay_to_date', $this->input('dormEndDate'))),
+            'commitment_confirm' => $this->boolean('commitment_confirm', $this->input('commitment_confirmed')),
+        ]);
     }
 
     public function rules(): array
     {
         $currentStudentId = $this->currentStudentId();
-        $currentAccountId = $this->currentAccountId();
 
         return [
-            'email' => ['required', 'email', 'exists:accounts,email'],
+            'email' => ['required', 'email', 'exists:students,email'],
             'semester' => ['required', 'string', 'max:191'],
             'student_code' => [
                 'required',
                 'string',
                 'max:191',
-                // student_code hiện là duy nhất trong bảng accounts
-                Rule::unique('accounts', 'student_code')->ignore($currentAccountId),
             ],
             'full_name' => ['required', 'string', 'max:191'],
             'date_of_birth' => ['required', 'date'],
@@ -123,28 +120,12 @@ class StoreRegistrationRequest extends FormRequest
             return null;
         }
 
-        $account = Account::query()
-            ->select('student_id')
-            ->where('email', $email)
-            ->first();
-
-        return $account?->student_id;
-    }
-
-    private function currentAccountId(): ?int
-    {
-        $email = $this->input('email');
-
-        if (!$email) {
-            return null;
-        }
-
-        $account = Account::query()
+        $student = Student::query()
             ->select('id')
             ->where('email', $email)
             ->first();
 
-        return $account?->id;
+        return $student?->id;
     }
 
     private function normalizeDate($value): ?string

@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -39,18 +38,14 @@ class AuthController extends Controller
         }
 
         // Kiểm tra xem đã có account cho student này chưa
-        if (Account::where('student_id', $student->id)->exists() || Account::where('student_code', $student->student_code)->exists()) {
+        if (Account::where('student_id', $student->id)->exists()) {
             return response()->json(['message' => 'Tài khoản cho MSSV này đã tồn tại.'], 400);
         }
 
         $payload = [
-            'email' => $student->email,
             'password' => Hash::make($request->password),
             'role' => 'student',
-            'is_active' => 1,
             'student_id' => $student->id,
-            'student_code' => $student->student_code,
-            'full_name' => $student->full_name ?? null,
         ];
 
         $account = Account::create($payload);
@@ -63,21 +58,17 @@ class AuthController extends Controller
 
     public function login(LoginRequest $request)
     {
-        // Hỗ trợ đăng nhập bằng student_code hoặc email
+        // Hỗ trợ đăng nhập bằng student_code hoặc email của sinh viên
         if ($request->filled('student_code')) {
-            $account = Account::where('student_code', $request->student_code)->first();
+            $student = Student::where('student_code', $request->student_code)->first();
         } else {
-            $account = Account::where('email', $request->email)->first();
+            $student = Student::where('email', $request->email)->first();
         }
+
+        $account = $student?->account;
 
         if (!$account || !Hash::check($request->password, $account->password)) {
             return response()->json(['message' => 'Sai thông tin đăng nhập hoặc mật khẩu'], 401);
-        }
-
-        if (!$account->is_active) {
-            return response()->json([
-                'message' => 'Tài khoản bị khóa'
-            ], 403);
         }
 
         $token = $account->createToken('auth_token')->plainTextToken;
@@ -86,14 +77,13 @@ class AuthController extends Controller
             'token' => $token,
             'user' => [
                 'id' => $account->id,
-                'email' => $account->email,
+                'email' => $student?->email,
                 'role' => $account->role,
                 'student_id' => $account->student_id,
-                // Trả về cả biến thể snake_case và camelCase để tương thích với frontend.
-                'student_code' => $account->student_code,
-                'studentCode' => $account->student_code,
-                'full_name' => $account->full_name,
-                'fullName' => $account->full_name,
+                'student_code' => $student?->student_code,
+                'studentCode' => $student?->student_code,
+                'full_name' => $student?->full_name,
+                'fullName' => $student?->full_name,
             ]
         ]);
     }
@@ -105,18 +95,37 @@ class AuthController extends Controller
             'email' => 'required|email',
         ]);
 
-        $status = Password::sendResetLink(
-            $request->only('email')
+        $student = Student::where('email', $request->email)->first();
+
+        if (!$student || !$student->account) {
+            return response()->json(['message' => 'Email chưa được đăng ký'], 404);
+        }
+
+        $token = Str::random(64);
+
+        DB::table('password_resets')->updateOrInsert(
+            ['email' => $request->email],
+            [
+                'email' => $request->email,
+                'token' => $token,
+                'created_at' => now(),
+            ]
         );
 
+        Mail::send([], [], function ($message) use ($request, $token) {
+            $message->to($request->email)
+                ->subject('TRƯỜNG ĐH CÔNG NGHỆ SÀI GÒN - ĐẶT LẠI MẬT KHẨU')
+                ->html("<p>Link/token đặt lại mật khẩu của bạn: {$token}</p>");
+        });
+
         return response()->json([
-            'message' => __($status)
+            'message' => 'Đã gửi email đặt lại mật khẩu'
         ]);
     }
 
     public function checkEmail(CheckEmailRequest $request)
     {
-        $exists = Account::where('email', $request->email)->exists();
+        $exists = Student::where('email', $request->email)->exists();
 
         return response()->json([
             'exists' => $exists
@@ -170,8 +179,13 @@ class AuthController extends Controller
             ], 400);
         }
 
-        // Cập nhật mật khẩu
-        Account::where('email', $request->email)->update([
+        $student = Student::where('email', $request->email)->first();
+
+        if (!$student || !$student->account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
+
+        $student->account->update([
             'password' => Hash::make($request->password)
         ]);
 
@@ -185,7 +199,12 @@ class AuthController extends Controller
 
     public function sendOtp(SendOtpRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
+
+        if (!$account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
 
         $otp = random_int(100000, 999999);
 
@@ -228,7 +247,12 @@ class AuthController extends Controller
 
     public function resetWithOtp(ResetPasswordOtpRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
+
+        if (!$account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
 
         if ($account->otp_code != $request->otp) {
             return response()->json(['message' => 'OTP sai'], 400);

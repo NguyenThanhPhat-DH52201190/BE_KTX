@@ -22,13 +22,7 @@ class Building extends Model
         'building_code',
         'name',
         'address',
-        'total_floors',
-        'gender_config',
         'status',
-    ];
-
-    protected $casts = [
-        'gender_config' => 'array',
     ];
 
     public function floors(): HasMany

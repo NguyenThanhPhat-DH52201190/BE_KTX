@@ -17,7 +17,6 @@ return new class extends Migration
                 $table->id();
                 $table->string('building_code', 10);
                 $table->integer('floor_number');
-                $table->integer('total_rooms')->default(0);
                 $table->string('gender')->nullable();
                 $table->enum('status', ['active', 'maintenance'])->default('active');
 
@@ -53,7 +52,6 @@ return new class extends Migration
                     $floorId = DB::table('floors')->insertGetId([
                         'building_code' => $buildingCode,
                         'floor_number' => 1,
-                        'total_rooms' => DB::table('rooms')->where('building_code', $buildingCode)->count(),
                         'gender' => null,
                         'status' => 'active',
                     ]);

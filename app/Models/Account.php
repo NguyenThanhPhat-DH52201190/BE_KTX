@@ -13,11 +13,8 @@ class Account extends Model
 
     protected $fillable = [
         'student_id',
-        'student_code',
-        'email',
         'password',
         'role',
-        'is_active',
         'otp_code',
         'otp_expire',
     ];
@@ -26,8 +23,6 @@ class Account extends Model
         'password',
         'otp_code',
     ];
-
-    
 
     public function student(): BelongsTo
     {

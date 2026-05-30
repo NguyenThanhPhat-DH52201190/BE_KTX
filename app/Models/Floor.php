@@ -17,7 +17,6 @@ class Floor extends Model
     protected $fillable = [
         'building_code',
         'floor_number',
-        'total_rooms',
         'gender',
         'status',
     ];

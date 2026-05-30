@@ -60,7 +60,7 @@ class RegistrationController extends Controller
         return [
             'id' => $registration->id,
             'student_id' => $registration->student_id,
-            'email' => $registration->student?->email ?? $registration->student?->account?->email ?? $emailFallback ?? '',
+            'email' => $registration->student?->email ?? $emailFallback ?? '',
             'formData' => $formData,
             'status' => $registration->status,
             'semester' => $registration->semester,
@@ -114,13 +114,19 @@ class RegistrationController extends Controller
 
     public function store(StoreRegistrationRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
 
-        if (!$account) {
+        if (!$student) {
             return response()->json(['message' => 'Không tìm thấy user'], 404);
         }
 
-        $currentStudent = $account->student_id ? Student::find($account->student_id) : null;
+        $account = $student->account;
+
+        if (!$account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
+
+        $currentStudent = $student;
         $data = $request->validated();
 
         // Handle file uploads with Railway volume support
@@ -206,7 +212,7 @@ class RegistrationController extends Controller
                     'faculty' => $data['faculty'],
                     'course_year' => $data['course_year'],
                     'phone' => $data['phone'],
-                    'email' => $account->email,
+                    'email' => $data['email'],
                     'cccd' => $data['cccd'],
                     'cccd_issued_date' => $data['cccd_issued_date'],
                     'cccd_issued_place' => $data['cccd_issued_place'],
@@ -225,9 +231,6 @@ class RegistrationController extends Controller
                     $account->student_id = $student->id;
                     $account->save();
                 }
-
-                $account->student_code = $data['student_code'];
-                $account->save();
 
                 $hasPendingSameSemester = Registration::where('student_id', $student->id)
                     ->where('semester', $data['semester'])
@@ -330,10 +333,16 @@ class RegistrationController extends Controller
         $email = $request->query('email');
         $semester = $request->query('semester', '2024-2025');
 
-        $account = Account::where('email', $email)->first();
+        $student = Student::where('email', $email)->first();
+
+        if (!$student) {
+            return response()->json(['message' => 'Không tìm thấy user'], 404);
+        }
+
+        $account = $student->account;
 
         if (!$account) {
-            return response()->json(['message' => 'Không tìm thấy user'], 404);
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
         }
 
         if (!$account->student_id) {
@@ -450,7 +459,8 @@ class RegistrationController extends Controller
             'bed_id' => 'required|integer|exists:beds,id',
         ]);
 
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
 
         if (!$account || !$account->student_id) {
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
@@ -552,7 +562,8 @@ class RegistrationController extends Controller
     {
         Log::info("RegistrationController.getRegistrationHistory - email: $email, semester: $semester");
         
-        $account = Account::where('email', $email)->first();
+        $student = Student::where('email', $email)->first();
+        $account = $student?->account;
 
         if (!$account || !$account->student_id) {
             Log::info("RegistrationController.getRegistrationHistory - student not found");
