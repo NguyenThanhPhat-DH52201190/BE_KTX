@@ -38,6 +38,24 @@ return new class extends Migration
             });
         }
 
+        if (Schema::hasTable('violations')) {
+            Schema::table('violations', function (Blueprint $table) {
+                if (Schema::hasColumn('violations', 'student_id')) {
+                    $table->dropConstrainedForeignId('student_id');
+                }
+
+                if (Schema::hasColumn('violations', 'room_id')) {
+                    $table->dropConstrainedForeignId('room_id');
+                }
+
+                if (!Schema::hasColumn('violations', 'occupancy_id')) {
+                    $table->foreignId('occupancy_id');
+                }
+
+                $table->foreign('occupancy_id')->references('id')->on('occupancy')->cascadeOnDelete();
+            });
+        }
+
         if (Schema::hasTable('room_change_log')) {
             Schema::table('room_change_log', function (Blueprint $table) {
                 if (Schema::hasColumn('room_change_log', 'student_id')) {
@@ -94,6 +112,22 @@ return new class extends Migration
 
         if (Schema::hasTable('occupancy')) {
             Schema::dropIfExists('occupancy');
+        }
+
+        if (Schema::hasTable('violations')) {
+            Schema::table('violations', function (Blueprint $table) {
+                if (Schema::hasColumn('violations', 'occupancy_id')) {
+                    $table->dropConstrainedForeignId('occupancy_id');
+                }
+
+                if (!Schema::hasColumn('violations', 'student_id')) {
+                    $table->foreignId('student_id')->constrained('students')->cascadeOnDelete();
+                }
+
+                if (!Schema::hasColumn('violations', 'room_id')) {
+                    $table->foreignId('room_id')->constrained('rooms')->cascadeOnDelete();
+                }
+            });
         }
 
         if (Schema::hasTable('registrations')) {
