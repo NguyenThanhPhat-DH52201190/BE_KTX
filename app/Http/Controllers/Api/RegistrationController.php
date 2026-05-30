@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Registration\StoreRegistrationRequest;
 use Illuminate\Http\Request;
 use App\Models\Registration;
+use App\Models\Occupancy;
 use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
@@ -45,47 +46,69 @@ class RegistrationController extends Controller
         // Local development: use /storage/
         return url('/storage/' . $cleanPath);
     }
+
+    private function formatRegistration(Registration $registration, ?string $emailFallback = null): array
+    {
+        $formData = null;
+        if (!empty($registration->form_data)) {
+            $decoded = json_decode($registration->form_data, true);
+            if (is_array($decoded)) {
+                $formData = $decoded;
+            }
+        }
+
+        return [
+            'id' => $registration->id,
+            'student_id' => $registration->student_id,
+            'email' => $registration->student?->email ?? $registration->student?->account?->email ?? $emailFallback ?? '',
+            'formData' => $formData,
+            'status' => $registration->status,
+            'semester' => $registration->semester,
+            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
+            'father_name' => $registration->father_name,
+            'father_phone' => $registration->father_phone,
+            'father_job' => $registration->father_job,
+            'mother_name' => $registration->mother_name,
+            'mother_phone' => $registration->mother_phone,
+            'mother_job' => $registration->mother_job,
+            'parent_address' => $registration->parent_address,
+            'stay_from_date' => $registration->stay_from_date,
+            'stay_to_date' => $registration->stay_to_date,
+            'commitment_confirm' => $registration->commitment_confirm,
+            'reason' => $registration->reason,
+            'assigned_room_id' => $registration->occupancy?->room_id,
+            'assigned_bed_id' => $registration->occupancy?->bed_id,
+            'note' => $registration->note,
+            'created_at' => $registration->created_at,
+            'student' => $registration->student,
+        ];
+    }
+
+    private function recordRoomChange(?Occupancy $occupancy, ?int $oldRoomId, ?int $oldBedId, ?int $newRoomId, ?int $newBedId, ?string $reason = null): void
+    {
+        if (!$occupancy || ($oldRoomId === $newRoomId && $oldBedId === $newBedId)) {
+            return;
+        }
+
+        DB::table('room_change_log')->insert([
+            'occupancy_id' => $occupancy->id,
+            'old_room_id' => $oldRoomId,
+            'old_bed_id' => $oldBedId,
+            'new_room_id' => $newRoomId,
+            'new_bed_id' => $newBedId,
+            'transfer_reason' => $reason,
+            'transfered_at' => now(),
+        ]);
+    }
     
     public function index()
     {
-        $registrations = Registration::with(['student', 'student.account'])->get();
-        
-        return $registrations->map(function ($registration) {
-            $formData = null;
-            if (!empty($registration->form_data)) {
-                $decoded = json_decode($registration->form_data, true);
-                if (is_array($decoded)) {
-                    $formData = $decoded;
-                }
-            }
+        $registrations = Registration::with(['student', 'student.account', 'occupancy'])->get();
 
-            return [
-                'id' => $registration->id,
-                'student_id' => $registration->student_id,
-                'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
-                'formData' => $formData,
-                'status' => $registration->status,
-                'semester' => $registration->semester,
-                'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
-                'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-                'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
-                'father_name' => $registration->father_name,
-                'father_phone' => $registration->father_phone,
-                'father_job' => $registration->father_job,
-                'mother_name' => $registration->mother_name,
-                'mother_phone' => $registration->mother_phone,
-                'mother_job' => $registration->mother_job,
-                'parent_address' => $registration->parent_address,
-                'stay_from_date' => $registration->stay_from_date,
-                'stay_to_date' => $registration->stay_to_date,
-                'commitment_confirm' => $registration->commitment_confirm,
-                'reason' => $registration->reason,
-                'assigned_room_id' => $registration->assigned_room_id,
-                'assigned_bed_id' => $registration->assigned_bed_id,
-                'note' => $registration->note,
-                'created_at' => $registration->created_at,
-                'student' => $registration->student,
-            ];
+        return $registrations->map(function ($registration) {
+            return $this->formatRegistration($registration);
         });
     }
 
@@ -317,7 +340,7 @@ class RegistrationController extends Controller
             return response()->json(null);
         }
 
-        $registration = Registration::with(['student', 'student.account'])
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])
             ->where('student_id', $account->student_id)
             ->where('semester', $semester)
             ->latest('id')
@@ -327,33 +350,7 @@ class RegistrationController extends Controller
             return response()->json(null);
         }
 
-        return response()->json([
-            'id' => $registration->id,
-            'student_id' => $registration->student_id,
-            'formData' => (!empty($registration->form_data) ? json_decode($registration->form_data, true) : null),
-            'email' => $registration->student?->email ?? $email ?? '',
-            'status' => $registration->status,
-            'semester' => $registration->semester,
-            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
-            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
-            'father_name' => $registration->father_name,
-            'father_phone' => $registration->father_phone,
-            'father_job' => $registration->father_job,
-            'mother_name' => $registration->mother_name,
-            'mother_phone' => $registration->mother_phone,
-            'mother_job' => $registration->mother_job,
-            'parent_address' => $registration->parent_address,
-            'stay_from_date' => $registration->stay_from_date,
-            'stay_to_date' => $registration->stay_to_date,
-            'commitment_confirm' => $registration->commitment_confirm,
-            'reason' => $registration->reason,
-            'assigned_room_id' => $registration->assigned_room_id,
-            'assigned_bed_id' => $registration->assigned_bed_id,
-            'note' => $registration->note,
-            'created_at' => $registration->created_at,
-            'student' => $registration->student,
-        ]);
+        return response()->json($this->formatRegistration($registration, $email));
     }
 
     public function approve($id, Request $request)
@@ -399,14 +396,49 @@ class RegistrationController extends Controller
             'room_id' => 'required|integer|exists:rooms,id',
         ]);
 
-        $registration = Registration::find($id);
+        $registration = Registration::with('occupancy')->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
-        $registration->assigned_room_id = $request->room_id;
-        $registration->save();
+        $occupancy = Occupancy::firstOrNew([
+            'student_id' => $registration->student_id,
+        ]);
+
+        $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
+        $oldBedId = $occupancy->exists ? $occupancy->bed_id : null;
+
+        if ($occupancy->exists && $occupancy->bed_id) {
+            $currentBed = Bed::find($occupancy->bed_id);
+            if (!$currentBed || (int) $currentBed->room_id !== (int) $request->room_id) {
+                if ($currentBed) {
+                    $currentBed->status = 'empty';
+                    $currentBed->save();
+                }
+
+                $occupancy->bed_id = null;
+            }
+        }
+
+        $occupancy->registration_id = $registration->id;
+        $occupancy->room_id = $request->room_id;
+        $occupancy->status = $occupancy->bed_id ? 'occupied' : 'assigned';
+
+        if ($occupancy->status === 'occupied' && !$occupancy->check_in_date) {
+            $occupancy->check_in_date = now()->toDateString();
+        }
+
+        $occupancy->save();
+
+        $this->recordRoomChange(
+            $occupancy,
+            $oldRoomId,
+            $oldBedId,
+            (int) $request->room_id,
+            $occupancy->bed_id,
+            'assign_room'
+        );
 
         return response()->json(['message' => 'Đã phân phòng']);
     }
@@ -424,7 +456,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
-        $registration = Registration::where('student_id', $account->student_id)
+        $registration = Registration::with('occupancy')->where('student_id', $account->student_id)
             ->where('status', 'pending')
             ->latest('id')
             ->first();
@@ -438,12 +470,40 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường không tồn tại'], 404);
         }
 
+        $occupancy = Occupancy::firstOrNew([
+            'student_id' => $registration->student_id,
+        ]);
+
+        $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
+        $oldBedId = $occupancy->exists ? $occupancy->bed_id : null;
+
+        if ($occupancy->exists && $occupancy->bed_id && (int) $occupancy->bed_id !== (int) $bed->id) {
+            $previousBed = Bed::find($occupancy->bed_id);
+            if ($previousBed) {
+                $previousBed->status = 'empty';
+                $previousBed->save();
+            }
+        }
+
         $bed->status = 'occupied';
         $bed->save();
 
-        $registration->assigned_bed_id = $bed->id;
-        $registration->assigned_room_id = $bed->room_id;
-        $registration->save();
+        $occupancy->registration_id = $registration->id;
+        $occupancy->room_id = $bed->room_id;
+        $occupancy->bed_id = $bed->id;
+        $occupancy->status = 'occupied';
+        $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
+        $occupancy->check_out_date = null;
+        $occupancy->save();
+
+        $this->recordRoomChange(
+            $occupancy,
+            $oldRoomId,
+            $oldBedId,
+            (int) $bed->room_id,
+            (int) $bed->id,
+            'select_bed'
+        );
 
         return response()->json(['message' => 'Đã chọn giường']);
     }
@@ -473,7 +533,7 @@ class RegistrationController extends Controller
     {
         Log::info("RegistrationController.show($id) - fetching registration with id: $id");
         
-        $registration = Registration::with(['student', 'student.account'])->find($id);
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
         
         Log::info("RegistrationController.show($id) - found registration", [
             'id' => $registration?->id,
@@ -485,41 +545,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy'], 404);
         }
 
-        $formData = null;
-        if (!empty($registration->form_data)) {
-            $decoded = json_decode($registration->form_data, true);
-            if (is_array($decoded)) {
-                $formData = $decoded;
-            }
-        }
-
-        return response()->json([
-            'id' => $registration->id,
-            'student_id' => $registration->student_id,
-            'formData' => $formData,
-            'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
-            'status' => $registration->status,
-            'semester' => $registration->semester,
-            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
-            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
-            'father_name' => $registration->father_name,
-            'father_phone' => $registration->father_phone,
-            'father_job' => $registration->father_job,
-            'mother_name' => $registration->mother_name,
-            'mother_phone' => $registration->mother_phone,
-            'mother_job' => $registration->mother_job,
-            'parent_address' => $registration->parent_address,
-            'stay_from_date' => $registration->stay_from_date,
-            'stay_to_date' => $registration->stay_to_date,
-            'commitment_confirm' => $registration->commitment_confirm,
-            'reason' => $registration->reason,
-            'assigned_room_id' => $registration->assigned_room_id,
-            'assigned_bed_id' => $registration->assigned_bed_id,
-            'note' => $registration->note,
-            'created_at' => $registration->created_at,
-            'student' => $registration->student,
-        ]);
+        return response()->json($this->formatRegistration($registration));
     }
 
     public function getRegistrationHistory($email, $semester)
@@ -533,7 +559,7 @@ class RegistrationController extends Controller
             return response()->json([]);
         }
 
-        $registrations = Registration::with(['student', 'student.account'])
+        $registrations = Registration::with(['student', 'student.account', 'occupancy'])
             ->where('student_id', $account->student_id)
             ->where('semester', $semester)
             ->orderBy('id', 'asc')
@@ -545,41 +571,7 @@ class RegistrationController extends Controller
         ]);
 
         return $registrations->map(function ($registration) {
-            $formData = null;
-            if (!empty($registration->form_data)) {
-                $decoded = json_decode($registration->form_data, true);
-                if (is_array($decoded)) {
-                    $formData = $decoded;
-                }
-            }
-
-            return [
-                'id' => $registration->id,
-                'student_id' => $registration->student_id,
-                'email' => $registration->student?->email ?? '',
-                'formData' => $formData,
-                'status' => $registration->status,
-                'semester' => $registration->semester,
-                'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
-                'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-                'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
-                'father_name' => $registration->father_name,
-                'father_phone' => $registration->father_phone,
-                'father_job' => $registration->father_job,
-                'mother_name' => $registration->mother_name,
-                'mother_phone' => $registration->mother_phone,
-                'mother_job' => $registration->mother_job,
-                'parent_address' => $registration->parent_address,
-                'stay_from_date' => $registration->stay_from_date,
-                'stay_to_date' => $registration->stay_to_date,
-                'commitment_confirm' => $registration->commitment_confirm,
-                'reason' => $registration->reason,
-                'assigned_room_id' => $registration->assigned_room_id,
-                'assigned_bed_id' => $registration->assigned_bed_id,
-                'note' => $registration->note,
-                'created_at' => $registration->created_at,
-                'student' => $registration->student,
-            ];
+            return $this->formatRegistration($registration);
         });
     }
 }

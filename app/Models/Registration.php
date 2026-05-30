@@ -3,6 +3,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use App\Models\Occupancy;
 
 class Registration extends Model
 {
@@ -31,8 +33,6 @@ class Registration extends Model
         'status',
         'note',
         'reason',
-        'assigned_bed_id',
-        'assigned_room_id',
         'approved_at',
 
     ];
@@ -41,5 +41,10 @@ class Registration extends Model
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
+    }
+
+    public function occupancy(): HasOne
+    {
+        return $this->hasOne(Occupancy::class);
     }
 }
