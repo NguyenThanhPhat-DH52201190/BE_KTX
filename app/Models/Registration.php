@@ -10,6 +10,7 @@ class Registration extends Model
 
     protected $fillable = [
         'student_id',
+        'avatar_url',
         'form_data',
         'semester',
         'school_year',

@@ -10,6 +10,7 @@ use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
 use App\Models\Bed;
+use App\Models\Floor;
 use App\Helpers\StorageHelper;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -67,7 +68,7 @@ class RegistrationController extends Controller
                 'semester' => $registration->semester,
                 'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
                 'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-                'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
+                'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,
@@ -224,6 +225,7 @@ class RegistrationController extends Controller
 
                 $registrationPayload = [
                     'student_id' => $student->id,
+                    'avatar_url' => $data['avatar'] ?? $existingAvatar,
                     'cccd_front_url' => $data['cccd_front_url'] ?? null,
                     'cccd_back_url' => $data['cccd_back_url'] ?? null,
                     'semester' => $data['semester'],
@@ -334,7 +336,7 @@ class RegistrationController extends Controller
             'semester' => $registration->semester,
             'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
             'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-            'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
+            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -372,7 +374,7 @@ class RegistrationController extends Controller
 
     public function getRooms()
     {
-        $rooms = Room::with('beds')->get();
+        $rooms = Room::with(['beds', 'floor'])->get();
 
         return $rooms->map(function ($room) {
             $totalBeds = $room->beds->count();
@@ -380,7 +382,9 @@ class RegistrationController extends Controller
 
             return [
                 'id' => $room->id,
-                'building_code' => $room->building_code,
+                'building_code' => $room->floor?->building_code,
+                'floor_id' => $room->floor_id,
+                'floor_number' => $room->floor?->floor_number,
                 'room_number' => $room->room_number,
                 'totalBeds' => $totalBeds,
                 'availableBeds' => $availableBeds,
@@ -498,7 +502,7 @@ class RegistrationController extends Controller
             'semester' => $registration->semester,
             'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
             'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-            'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
+            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
             'father_name' => $registration->father_name,
             'father_phone' => $registration->father_phone,
             'father_job' => $registration->father_job,
@@ -558,7 +562,7 @@ class RegistrationController extends Controller
                 'semester' => $registration->semester,
                 'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
                 'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
-                'avatarUrl' => $this->getImageUrl($registration->student?->avatar),
+                'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
                 'father_name' => $registration->father_name,
                 'father_phone' => $registration->father_phone,
                 'father_job' => $registration->father_job,

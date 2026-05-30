@@ -27,33 +27,31 @@ class AuthController extends Controller
 {
     public function register(RegisterRequest $request)
     {
+        // Lấy sinh viên theo MSSV (RegisterRequest đã xác thực tồn tại trong students)
+        $student = Student::where('student_code', $request->student_code)->first();
+
+        if (!$student) {
+            return response()->json(['message' => 'MSSV không tồn tại'], 400);
+        }
+
+        if (empty($student->email)) {
+            return response()->json(['message' => 'Sinh viên chưa có email trong hồ sơ. Vui lòng liên hệ quản trị.'], 400);
+        }
+
+        // Kiểm tra xem đã có account cho student này chưa
+        if (Account::where('student_id', $student->id)->exists() || Account::where('student_code', $student->student_code)->exists()) {
+            return response()->json(['message' => 'Tài khoản cho MSSV này đã tồn tại.'], 400);
+        }
+
         $payload = [
-            'email' => $request->email,
+            'email' => $student->email,
             'password' => Hash::make($request->password),
             'role' => 'student',
             'is_active' => 1,
+            'student_id' => $student->id,
+            'student_code' => $student->student_code,
+            'full_name' => $student->full_name ?? null,
         ];
-
-        if ($request->filled('student_code')) {
-            $payload['student_code'] = $request->input('student_code');
-        }
-
-        if ($request->filled('full_name')) {
-            $payload['full_name'] = $request->input('full_name');
-        }
-
-        // Nếu đã có bản ghi sinh viên cùng email thì liên kết vào đó.
-        $student = Student::where('email', $request->email)->first();
-        if ($student) {
-            $payload['student_id'] = $student->id;
-            // Nếu payload thiếu student_code/full_name thì thử sao chép từ sinh viên (nếu có).
-            if (empty($payload['student_code']) && isset($student->student_code)) {
-                $payload['student_code'] = $student->student_code;
-            }
-            if (empty($payload['full_name']) && isset($student->full_name)) {
-                $payload['full_name'] = $student->full_name;
-            }
-        }
 
         $account = Account::create($payload);
 
@@ -65,12 +63,15 @@ class AuthController extends Controller
 
     public function login(LoginRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        // Hỗ trợ đăng nhập bằng student_code hoặc email
+        if ($request->filled('student_code')) {
+            $account = Account::where('student_code', $request->student_code)->first();
+        } else {
+            $account = Account::where('email', $request->email)->first();
+        }
 
         if (!$account || !Hash::check($request->password, $account->password)) {
-            return response()->json([
-                'message' => 'Sai email hoặc mật khẩu'
-            ], 401);
+            return response()->json(['message' => 'Sai thông tin đăng nhập hoặc mật khẩu'], 401);
         }
 
         if (!$account->is_active) {
@@ -124,11 +125,34 @@ class AuthController extends Controller
 
     public function checkStudentCode(CheckStudentCodeRequest $request)
     {
-        // student_code hiện được lưu trong bảng accounts
-        $exists = \App\Models\Account::where('student_code', $request->student_code)->exists();
+        // Trả về thông tin sinh viên nếu có
+        $student = Student::where('student_code', $request->student_code)->first();
+
+        if (!$student) {
+            return response()->json(['exists' => false]);
+        }
 
         return response()->json([
-            'exists' => $exists
+            'exists' => true,
+            'student' => [
+                'student_code' => $student->student_code,
+                'email' => $student->email,
+                'full_name' => $student->full_name,
+                'date_of_birth' => $student->date_of_birth,
+                'gender' => $student->gender,
+                'class_name' => $student->class_name,
+                'faculty' => $student->faculty,
+                'course_year' => $student->course_year,
+                'phone' => $student->phone,
+                'cccd' => $student->cccd,
+                'cccd_issued_date' => $student->cccd_issued_date,
+                'cccd_issued_place' => $student->cccd_issued_place,
+                'nationality' => $student->nationality,
+                'ethnicity' => $student->ethnicity,
+                'religion' => $student->religion,
+                'permanent_address' => $student->permanent_address,
+                'avatar' => $student->avatar,
+            ]
         ]);
     }
 
