@@ -432,6 +432,7 @@ class RegistrationController extends Controller
 
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $request->room_id;
+        $occupancy->bed_id = null;
         $occupancy->status = $occupancy->bed_id ? 'occupied' : 'assigned';
 
         if ($occupancy->status === 'occupied' && !$occupancy->check_in_date) {
@@ -467,7 +468,7 @@ class RegistrationController extends Controller
         }
 
         $registration = Registration::with('occupancy')->where('student_id', $account->student_id)
-            ->where('status', 'pending')
+            ->where('status', 'approved')
             ->latest('id')
             ->first();
 
@@ -476,8 +477,27 @@ class RegistrationController extends Controller
         }
 
         $bed = Bed::find($request->bed_id);
+        if ($bed && strtolower((string) $bed->status) === 'maintenance') {
+            return response()->json(['message' => 'GiÆ°á»ng Ä‘ang báº£o trÃ¬ nÃªn khÃ´ng thá»ƒ chá»n'], 422);
+        }
+
+        if ($bed) {
+            $isOccupiedByAnotherStudent = Occupancy::query()
+                ->where('bed_id', $bed->id)
+                ->where('student_id', '!=', $registration->student_id)
+                ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED'])
+                ->exists();
+
+            if ($isOccupiedByAnotherStudent) {
+                return response()->json(['message' => 'GiÆ°á»ng Ä‘Ã£ cÃ³ sinh viÃªn á»Ÿ'], 422);
+            }
+        }
         if (!$bed) {
             return response()->json(['message' => 'Giường không tồn tại'], 404);
+        }
+
+        if ($registration->occupancy?->room_id && (int) $registration->occupancy->room_id !== (int) $bed->room_id) {
+            return response()->json(['message' => 'Giường không thuộc phòng đã phân.'], 422);
         }
 
         $occupancy = Occupancy::firstOrNew([

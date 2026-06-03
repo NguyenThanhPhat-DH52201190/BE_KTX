@@ -5,6 +5,8 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\RegistrationController;
 use App\Http\Controllers\Api\StorageController;
+use App\Http\Controllers\Api\BuildingController;
+use App\Http\Controllers\Api\RoomController;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -33,4 +35,18 @@ Route::put('/registration/{id}/assign-room', [RegistrationController::class, 'as
 Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
 
 // Danh sách phòng dùng cho frontend
-Route::get('/rooms', [RegistrationController::class, 'getRooms']);
+Route::get('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'index']);
+Route::post('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'store']);
+Route::put('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'update']);
+Route::delete('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'destroy']);
+Route::put('/rooms/{roomId}/beds/{bedId}', [\App\Http\Controllers\Api\RoomController::class, 'updateBed']);
+
+// Quản lý tòa
+Route::get('/buildings', [\App\Http\Controllers\Api\BuildingController::class, 'index']);
+Route::post('/buildings', [\App\Http\Controllers\Api\BuildingController::class, 'store']);
+Route::get('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'show']);
+Route::put('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'update']);
+Route::delete('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'destroy']);
+Route::post('/buildings/{buildingCode}/floors', [\App\Http\Controllers\Api\BuildingController::class, 'storeFloor']);
+Route::put('/buildings/{buildingCode}/floors/{floorNumber}', [\App\Http\Controllers\Api\BuildingController::class, 'updateFloor']);
+Route::delete('/buildings/{buildingCode}/floors/{floorNumber}', [\App\Http\Controllers\Api\BuildingController::class, 'destroyFloor']);
