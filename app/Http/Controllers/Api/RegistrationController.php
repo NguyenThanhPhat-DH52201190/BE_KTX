@@ -80,10 +80,26 @@ class RegistrationController extends Controller
             'reason' => $registration->reason,
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
+            'bed_approval_status' => $this->formatBedApprovalStatus($registration->occupancy?->status),
             'note' => $registration->note,
             'created_at' => $registration->created_at,
             'student' => $registration->student,
         ];
+    }
+
+    private function formatBedApprovalStatus(?string $status): ?string
+    {
+        $normalized = strtolower(trim((string) $status));
+
+        if ($normalized === 'occupied' || $normalized === 'active') {
+            return 'approved';
+        }
+
+        if ($normalized === 'pending' || $normalized === 'rejected') {
+            return $normalized;
+        }
+
+        return null;
     }
 
     private function recordRoomChange(?Occupancy $occupancy, ?int $oldRoomId, ?int $oldBedId, ?int $newRoomId, ?int $newBedId, ?string $reason = null): void
@@ -485,7 +501,7 @@ class RegistrationController extends Controller
             $isOccupiedByAnotherStudent = Occupancy::query()
                 ->where('bed_id', $bed->id)
                 ->where('student_id', '!=', $registration->student_id)
-                ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED'])
+                ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
                 ->exists();
 
             if ($isOccupiedByAnotherStudent) {
@@ -515,14 +531,10 @@ class RegistrationController extends Controller
             }
         }
 
-        $bed->status = 'occupied';
-        $bed->save();
-
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $bed->room_id;
         $occupancy->bed_id = $bed->id;
-        $occupancy->status = 'occupied';
-        $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
+        $occupancy->status = 'pending';
         $occupancy->check_out_date = null;
         $occupancy->save();
 
@@ -536,6 +548,72 @@ class RegistrationController extends Controller
         );
 
         return response()->json(['message' => 'Đã chọn giường']);
+    }
+
+    public function approveBed($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        if (!$occupancy || !$occupancy->bed_id) {
+            return response()->json(['message' => 'Sinh viên chưa chọn giường.'], 422);
+        }
+
+        $isOccupiedByAnotherStudent = Occupancy::query()
+            ->where('bed_id', $occupancy->bed_id)
+            ->where('student_id', '!=', $registration->student_id)
+            ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
+            ->exists();
+
+        if ($isOccupiedByAnotherStudent) {
+            return response()->json(['message' => 'Giường đã có sinh viên ở.'], 422);
+        }
+
+        $occupancy->status = 'occupied';
+        $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
+        $occupancy->check_out_date = null;
+        $occupancy->save();
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'occupied';
+            $bed->save();
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function rejectBed($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        if (!$occupancy || !$occupancy->bed_id) {
+            return response()->json(['message' => 'Sinh viên chưa chọn giường.'], 422);
+        }
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'empty';
+            $bed->save();
+        }
+
+        $occupancy->status = 'rejected';
+        $occupancy->check_in_date = null;
+        $occupancy->check_out_date = null;
+        $occupancy->save();
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
 
     public function reject($id, Request $request)

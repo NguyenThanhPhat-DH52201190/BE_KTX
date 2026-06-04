@@ -33,6 +33,8 @@ Route::put('/registration/{id}/reject', [RegistrationController::class, 'reject'
 // Hành động quản trị tùy chọn: phân phòng và chọn giường (frontend cần các tuyến này)
 Route::put('/registration/{id}/assign-room', [RegistrationController::class, 'assignRoom']);
 Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
+Route::put('/registration/{id}/approve-bed', [RegistrationController::class, 'approveBed']);
+Route::put('/registration/{id}/reject-bed', [RegistrationController::class, 'rejectBed']);
 
 // Danh sách phòng dùng cho frontend
 Route::get('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'index']);
