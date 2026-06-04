@@ -93,18 +93,23 @@ class AuthController extends Controller
         }
 
         $token = $account->createToken('auth_token')->plainTextToken;
+        $isAdmin = $account->role === 'admin';
+        $accountEmail = Schema::hasColumn('accounts', 'email') ? ($account->email ?? null) : null;
+        $adminEmail = $isAdmin
+            ? ($accountEmail ?? config('auth.admin_login_email') ?? $request->email)
+            : null;
 
         return response()->json([
             'token' => $token,
             'user' => [
                 'id' => $account->id,
-                'email' => $student?->email ?? ($request->email ?? null),
+                'email' => $adminEmail ?? $student?->email ?? ($request->email ?? null),
                 'role' => $account->role,
-                'student_id' => $account->student_id,
-                'student_code' => $student?->student_code,
-                'studentCode' => $student?->student_code,
-                'full_name' => $student?->full_name,
-                'fullName' => $student?->full_name,
+                'student_id' => $isAdmin ? null : $account->student_id,
+                'student_code' => $isAdmin ? null : $student?->student_code,
+                'studentCode' => $isAdmin ? null : $student?->student_code,
+                'full_name' => $isAdmin ? null : $student?->full_name,
+                'fullName' => $isAdmin ? null : $student?->full_name,
             ]
         ]);
     }
