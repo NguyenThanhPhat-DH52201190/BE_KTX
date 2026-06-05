@@ -19,6 +19,7 @@ class Occupancy extends Model
         'check_in_date',
         'check_out_date',
         'status',
+        'reason',
     ];
 
     public function registration(): BelongsTo

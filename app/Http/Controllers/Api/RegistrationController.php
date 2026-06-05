@@ -81,6 +81,10 @@ class RegistrationController extends Controller
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
             'bed_approval_status' => $this->formatBedApprovalStatus($registration->occupancy?->status),
+            'occupancy_status' => $registration->occupancy?->status,
+            'occupancy_reason' => $registration->occupancy?->reason,
+            'check_in_date' => $registration->occupancy?->check_in_date,
+            'check_out_date' => $registration->occupancy?->check_out_date,
             'note' => $registration->note,
             'created_at' => $registration->created_at,
             'student' => $registration->student,
@@ -91,7 +95,7 @@ class RegistrationController extends Controller
     {
         $normalized = strtolower(trim((string) $status));
 
-        if ($normalized === 'occupied' || $normalized === 'active') {
+        if (in_array($normalized, ['occupied', 'active', 'checkout_requested', 'checked_out', 'forced_checkout'], true)) {
             return 'approved';
         }
 
@@ -612,6 +616,89 @@ class RegistrationController extends Controller
         $occupancy->check_in_date = null;
         $occupancy->check_out_date = null;
         $occupancy->save();
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function requestCheckout(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email',
+            'reason' => 'required|string|max:1000',
+            'expected_leave_date' => 'nullable|date',
+        ]);
+
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
+
+        if (!$student || !$account?->student_id) {
+            return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
+        }
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])
+            ->where('student_id', $account->student_id)
+            ->where('status', 'approved')
+            ->latest('id')
+            ->first();
+
+        if (!$registration || !$registration->occupancy || !$registration->occupancy->bed_id) {
+            return response()->json(['message' => 'Sinh viên chưa có thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+        $occupancy->status = 'checkout_requested';
+        $occupancy->reason = $request->reason;
+        $occupancy->check_out_date = $request->expected_leave_date;
+        $occupancy->save();
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function confirmCheckout($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Không tìm thấy thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+        $occupancy->status = 'checked_out';
+        $occupancy->check_out_date = $occupancy->check_out_date ?? now()->toDateString();
+        $occupancy->save();
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'empty';
+            $bed->save();
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function forceCheckout(Request $request, $id)
+    {
+        $request->validate([
+            'reason' => 'required|string|max:1000',
+        ]);
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Không tìm thấy thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+        $occupancy->status = 'forced_checkout';
+        $occupancy->reason = $request->reason;
+        $occupancy->check_out_date = now()->toDateString();
+        $occupancy->save();
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'empty';
+            $bed->save();
+        }
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }

@@ -35,6 +35,9 @@ Route::put('/registration/{id}/assign-room', [RegistrationController::class, 'as
 Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
 Route::put('/registration/{id}/approve-bed', [RegistrationController::class, 'approveBed']);
 Route::put('/registration/{id}/reject-bed', [RegistrationController::class, 'rejectBed']);
+Route::put('/registration/request-checkout', [RegistrationController::class, 'requestCheckout']);
+Route::put('/registration/{id}/confirm-checkout', [RegistrationController::class, 'confirmCheckout']);
+Route::put('/registration/{id}/force-checkout', [RegistrationController::class, 'forceCheckout']);
 
 // Danh sách phòng dùng cho frontend
 Route::get('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'index']);
