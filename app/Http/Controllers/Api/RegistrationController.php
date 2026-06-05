@@ -451,6 +451,10 @@ class RegistrationController extends Controller
         $occupancy->bed_id = null;
         $occupancy->status = $occupancy->bed_id ? 'occupied' : 'assigned';
 
+        if ($occupancy->status === 'occupied' && !$occupancy->check_in_date) {
+            $occupancy->check_in_date = now()->toDateString();
+        }
+
         $occupancy->save();
 
         $this->recordRoomChange(
@@ -531,6 +535,7 @@ class RegistrationController extends Controller
         $occupancy->room_id = $bed->room_id;
         $occupancy->bed_id = $bed->id;
         $occupancy->status = 'pending';
+        $occupancy->check_out_date = null;
         $occupancy->save();
 
         $this->recordRoomChange(
@@ -570,6 +575,8 @@ class RegistrationController extends Controller
         }
 
         $occupancy->status = 'occupied';
+        $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
+        $occupancy->check_out_date = null;
         $occupancy->save();
 
         $bed = Bed::find($occupancy->bed_id);
@@ -602,6 +609,8 @@ class RegistrationController extends Controller
         }
 
         $occupancy->status = 'rejected';
+        $occupancy->check_in_date = null;
+        $occupancy->check_out_date = null;
         $occupancy->save();
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));

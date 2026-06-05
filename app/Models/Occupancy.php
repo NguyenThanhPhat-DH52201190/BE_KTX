@@ -16,6 +16,8 @@ class Occupancy extends Model
         'student_id',
         'room_id',
         'bed_id',
+        'check_in_date',
+        'check_out_date',
         'status',
     ];
 
