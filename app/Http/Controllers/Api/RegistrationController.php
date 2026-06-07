@@ -78,6 +78,7 @@ class RegistrationController extends Controller
             'stay_to_date' => $registration->stay_to_date,
             'commitment_confirm' => $registration->commitment_confirm,
             'reason' => $registration->reason,
+            'occupancy_id' => $registration->occupancy?->id,
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
             'bed_approval_status' => $this->formatBedApprovalStatus($registration->occupancy?->status),

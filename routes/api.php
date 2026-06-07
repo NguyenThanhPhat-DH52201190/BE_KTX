@@ -7,6 +7,8 @@ use App\Http\Controllers\Api\RegistrationController;
 use App\Http\Controllers\Api\StorageController;
 use App\Http\Controllers\Api\BuildingController;
 use App\Http\Controllers\Api\RoomController;
+use App\Http\Controllers\Api\ViolationController;
+use App\Http\Controllers\Api\ViolationTypeController;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -55,3 +57,16 @@ Route::delete('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingCo
 Route::post('/buildings/{buildingCode}/floors', [\App\Http\Controllers\Api\BuildingController::class, 'storeFloor']);
 Route::put('/buildings/{buildingCode}/floors/{floorNumber}', [\App\Http\Controllers\Api\BuildingController::class, 'updateFloor']);
 Route::delete('/buildings/{buildingCode}/floors/{floorNumber}', [\App\Http\Controllers\Api\BuildingController::class, 'destroyFloor']);
+
+// Quản lý loại vi phạm
+Route::get('/violation-types', [ViolationTypeController::class, 'index']);
+Route::post('/violation-types', [ViolationTypeController::class, 'store']);
+Route::put('/violation-types/{id}', [ViolationTypeController::class, 'update']);
+Route::delete('/violation-types/{id}', [ViolationTypeController::class, 'destroy']);
+
+// Quản lý vi phạm
+Route::get('/violations', [ViolationController::class, 'index']);
+Route::post('/violations', [ViolationController::class, 'store']);
+Route::put('/violations/{id}', [ViolationController::class, 'update']);
+Route::put('/violations/{id}/process', [ViolationController::class, 'process']);
+Route::delete('/violations/{id}', [ViolationController::class, 'destroy']);
