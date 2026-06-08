@@ -9,6 +9,10 @@ use App\Http\Controllers\Api\BuildingController;
 use App\Http\Controllers\Api\RoomController;
 use App\Http\Controllers\Api\ViolationController;
 use App\Http\Controllers\Api\ViolationTypeController;
+use App\Http\Controllers\Api\RoomFeeBillController;
+use App\Http\Controllers\Api\ElectricityController;
+use App\Http\Controllers\Api\StudentPaymentController;
+use App\Http\Controllers\Api\VnpayPaymentController;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -70,3 +74,20 @@ Route::post('/violations', [ViolationController::class, 'store']);
 Route::put('/violations/{id}', [ViolationController::class, 'update']);
 Route::put('/violations/{id}/process', [ViolationController::class, 'process']);
 Route::delete('/violations/{id}', [ViolationController::class, 'destroy']);
+
+// Quản lý thanh toán
+Route::get('/room-fee-bills', [RoomFeeBillController::class, 'index']);
+Route::post('/room-fee-bills/generate', [RoomFeeBillController::class, 'generate']);
+Route::put('/room-fee-bills/{id}/confirm-payment', [RoomFeeBillController::class, 'confirmPayment']);
+Route::put('/room-fee-bills/{id}/status', [RoomFeeBillController::class, 'updateStatus']);
+
+Route::get('/electricity-records', [ElectricityController::class, 'records']);
+Route::post('/electricity-records/generate', [ElectricityController::class, 'generate']);
+Route::get('/electricity-bills', [ElectricityController::class, 'bills']);
+Route::put('/electricity-bills/{id}/confirm-payment', [ElectricityController::class, 'confirmPayment']);
+Route::put('/electricity-bills/{id}/status', [ElectricityController::class, 'updateStatus']);
+
+Route::get('/student/payments', [StudentPaymentController::class, 'myBills']);
+Route::post('/payments/vnpay/create', [VnpayPaymentController::class, 'create']);
+Route::post('/payments/vnpay/verify', [VnpayPaymentController::class, 'verify']);
+Route::get('/payments/vnpay/return', [VnpayPaymentController::class, 'handleReturn']);
