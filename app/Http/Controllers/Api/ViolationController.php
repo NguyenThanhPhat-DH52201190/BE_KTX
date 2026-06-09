@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Occupancy;
 use App\Models\Violation;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -34,6 +35,13 @@ class ViolationController extends Controller
             'violation_date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
         ]);
+
+        $occupancy = Occupancy::query()->findOrFail((int) $data['occupancy_id']);
+        if ($this->isForcedCheckout($occupancy->status)) {
+            return response()->json([
+                'message' => 'Sinh viên đã bị buộc thôi ở, không thể thêm vi phạm mới.',
+            ], 422);
+        }
 
         $payload = [
             'occupancy_id' => (int) $data['occupancy_id'],
@@ -122,6 +130,11 @@ class ViolationController extends Controller
         Violation::query()->findOrFail($id)->delete();
 
         return response()->noContent();
+    }
+
+    private function isForcedCheckout(?string $status): bool
+    {
+        return strtolower(trim((string) $status)) === 'forced_checkout';
     }
 
     private function formatViolation(Violation $violation): array
