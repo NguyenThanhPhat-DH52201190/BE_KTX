@@ -15,7 +15,7 @@ return new class extends Migration
             $table->id();
             $table->foreignId('student_id')->constrained('students')->cascadeOnDelete();
             $table->foreignId('registration_id')->constrained('registrations')->cascadeOnDelete();
-            $table->integer('quarter');
+            $table->integer('month');
             $table->integer('year');
             $table->decimal('amount', 12, 2);
             $table->date('due_date');

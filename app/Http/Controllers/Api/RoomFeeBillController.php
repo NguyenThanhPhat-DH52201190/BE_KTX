@@ -17,7 +17,7 @@ class RoomFeeBillController extends Controller
         $query = RoomFeeBill::query()
             ->with(['student', 'registration.occupancy.room.floor'])
             ->orderByDesc('year')
-            ->orderByDesc('quarter')
+            ->orderByDesc('month')
             ->orderByDesc('id');
 
         if ($request->filled('student_id')) {
@@ -40,7 +40,7 @@ class RoomFeeBillController extends Controller
     public function generate(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'quarter' => ['required', 'integer', 'min:1', 'max:4'],
+            'month' => ['required', 'integer', 'min:1', 'max:12'],
             'year' => ['required', 'integer', 'min:2020', 'max:2100'],
             'amount' => ['required', 'integer', 'gt:0'],
             'due_date' => ['required', 'date'],
@@ -61,7 +61,7 @@ class RoomFeeBillController extends Controller
             foreach ($occupancies as $occupancy) {
                 $exists = RoomFeeBill::query()
                     ->where('registration_id', $occupancy->registration_id)
-                    ->where('quarter', (int) $data['quarter'])
+                    ->where('month', (int) $data['month'])
                     ->where('year', (int) $data['year'])
                     ->exists();
 
@@ -73,7 +73,7 @@ class RoomFeeBillController extends Controller
                 $created[] = RoomFeeBill::query()->create([
                     'student_id' => $occupancy->student_id,
                     'registration_id' => $occupancy->registration_id,
-                    'quarter' => (int) $data['quarter'],
+                    'month' => (int) $data['month'],
                     'year' => (int) $data['year'],
                     'amount' => $data['amount'],
                     'due_date' => $data['due_date'],
@@ -133,7 +133,7 @@ class RoomFeeBillController extends Controller
             'id' => (int) $bill->id,
             'student_id' => (int) $bill->student_id,
             'registration_id' => (int) $bill->registration_id,
-            'quarter' => (int) $bill->quarter,
+            'month' => (int) $bill->month,
             'year' => (int) $bill->year,
             'amount' => (float) $bill->amount,
             'due_date' => $bill->due_date,

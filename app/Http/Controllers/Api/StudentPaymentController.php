@@ -76,8 +76,8 @@ class StudentPaymentController extends Controller
         return [
             'id' => (int) $bill->id,
             'source' => 'room_fee',
-            'title' => 'Tiền phòng quý ' . $bill->quarter . '/' . $bill->year,
-            'period' => 'Quý ' . $bill->quarter . '/' . $bill->year,
+            'title' => 'Tiền phòng tháng ' . $bill->month . '/' . $bill->year,
+            'period' => 'Tháng ' . $bill->month . '/' . $bill->year,
             'amount' => (float) $bill->amount,
             'due_date' => $bill->due_date,
             'payment_method' => $bill->payment_method,

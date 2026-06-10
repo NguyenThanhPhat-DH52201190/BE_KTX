@@ -12,7 +12,7 @@ class RoomFeeBill extends Model
     protected $fillable = [
         'student_id',
         'registration_id',
-        'quarter',
+        'month',
         'year',
         'amount',
         'due_date',
