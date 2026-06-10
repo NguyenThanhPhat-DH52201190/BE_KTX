@@ -16,7 +16,7 @@ return new class extends Migration
             $table->string('building_code', 10);
             $table->string('room_number', 10);
             $table->integer('capacity')->default(14);
-            $table->decimal('price_per_quarter', 10, 2);
+            $table->decimal('price_per_month', 10, 2);
             $table->string('status')->default('available');
 
             $table->unique(['building_code', 'room_number']);

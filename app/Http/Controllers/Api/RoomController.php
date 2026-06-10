@@ -30,7 +30,7 @@ class RoomController extends Controller
             'room_number' => ['required', 'string', 'max:10'],
             'capacity' => ['required', 'integer', 'min:1'],
             'status' => ['nullable', 'string'],
-            'price_per_quarter' => ['nullable', 'numeric'],
+            'price_per_month' => ['nullable', 'numeric'],
             'maintenance_beds' => ['nullable', 'array'],
             'maintenance_beds.*' => ['integer', 'min:1'],
         ]);
@@ -44,7 +44,7 @@ class RoomController extends Controller
                 'floor_id' => $floor->id,
                 'room_number' => $roomNumber,
                 'capacity' => (int) $data['capacity'],
-                'price_per_quarter' => (float) ($data['price_per_quarter'] ?? 0),
+                'price_per_month' => (float) ($data['price_per_month'] ?? 0),
                 'status' => $this->normalizeRoomStatusInput($data['status'] ?? 'active'),
             ]);
 
@@ -63,7 +63,7 @@ class RoomController extends Controller
             'room_number' => ['required', 'string', 'max:10'],
             'capacity' => ['required', 'integer', 'min:1'],
             'status' => ['nullable', 'string'],
-            'price_per_quarter' => ['nullable', 'numeric'],
+            'price_per_month' => ['nullable', 'numeric'],
             'maintenance_beds' => ['nullable', 'array'],
             'maintenance_beds.*' => ['integer', 'min:1'],
         ]);
@@ -82,7 +82,7 @@ class RoomController extends Controller
                 'floor_id' => (int) $data['floor_id'],
                 'room_number' => $roomNumber,
                 'capacity' => (int) $data['capacity'],
-                'price_per_quarter' => (float) ($data['price_per_quarter'] ?? $room->price_per_quarter ?? 0),
+                'price_per_month' => (float) ($data['price_per_month'] ?? $room->price_per_month ?? 0),
                 'status' => $this->normalizeRoomStatusInput($data['status'] ?? $room->status),
             ]);
 
@@ -243,7 +243,7 @@ class RoomController extends Controller
             'room_number' => (string) $room->room_number,
             'floor_number' => (int) ($room->floor?->floor_number ?? 0),
             'capacity' => (int) $room->capacity,
-            'price_per_quarter' => (float) $room->price_per_quarter,
+            'price_per_month' => (float) $room->price_per_month,
             'status' => $displayStatus,
             'floor' => $room->floor ? [
                 'id' => $room->floor->id,

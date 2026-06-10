@@ -140,6 +140,7 @@ class RoomFeeBillController extends Controller
             'payment_method' => $bill->payment_method,
             'transaction_code' => $bill->transaction_code,
             'paid_at' => $bill->paid_at,
+            'created_at' => $bill->created_at,
             'status' => $bill->status ?? 'unpaid',
             'student' => $bill->student ? [
                 'id' => (int) $bill->student->id,

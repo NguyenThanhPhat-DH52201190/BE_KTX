@@ -55,7 +55,7 @@ class ElectricityController extends Controller
     {
         $data = $request->validate([
             'room_id' => ['required', 'integer', 'exists:rooms,id'],
-            'month_year' => ['required', 'string', 'max:191'],
+            'month_year' => ['required', 'string', 'date_format:Y-m', 'max:191'],
             'old_index' => ['required', 'integer', 'min:0'],
             'new_index' => ['required', 'integer', 'min:0'],
             'unit_price' => ['required', 'integer', 'gt:0'],
@@ -67,6 +67,18 @@ class ElectricityController extends Controller
         }
 
         $room = Room::query()->with('floor')->findOrFail((int) $data['room_id']);
+        $latestRecord = ElectricityRecord::query()
+            ->where('room_id', $room->id)
+            ->orderByDesc('month_year')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($latestRecord && trim($data['month_year']) <= (string) $latestRecord->month_year) {
+            return response()->json([
+                'message' => 'Tháng ghi nhận mới phải sau tháng điện gần nhất của phòng này.',
+            ], 422);
+        }
+
         $usageKwh = (int) $data['new_index'] - (int) $data['old_index'];
         $totalAmount = $usageKwh * (float) $data['unit_price'];
         $activeStatuses = ['active', 'occupied', 'checkout_requested'];
@@ -179,6 +191,7 @@ class ElectricityController extends Controller
             'usage_kwh' => (int) $record->usage_kwh,
             'unit_price' => (float) $record->unit_price,
             'total_amount' => (float) $record->total_amount,
+            'created_at' => $record->created_at,
             'room' => $room ? [
                 'id' => (int) $room->id,
                 'building_code' => $room->floor?->building_code ?? '',
@@ -205,6 +218,7 @@ class ElectricityController extends Controller
             'payment_method' => $bill->payment_method,
             'transaction_code' => $bill->transaction_code,
             'paid_at' => $bill->paid_at,
+            'created_at' => $bill->created_at,
             'status' => $bill->status ?? 'unpaid',
             'student' => $bill->student ? [
                 'id' => (int) $bill->student->id,

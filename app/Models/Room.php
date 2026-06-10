@@ -17,7 +17,7 @@ class Room extends Model
         'floor_id',
         'room_number',
         'capacity',
-        'price_per_quarter',
+        'price_per_month',
         'status',
     ];
 

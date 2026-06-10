@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\ViolationController;
 use App\Http\Controllers\Api\ViolationTypeController;
 use App\Http\Controllers\Api\RoomFeeBillController;
 use App\Http\Controllers\Api\ElectricityController;
+use App\Http\Controllers\Api\PaymentSettingController;
 use App\Http\Controllers\Api\StudentPaymentController;
 use App\Http\Controllers\Api\VnpayPaymentController;
 
@@ -76,6 +77,9 @@ Route::put('/violations/{id}/process', [ViolationController::class, 'process']);
 Route::delete('/violations/{id}', [ViolationController::class, 'destroy']);
 
 // Quản lý thanh toán
+Route::get('/payment-settings', [PaymentSettingController::class, 'show']);
+Route::put('/payment-settings', [PaymentSettingController::class, 'update']);
+
 Route::get('/room-fee-bills', [RoomFeeBillController::class, 'index']);
 Route::post('/room-fee-bills/generate', [RoomFeeBillController::class, 'generate']);
 Route::put('/room-fee-bills/{id}/confirm-payment', [RoomFeeBillController::class, 'confirmPayment']);
