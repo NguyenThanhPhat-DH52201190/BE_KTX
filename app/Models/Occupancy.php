@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -12,6 +13,10 @@ class Occupancy extends Model
     protected $table = 'occupancy';
 
     public $timestamps = false;
+
+    public const OCCUPIED_BED_STATUSES = ['ROOM_CONFIRMED', 'ACTIVE'];
+
+    public const OCCUPIED_BED_APPROVAL_STATUSES = ['pending', 'approved'];
 
     protected $fillable = [
         'registration_id',
@@ -25,6 +30,19 @@ class Occupancy extends Model
         'reason',
         'previous_occupancy_id',
     ];
+
+    public static function occupiedBedsQuery(): Builder
+    {
+        return static::query()->occupiedBeds();
+    }
+
+    public function scopeOccupiedBeds(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('bed_id')
+            ->whereIn('status', self::OCCUPIED_BED_STATUSES)
+            ->whereIn('bed_approval_status', self::OCCUPIED_BED_APPROVAL_STATUSES);
+    }
 
     public function registration(): BelongsTo
     {

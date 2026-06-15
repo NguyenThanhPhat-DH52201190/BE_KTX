@@ -120,6 +120,8 @@ class RegistrationController extends Controller
             return;
         }
 
+        $changeType = $reason === 'assign_room' ? 'ADMIN_TRANSFER' : 'PERMANENT';
+
         DB::table('room_change_log')->insert([
             'occupancy_id' => $occupancy->id,
             'old_room_id' => $oldRoomId,
@@ -127,6 +129,8 @@ class RegistrationController extends Controller
             'new_room_id' => $newRoomId,
             'new_bed_id' => $newBedId,
             'transfer_reason' => $reason,
+            'change_type' => $changeType,
+            'status' => null,
             'transferred_at' => now(),
         ]);
     }
@@ -389,7 +393,13 @@ class RegistrationController extends Controller
 
         return $rooms->map(function ($room) {
             $totalBeds = $room->beds->count();
-            $availableBeds = $room->beds->where('status', 'empty')->count();
+            $maintenanceBeds = $room->beds
+                ->filter(fn (Bed $bed) => strtolower((string) $bed->status) === 'maintenance')
+                ->count();
+            $occupiedBeds = Occupancy::occupiedBedsQuery()
+                ->where('room_id', $room->id)
+                ->count();
+            $availableBeds = max($totalBeds - $maintenanceBeds - $occupiedBeds, 0);
 
             return [
                 'id' => $room->id,
@@ -427,7 +437,7 @@ class RegistrationController extends Controller
             $currentBed = Bed::find($occupancy->bed_id);
             if (!$currentBed || (int) $currentBed->room_id !== (int) $request->room_id) {
                 if ($currentBed) {
-                    $currentBed->status = 'empty';
+                    $currentBed->status = 'active';
                     $currentBed->save();
                 }
 
@@ -486,10 +496,9 @@ class RegistrationController extends Controller
 
         if ($bed) {
             $isOccupiedByAnotherStudent = Occupancy::query()
+                ->occupiedBeds()
                 ->where('bed_id', $bed->id)
                 ->where('student_id', '!=', $registration->student_id)
-                ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
-                ->whereIn('bed_approval_status', ['pending', 'approved'])
                 ->exists();
 
             if ($isOccupiedByAnotherStudent) {
@@ -514,7 +523,7 @@ class RegistrationController extends Controller
         if ($occupancy->exists && $occupancy->bed_id && (int) $occupancy->bed_id !== (int) $bed->id) {
             $previousBed = Bed::find($occupancy->bed_id);
             if ($previousBed) {
-                $previousBed->status = 'empty';
+                $previousBed->status = 'active';
                 $previousBed->save();
             }
         }
@@ -555,9 +564,9 @@ class RegistrationController extends Controller
         }
 
         $isOccupiedByAnotherStudent = Occupancy::query()
+            ->occupiedBeds()
             ->where('bed_id', $occupancy->bed_id)
             ->where('student_id', '!=', $registration->student_id)
-            ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
             ->exists();
 
         if ($isOccupiedByAnotherStudent) {
@@ -572,7 +581,7 @@ class RegistrationController extends Controller
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'occupied';
+            $bed->status = 'active';
             $bed->save();
         }
 
@@ -595,7 +604,7 @@ class RegistrationController extends Controller
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'empty';
+            $bed->status = 'active';
             $bed->save();
         }
 
@@ -681,7 +690,7 @@ class RegistrationController extends Controller
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'empty';
+            $bed->status = 'active';
             $bed->save();
         }
 
@@ -713,7 +722,7 @@ class RegistrationController extends Controller
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'empty';
+            $bed->status = 'active';
             $bed->save();
         }
 

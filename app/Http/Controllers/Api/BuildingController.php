@@ -31,8 +31,7 @@ class BuildingController extends Controller
 
     private function getOccupiedStudentsForBuilding(string $buildingCode): int
     {
-        return Occupancy::query()
-            ->where('status', 'ACTIVE')
+        return Occupancy::occupiedBedsQuery()
             ->whereHas('room.floor', function ($query) use ($buildingCode) {
                 $query->where('building_code', $buildingCode);
             })
@@ -43,14 +42,14 @@ class BuildingController extends Controller
     {
         $floor->loadMissing('rooms.beds');
 
-        $occupiedStudents = 0;
-        foreach ($floor->rooms as $room) {
-            foreach ($room->beds as $bed) {
-                if (Occupancy::query()->where('bed_id', $bed->id)->where('status', 'occupied')->exists()) {
-                    $occupiedStudents++;
-                }
-            }
-        }
+        $bedIds = $floor->rooms
+            ->flatMap(fn ($room) => $room->beds->pluck('id'))
+            ->filter()
+            ->values()
+            ->all();
+        $occupiedStudents = empty($bedIds)
+            ? 0
+            : Occupancy::occupiedBedsQuery()->whereIn('bed_id', $bedIds)->count();
 
         return [
             'id' => $floor->id,
@@ -253,8 +252,7 @@ class BuildingController extends Controller
         $building = $this->findBuildingOrFail($buildingCode);
         $floor = Floor::query()->where('building_code', $building->building_code)->where('floor_number', $floorNumber)->firstOrFail();
 
-        $occupiedStudents = Occupancy::query()
-            ->where('status', 'ACTIVE')
+        $occupiedStudents = Occupancy::occupiedBedsQuery()
             ->whereHas('room', function ($query) use ($floor) {
                 $query->where('floor_id', $floor->id);
             })

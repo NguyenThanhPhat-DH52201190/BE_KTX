@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Bed;
 use App\Models\Floor;
+use App\Models\MaintenanceRequest;
 use App\Models\Occupancy;
 use App\Models\Room;
 use Illuminate\Http\JsonResponse;
@@ -107,10 +108,250 @@ class RoomController extends Controller
         return response()->json(['message' => 'Đã xóa phòng.']);
     }
 
+    /**
+     * Danh sách giường của một phòng kèm thông tin sinh viên đang ở (occupancy ACTIVE).
+     * GET /api/rooms/{roomId}/beds
+     */
+    public function beds(int $roomId): JsonResponse
+    {
+        $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
+        $beds = $room->beds->sortBy('bed_number')->values();
+
+        // Lấy occupancy đang hiệu lực theo từng bed_id, kèm sinh viên.
+        $occupancies = Occupancy::occupiedBedsQuery()
+            ->whereIn('bed_id', $beds->pluck('id')->all())
+            ->with('student')
+            ->get()
+            ->keyBy('bed_id');
+        $occupancyIds = $occupancies->pluck('id')->all();
+        $temporaryLogs = empty($occupancyIds)
+            ? collect()
+            : DB::table('room_change_log')
+                ->whereIn('occupancy_id', $occupancyIds)
+                ->where('change_type', 'TEMPORARY_MAINTENANCE')
+                ->where('status', 'ACTIVE')
+                ->orderByDesc('id')
+                ->get()
+                ->keyBy('occupancy_id');
+        $originalRooms = Room::query()
+            ->with('floor')
+            ->whereIn('id', $temporaryLogs->pluck('old_room_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+        $originalBeds = Bed::query()
+            ->whereIn('id', $temporaryLogs->pluck('old_bed_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+        $maintenanceLogs = DB::table('room_change_log')
+            ->whereIn('old_bed_id', $beds->pluck('id')->all())
+            ->where('change_type', 'TEMPORARY_MAINTENANCE')
+            ->where('status', 'ACTIVE')
+            ->orderByDesc('id')
+            ->get()
+            ->keyBy('old_bed_id');
+        $maintenanceOccupancies = Occupancy::query()
+            ->with(['student'])
+            ->whereIn('id', $maintenanceLogs->pluck('occupancy_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+        $temporaryBeds = Bed::query()
+            ->whereIn('id', $maintenanceLogs->pluck('new_bed_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+        $historyLogs = DB::table('room_change_log')
+            ->where('change_type', 'TEMPORARY_MAINTENANCE')
+            ->where(function ($query) use ($beds) {
+                $bedIds = $beds->pluck('id')->all();
+                $query->whereIn('old_bed_id', $bedIds)
+                    ->orWhereIn('new_bed_id', $bedIds);
+            })
+            ->orderByDesc('id')
+            ->get();
+        $historyOccupancies = Occupancy::query()
+            ->with(['student'])
+            ->whereIn('id', $historyLogs->pluck('occupancy_id')->filter()->unique()->all())
+            ->get()
+            ->keyBy('id');
+        $historyBedIds = $historyLogs
+            ->flatMap(fn ($log) => [$log->old_bed_id, $log->new_bed_id])
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        $historyBeds = Bed::query()
+            ->whereIn('id', $historyBedIds)
+            ->get()
+            ->keyBy('id');
+        $historyRoomIds = $historyLogs
+            ->flatMap(fn ($log) => [$log->old_room_id, $log->new_room_id])
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        $historyRooms = Room::query()
+            ->with('floor')
+            ->whereIn('id', $historyRoomIds)
+            ->get()
+            ->keyBy('id');
+
+        $roomInMaintenance = strtoupper((string) $room->status) === 'MAINTENANCE';
+
+        $payload = $beds->map(function (Bed $bed) use (
+            $occupancies,
+            $temporaryLogs,
+            $originalRooms,
+            $originalBeds,
+            $maintenanceLogs,
+            $maintenanceOccupancies,
+            $temporaryBeds,
+            $historyLogs,
+            $historyOccupancies,
+            $historyBeds,
+            $historyRooms,
+            $roomInMaintenance
+        ) {
+            $occupancy = $occupancies->get($bed->id);
+            $student = $occupancy?->student;
+            $temporaryLog = $occupancy ? $temporaryLogs->get($occupancy->id) : null;
+            $originalRoom = $temporaryLog ? $originalRooms->get($temporaryLog->old_room_id) : null;
+            $originalBed = $temporaryLog ? $originalBeds->get($temporaryLog->old_bed_id) : null;
+            $maintenanceLog = $maintenanceLogs->get($bed->id);
+            $maintenanceOccupancy = $maintenanceLog ? $maintenanceOccupancies->get($maintenanceLog->occupancy_id) : null;
+            $temporaryBed = $maintenanceLog ? $temporaryBeds->get($maintenanceLog->new_bed_id) : null;
+
+            $displayStatus = 'empty';
+            if ($roomInMaintenance || strtoupper((string) $bed->status) === 'MAINTENANCE') {
+                $displayStatus = 'maintenance';
+            } elseif ($student) {
+                $displayStatus = 'occupied';
+            }
+            $bedHistoryLogs = $historyLogs->filter(
+                fn ($log) => (int) $log->old_bed_id === (int) $bed->id || (int) $log->new_bed_id === (int) $bed->id,
+            )->values();
+            $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms) {
+                $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
+                $oldRoom = $historyRooms->get($log->old_room_id);
+                $newRoom = $historyRooms->get($log->new_room_id);
+                $oldBed = $historyBeds->get($log->old_bed_id);
+                $newBed = $historyBeds->get($log->new_bed_id);
+
+                return [
+                    'id' => $log->id,
+                    'student_name' => $historyOccupancy?->student?->full_name,
+                    'student_code' => $historyOccupancy?->student?->student_code,
+                    'old_room_code' => $oldRoom ? (($oldRoom->floor?->building_code ?? '') . $oldRoom->room_number) : null,
+                    'old_bed_number' => $oldBed?->bed_number ? (string) $oldBed->bed_number : null,
+                    'new_room_code' => $newRoom ? (($newRoom->floor?->building_code ?? '') . $newRoom->room_number) : null,
+                    'new_bed_number' => $newBed?->bed_number ? (string) $newBed->bed_number : null,
+                    'reason' => $log->transfer_reason,
+                    'change_type' => $log->change_type,
+                    'status' => $log->status,
+                    'is_temporary' => (bool) $log->is_temporary,
+                    'transferred_at' => $log->transferred_at,
+                    'completed_at' => $log->completed_at,
+                    'expected_return_date' => $log->expected_return_date,
+                    'maintenance_request_id' => $log->maintenance_request_id,
+                ];
+            };
+
+            return [
+                'id' => $bed->id,
+                'bed_number' => (string) $bed->bed_number,
+                'position' => strtolower((string) $bed->position ?: 'upper') === 'lower' ? 'bottom' : 'top',
+                'status' => strtoupper((string) $bed->status) === 'MAINTENANCE' ? 'maintenance' : 'active',
+                'display_status' => $displayStatus,
+                'occupied' => (bool) $student,
+                'transfer_history' => $bedHistoryLogs->map($formatHistory)->all(),
+                'maintenance_history' => $bedHistoryLogs
+                    ->filter(fn ($log) => $log->maintenance_request_id || in_array($log->transfer_reason, ['BED_MAINTENANCE', 'ROOM_MAINTENANCE'], true))
+                    ->map($formatHistory)
+                    ->all(),
+                'maintenance_assignment' => $maintenanceLog && $maintenanceOccupancy?->student ? [
+                    'occupancy_id' => $maintenanceOccupancy->id,
+                    'student_name' => $maintenanceOccupancy->student->full_name,
+                    'student_code' => $maintenanceOccupancy->student->student_code,
+                    'student_avatar' => $this->getImageUrl($maintenanceOccupancy->student->avatar),
+                    'temporary_bed_id' => $maintenanceLog->new_bed_id,
+                    'temporary_bed_number' => $temporaryBed?->bed_number ? (string) $temporaryBed->bed_number : null,
+                    'transferred_at' => $maintenanceLog->transferred_at,
+                    'expected_return_date' => $maintenanceLog->expected_return_date,
+                    'reason' => $maintenanceLog->transfer_reason,
+                    'maintenance_request_id' => $maintenanceLog->maintenance_request_id,
+                    'can_return' => true,
+                ] : null,
+                'student' => $student ? [
+                    'id' => $student->id,
+                    'student_code' => $student->student_code,
+                    'full_name' => $student->full_name,
+                    'avatar' => $this->getImageUrl($student->avatar),
+                    'class_name' => $student->class_name,
+                    'faculty' => $student->faculty,
+                    'academic_status' => $student->academic_status,
+                    'gender' => $student->gender,
+                    'phone' => $student->phone,
+                    'email' => $student->email,
+                    'date_of_birth' => $student->date_of_birth,
+                    'course_year' => $student->course_year,
+                    'permanent_address' => $student->permanent_address,
+                    'check_in_date' => $occupancy?->check_in_date,
+                    'check_out_date' => $occupancy?->check_out_date,
+                    'occupancy' => $occupancy ? [
+                        'id' => $occupancy->id,
+                        'bed_id' => $occupancy->bed_id,
+                        'room_id' => $occupancy->room_id,
+                        'check_in_date' => $occupancy->check_in_date,
+                        'check_out_date' => $occupancy->check_out_date,
+                        'status' => $occupancy->status,
+                    ] : null,
+                    'temporary_assignment' => $temporaryLog ? [
+                        'is_temporary' => true,
+                        'original_room_id' => $temporaryLog->old_room_id,
+                        'original_room_code' => $originalRoom ? (($originalRoom->floor?->building_code ?? '') . $originalRoom->room_number) : null,
+                        'original_bed_id' => $temporaryLog->old_bed_id,
+                        'original_bed_number' => $originalBed?->bed_number ? (string) $originalBed->bed_number : null,
+                        'reason' => $temporaryLog->transfer_reason,
+                        'transferred_at' => $temporaryLog->transferred_at,
+                        'expected_return_date' => $temporaryLog->expected_return_date,
+                        'change_type' => $temporaryLog->change_type,
+                        'maintenance_request_id' => $temporaryLog->maintenance_request_id,
+                    ] : null,
+                ] : null,
+            ];
+        });
+
+        return response()->json([
+            'room_id' => $room->id,
+            'room_status' => strtoupper((string) $room->status ?: 'ACTIVE'),
+            'capacity' => (int) $room->capacity,
+            'beds' => $payload->all(),
+        ]);
+    }
+
+    /**
+     * Dựng URL ảnh đầy đủ theo môi trường (giống RegistrationController).
+     */
+    private function getImageUrl($path): ?string
+    {
+        if (empty($path)) {
+            return null;
+        }
+
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
+
+        $cleanPath = ltrim($path, '/');
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+
+        return $isProduction
+            ? url('/api/storage/' . $cleanPath)
+            : url('/storage/' . $cleanPath);
+    }
+
     public function updateBed(Request $request, int $roomId, int $bedId): JsonResponse
     {
         $data = $request->validate([
-            'status' => ['required', 'string', 'in:empty,maintenance'],
+            'status' => ['required', 'string', 'in:active,maintenance'],
         ]);
 
         $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
@@ -120,15 +361,126 @@ class RoomController extends Controller
             return response()->json(['message' => 'Không tìm thấy giường.'], 404);
         }
 
-        if ($this->isBedOccupied($bedId) && $data['status'] === 'maintenance') {
-            return response()->json(['message' => 'Giường đang có sinh viên ở nên không thể chuyển sang bảo trì.'], 422);
-        }
-
-        $bed->update(['status' => $data['status']]);
+        $bed->update(['status' => strtolower($data['status']) === 'maintenance' ? 'maintenance' : 'active']);
 
         $room = $room->fresh(['floor', 'beds']);
 
         return response()->json($this->formatRoom($room, $this->getOccupiedBedIdSet(collect([$room]))));
+    }
+
+    public function transferBedOccupancy(Request $request, int $roomId, int $bedId): JsonResponse
+    {
+        $data = $request->validate([
+            'target_bed_id' => ['required', 'integer', 'exists:beds,id'],
+            'source_status' => ['nullable', 'string', 'in:active,maintenance'],
+            'reason' => ['nullable', 'string', 'max:255'],
+            'change_type' => ['nullable', 'string', 'in:PERMANENT,TEMPORARY_MAINTENANCE'],
+            'transfer_type' => ['nullable', 'string', 'in:PERMANENT,TEMP_MAINTENANCE'],
+            'expected_return_date' => ['nullable', 'date'],
+            'maintenance_reason' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        if (($data['transfer_type'] ?? null) === 'TEMP_MAINTENANCE') {
+            if (empty($data['expected_return_date'])) {
+                return response()->json(['message' => 'Vui lòng chọn ngày dự kiến hoàn tất bảo trì.'], 422);
+            }
+
+            if (trim((string) ($data['maintenance_reason'] ?? '')) === '') {
+                return response()->json(['message' => 'Vui lòng nhập lý do bảo trì.'], 422);
+            }
+        }
+
+        $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
+        $sourceBed = $room->beds->firstWhere('id', $bedId);
+
+        if (!$sourceBed) {
+            return response()->json(['message' => 'Không tìm thấy giường nguồn.'], 404);
+        }
+
+        if ((int) $data['target_bed_id'] === (int) $sourceBed->id) {
+            return response()->json(['message' => 'Giường chuyển đến phải khác giường hiện tại.'], 422);
+        }
+
+        $targetBed = Bed::query()->findOrFail((int) $data['target_bed_id']);
+
+        if ((int) $targetBed->room_id !== (int) $room->id) {
+            return response()->json(['message' => 'Hiện chỉ hỗ trợ chuyển giường trong cùng phòng.'], 422);
+        }
+
+        if (strtolower((string) $targetBed->status) === 'maintenance') {
+            return response()->json(['message' => 'Giường chuyển đến đang bảo trì.'], 422);
+        }
+
+        $updatedRoom = DB::transaction(function () use ($room, $sourceBed, $targetBed, $data) {
+            $occupancy = Occupancy::occupiedBedsQuery()
+                ->where('bed_id', $sourceBed->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$occupancy) {
+                abort(response()->json(['message' => 'Không tìm thấy sinh viên đang ở giường này.'], 422));
+            }
+
+            $targetOccupied = Occupancy::occupiedBedsQuery()
+                ->where('bed_id', $targetBed->id)
+                ->lockForUpdate()
+                ->exists();
+
+            if ($targetOccupied) {
+                abort(response()->json(['message' => 'Giường chuyển đến đã có sinh viên ở.'], 422));
+            }
+
+            $oldRoomId = (int) $occupancy->room_id;
+            $oldBedId = (int) $occupancy->bed_id;
+            $changeType = ($data['transfer_type'] ?? null) === 'TEMP_MAINTENANCE'
+                ? 'TEMPORARY_MAINTENANCE'
+                : ($data['change_type'] ?? 'PERMANENT');
+            $maintenanceReason = trim((string) ($data['maintenance_reason'] ?? $data['reason'] ?? ''));
+            $maintenanceRequest = null;
+
+            if ($changeType === 'TEMPORARY_MAINTENANCE') {
+                $maintenanceRequest = MaintenanceRequest::create([
+                    'type' => 'BED',
+                    'room_id' => $room->id,
+                    'bed_id' => $sourceBed->id,
+                    'reason' => $maintenanceReason !== '' ? $maintenanceReason : 'BED_MAINTENANCE',
+                    'status' => 'IN_PROGRESS',
+                    'started_at' => now(),
+                ]);
+            }
+
+            $occupancy->room_id = $targetBed->room_id;
+            $occupancy->bed_id = $targetBed->id;
+            $occupancy->save();
+
+            $sourceBed->status = $changeType === 'TEMPORARY_MAINTENANCE' ? 'maintenance' : ($data['source_status'] ?? 'active');
+            $sourceBed->save();
+
+            $targetBed->status = 'active';
+            $targetBed->save();
+
+            DB::table('room_change_log')->insert([
+                'occupancy_id' => $occupancy->id,
+                'old_room_id' => $oldRoomId,
+                'old_bed_id' => $oldBedId,
+                'new_room_id' => (int) $occupancy->room_id,
+                'new_bed_id' => (int) $occupancy->bed_id,
+                'transfer_reason' => $changeType === 'TEMPORARY_MAINTENANCE'
+                    ? ($maintenanceReason !== '' ? $maintenanceReason : 'BED_MAINTENANCE')
+                    : ($data['reason'] ?? 'admin_transfer_bed'),
+                'change_type' => $changeType,
+                'maintenance_request_id' => $maintenanceRequest?->id,
+                'status' => $changeType === 'TEMPORARY_MAINTENANCE' ? 'ACTIVE' : null,
+                'change_source' => 'admin',
+                'is_temporary' => $changeType === 'TEMPORARY_MAINTENANCE',
+                'expected_return_date' => $changeType === 'TEMPORARY_MAINTENANCE' ? ($data['expected_return_date'] ?? null) : null,
+                'transferred_at' => now(),
+            ]);
+
+            return $room->fresh(['floor', 'beds']);
+        });
+
+        return response()->json($this->formatRoom($updatedRoom, $this->getOccupiedBedIdSet(collect([$updatedRoom]))));
     }
 
     private function assertUniqueRoomNumber(int $floorId, string $roomNumber, ?int $ignoreRoomId = null): void
@@ -154,7 +506,7 @@ class RoomController extends Controller
             $bed->update([
                 'bed_number' => $index + 1,
                 'position' => ($index + 1) % 2 === 1 ? 'upper' : 'lower',
-                'status' => in_array($index + 1, $maintenanceBeds, true) ? 'maintenance' : $bed->status,
+                'status' => in_array($index + 1, $maintenanceBeds, true) ? 'maintenance' : 'active',
             ]);
         }
 
@@ -167,26 +519,22 @@ class RoomController extends Controller
                 'room_id' => $room->id,
                 'bed_number' => $bedNumber,
                 'position' => $bedNumber % 2 === 1 ? 'upper' : 'lower',
-                'status' => in_array($bedNumber, $maintenanceBeds, true) ? 'maintenance' : 'empty',
+                'status' => in_array($bedNumber, $maintenanceBeds, true) ? 'maintenance' : 'active',
             ]);
         }
     }
 
     private function countOccupiedBedsForRoom(Room $room): int
     {
-        return Occupancy::query()
+        return Occupancy::occupiedBedsQuery()
             ->where('room_id', $room->id)
-            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
-            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->count();
     }
 
     private function isBedOccupied(int $bedId): bool
     {
-        return Occupancy::query()
+        return Occupancy::occupiedBedsQuery()
             ->where('bed_id', $bedId)
-            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
-            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->exists();
     }
 
@@ -198,10 +546,8 @@ class RoomController extends Controller
             return [];
         }
 
-        return Occupancy::query()
+        return Occupancy::occupiedBedsQuery()
             ->whereIn('bed_id', $bedIds->all())
-            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
-            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->pluck('bed_id')
             ->mapWithKeys(fn ($bedId) => [(int) $bedId => true])
             ->all();
@@ -217,6 +563,7 @@ class RoomController extends Controller
     private function formatRoom(Room $room, array $occupiedBedIds): array
     {
         $beds = $room->beds->sortBy('bed_number')->values();
+        $roomInMaintenance = strtoupper((string) $room->status) === 'MAINTENANCE';
         $bedPayload = $beds->map(function (Bed $bed) use ($occupiedBedIds) {
             $occupied = isset($occupiedBedIds[(int) $bed->id]);
 
@@ -225,17 +572,24 @@ class RoomController extends Controller
                 'room_id' => $bed->room_id,
                 'bed_number' => (string) $bed->bed_number,
                 'position' => strtoupper((string) $bed->position ?: 'UPPER'),
-                'status' => strtoupper((string) $bed->status ?: 'EMPTY'),
+                'status' => strtoupper((string) $bed->status) === 'MAINTENANCE' ? 'MAINTENANCE' : 'ACTIVE',
                 'occupied' => $occupied,
             ];
         });
 
-        $occupiedBeds = $bedPayload->filter(fn (array $bed) => $bed['occupied'])->count();
-        $maintenanceBeds = $bedPayload->filter(fn (array $bed) => $bed['status'] === 'MAINTENANCE')->count();
-        $activeBeds = max($room->capacity - $maintenanceBeds, 0);
-        $availableBeds = max($activeBeds - $occupiedBeds, 0);
+        if ($roomInMaintenance) {
+            $occupiedBeds = 0;
+            $availableBeds = 0;
+            $maintenanceBeds = (int) $room->capacity;
+            $activeBeds = 0;
+        } else {
+            $occupiedBeds = $bedPayload->filter(fn (array $bed) => $bed['occupied'])->count();
+            $maintenanceBeds = $bedPayload->filter(fn (array $bed) => $bed['status'] === 'MAINTENANCE')->count();
+            $activeBeds = max($room->capacity - $maintenanceBeds, 0);
+            $availableBeds = max($activeBeds - $occupiedBeds, 0);
+        }
 
-        $displayStatus = strtoupper((string) $room->status) === 'MAINTENANCE'
+        $displayStatus = $roomInMaintenance
             ? 'MAINTENANCE'
             : ($availableBeds === 0 && $activeBeds > 0 ? 'FULL' : 'AVAILABLE');
 

@@ -15,6 +15,7 @@ use App\Http\Controllers\Api\ElectricityController;
 use App\Http\Controllers\Api\PaymentSettingController;
 use App\Http\Controllers\Api\StudentPaymentController;
 use App\Http\Controllers\Api\VnpayPaymentController;
+use App\Http\Controllers\Api\MaintenanceController;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -52,10 +53,21 @@ Route::put('/registration/{id}/force-checkout', [RegistrationController::class, 
 
 // Danh sách phòng dùng cho frontend
 Route::get('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'index']);
+Route::get('/rooms/{roomId}/beds', [\App\Http\Controllers\Api\RoomController::class, 'beds']);
 Route::post('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'store']);
 Route::put('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'update']);
 Route::delete('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'destroy']);
+Route::put('/rooms/{roomId}/beds/{bedId}/transfer', [\App\Http\Controllers\Api\RoomController::class, 'transferBedOccupancy']);
 Route::put('/rooms/{roomId}/beds/{bedId}', [\App\Http\Controllers\Api\RoomController::class, 'updateBed']);
+
+// Bảo trì giường/phòng dùng wizard, không thay đổi API phòng cũ.
+Route::get('/maintenance/rooms/{roomId}/beds/{bedId}/plan', [MaintenanceController::class, 'bedPlan']);
+Route::post('/maintenance/rooms/{roomId}/beds/{bedId}/start', [MaintenanceController::class, 'startBedMaintenance']);
+Route::post('/maintenance/rooms/{roomId}/beds/{bedId}/complete', [MaintenanceController::class, 'completeBedMaintenance']);
+Route::get('/maintenance/rooms/{roomId}/plan', [MaintenanceController::class, 'roomPlan']);
+Route::post('/maintenance/rooms/{roomId}/start', [MaintenanceController::class, 'startRoomMaintenance']);
+Route::post('/maintenance/rooms/{roomId}/complete-student/{occupancyId}', [MaintenanceController::class, 'completeRoomMaintenanceStudent']);
+Route::post('/maintenance/rooms/{roomId}/complete', [MaintenanceController::class, 'completeRoomMaintenance']);
 
 // Quản lý tòa
 Route::get('/buildings', [\App\Http\Controllers\Api\BuildingController::class, 'index']);
