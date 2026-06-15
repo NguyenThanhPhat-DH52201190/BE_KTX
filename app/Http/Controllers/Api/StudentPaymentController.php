@@ -35,13 +35,13 @@ class StudentPaymentController extends Controller
         }
 
         $roomFeeItems = RoomFeeBill::query()
-            ->with(['student', 'registration.occupancy.room.floor'])
+            ->with(['student', 'occupancy.room.floor'])
             ->where('student_id', $student->id)
             ->get()
             ->map(fn (RoomFeeBill $bill) => $this->formatRoomFeeBill($bill));
 
         $electricityItems = ElectricityBill::query()
-            ->with(['student', 'registration.occupancy.room.floor'])
+            ->with(['student', 'occupancy.room.floor'])
             ->where('student_id', $student->id)
             ->get()
             ->map(fn (ElectricityBill $bill) => $this->formatElectricityBill($bill));
@@ -70,7 +70,7 @@ class StudentPaymentController extends Controller
 
     private function formatRoomFeeBill(RoomFeeBill $bill): array
     {
-        $occupancy = $bill->registration?->occupancy;
+        $occupancy = $bill->occupancy;
         $room = $occupancy?->room;
 
         return [
@@ -94,7 +94,7 @@ class StudentPaymentController extends Controller
 
     private function formatElectricityBill(ElectricityBill $bill): array
     {
-        $occupancy = $bill->registration?->occupancy;
+        $occupancy = $bill->occupancy;
         $room = $occupancy?->room;
 
         return [

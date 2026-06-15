@@ -3,7 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\ViolationType;
+use App\Models\ActivityType;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -13,10 +13,10 @@ class ViolationTypeController extends Controller
 {
     public function index(): JsonResponse
     {
-        $types = ViolationType::query()
+        $types = ActivityType::query()
             ->orderBy('id')
             ->get()
-            ->map(fn (ViolationType $type) => $this->formatViolationType($type))
+            ->map(fn (ActivityType $type) => $this->formatActivityType($type))
             ->values();
 
         return response()->json($types);
@@ -25,30 +25,30 @@ class ViolationTypeController extends Controller
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'name' => ['required', 'string', 'max:191', 'unique:violation_types,name'],
+            'name' => ['required', 'string', 'max:191', 'unique:activity_types,name'],
             'level' => ['required', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
             'description' => ['nullable', 'string'],
         ]);
 
-        $type = ViolationType::query()->create([
+        $type = ActivityType::query()->create([
             'name' => trim($data['name']),
             'level' => $data['level'],
             'description' => trim((string) ($data['description'] ?? '')),
         ]);
 
-        return response()->json($this->formatViolationType($type), 201);
+        return response()->json($this->formatActivityType($type), 201);
     }
 
     public function update(Request $request, int $id): JsonResponse
     {
-        $type = ViolationType::query()->findOrFail($id);
+        $type = ActivityType::query()->findOrFail($id);
 
         $data = $request->validate([
             'name' => [
                 'required',
                 'string',
                 'max:191',
-                Rule::unique('violation_types', 'name')->ignore($type->id),
+                Rule::unique('activity_types', 'name')->ignore($type->id),
             ],
             'level' => ['required', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
             'description' => ['nullable', 'string'],
@@ -60,14 +60,14 @@ class ViolationTypeController extends Controller
             'description' => trim((string) ($data['description'] ?? '')),
         ]);
 
-        return response()->json($this->formatViolationType($type));
+        return response()->json($this->formatActivityType($type));
     }
 
     public function destroy(int $id): JsonResponse
     {
-        $type = ViolationType::query()->findOrFail($id);
+        $type = ActivityType::query()->findOrFail($id);
 
-        if (DB::table('violations')->where('type_id', $type->id)->exists()) {
+        if (DB::table('activities')->where('activity_type_id', $type->id)->exists()) {
             return response()->json(['message' => 'Không thể xóa loại vi phạm đã được sử dụng.'], 422);
         }
 
@@ -76,7 +76,7 @@ class ViolationTypeController extends Controller
         return response()->noContent();
     }
 
-    private function formatViolationType(ViolationType $type): array
+    private function formatActivityType(ActivityType $type): array
     {
         return [
             'id' => (int) $type->id,

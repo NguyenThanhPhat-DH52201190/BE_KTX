@@ -11,10 +11,12 @@ class RoomFeeBill extends Model
 
     protected $fillable = [
         'student_id',
-        'registration_id',
+        'occupancy_id',
         'month',
         'year',
         'amount',
+        'days_stayed',
+        'total_days',
         'due_date',
         'payment_method',
         'transaction_code',
@@ -22,13 +24,18 @@ class RoomFeeBill extends Model
         'status',
     ];
 
+    protected $casts = [
+        'days_stayed' => 'integer',
+        'total_days' => 'integer',
+    ];
+
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
     }
 
-    public function registration(): BelongsTo
+    public function occupancy(): BelongsTo
     {
-        return $this->belongsTo(Registration::class);
+        return $this->belongsTo(Occupancy::class);
     }
 }

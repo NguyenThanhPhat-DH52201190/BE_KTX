@@ -3,19 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Activity;
+use App\Models\CheckoutRequest;
 use App\Models\Occupancy;
-use App\Models\Violation;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Schema;
 
 class ViolationController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $query = Violation::query()
+        $query = Activity::query()
             ->with(['type', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed'])
-            ->orderByDesc('violation_date')
+            ->orderByDesc('activity_date')
             ->orderByDesc('id');
 
         if ($request->filled('occupancy_id')) {
@@ -23,7 +23,7 @@ class ViolationController extends Controller
         }
 
         return response()->json(
-            $query->get()->map(fn (Violation $violation) => $this->formatViolation($violation))->values(),
+            $query->get()->map(fn (Activity $activity) => $this->formatViolation($activity))->values(),
         );
     }
 
@@ -31,7 +31,7 @@ class ViolationController extends Controller
     {
         $data = $request->validate([
             'occupancy_id' => ['required', 'integer', 'exists:occupancy,id'],
-            'type_id' => ['required', 'integer', 'exists:violation_types,id'],
+            'type_id' => ['required', 'integer', 'exists:activity_types,id'],
             'violation_date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
         ]);
@@ -43,75 +43,66 @@ class ViolationController extends Controller
             ], 422);
         }
 
-        $payload = [
+        $activity = Activity::query()->create([
             'occupancy_id' => (int) $data['occupancy_id'],
-            'type_id' => (int) $data['type_id'],
-            'violation_date' => $data['violation_date'],
+            'student_id' => $occupancy->student_id,
+            'activity_type_id' => (int) $data['type_id'],
+            'activity_date' => $data['violation_date'],
             'note' => trim((string) ($data['note'] ?? '')),
-        ];
+            'status' => 'pending',
+            'action_taken' => null,
+        ]);
 
-        if (Schema::hasColumn('violations', 'status')) {
-            $payload['status'] = 'pending';
-        }
-
-        if (Schema::hasColumn('violations', 'action_taken')) {
-            $payload['action_taken'] = null;
-        }
-
-        $violation = Violation::query()->create($payload);
-
-        return response()->json($this->formatViolation($violation->load('type')), 201);
+        return response()->json($this->formatViolation($activity->load('type')), 201);
     }
 
     public function update(Request $request, int $id): JsonResponse
     {
-        $violation = Violation::query()->findOrFail($id);
+        $activity = Activity::query()->findOrFail($id);
 
         $data = $request->validate([
-            'type_id' => ['required', 'integer', 'exists:violation_types,id'],
+            'type_id' => ['required', 'integer', 'exists:activity_types,id'],
             'violation_date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
         ]);
 
-        $violation->update([
-            'type_id' => (int) $data['type_id'],
-            'violation_date' => $data['violation_date'],
+        $activity->update([
+            'activity_type_id' => (int) $data['type_id'],
+            'activity_date' => $data['violation_date'],
             'note' => trim((string) ($data['note'] ?? '')),
         ]);
 
-        return response()->json($this->formatViolation($violation->fresh('type')));
+        return response()->json($this->formatViolation($activity->fresh('type')));
     }
 
     public function process(Request $request, int $id): JsonResponse
     {
-        $violation = Violation::query()->with(['occupancy.bed'])->findOrFail($id);
+        $activity = Activity::query()->with(['occupancy.bed'])->findOrFail($id);
 
         $data = $request->validate([
             'action_taken' => ['required', 'string', 'in:WARNING,FORCED_CHECKOUT'],
             'note' => ['nullable', 'string'],
         ]);
 
-        $note = trim((string) ($data['note'] ?? $violation->note ?? ''));
-        $payload = [
+        $note = trim((string) ($data['note'] ?? $activity->note ?? ''));
+
+        $activity->update([
             'note' => $note,
-        ];
+            'status' => 'resolved',
+            'action_taken' => $data['action_taken'],
+        ]);
 
-        if (Schema::hasColumn('violations', 'status')) {
-            $payload['status'] = 'resolved';
-        }
-
-        if (Schema::hasColumn('violations', 'action_taken')) {
-            $payload['action_taken'] = $data['action_taken'];
-        }
-
-        $violation->update($payload);
-
-        if ($data['action_taken'] === 'FORCED_CHECKOUT' && $violation->occupancy) {
-            $occupancy = $violation->occupancy;
-            $occupancy->status = 'forced_checkout';
-            $occupancy->reason = $note !== '' ? $note : ($violation->type?->name ?? 'Buộc thôi ở do vi phạm nội quy.');
+        if ($data['action_taken'] === 'FORCED_CHECKOUT' && $activity->occupancy) {
+            $occupancy = $activity->occupancy;
+            $occupancy->status = 'TERMINATED';
+            $occupancy->reason = $note !== '' ? $note : ($activity->type?->name ?? 'Buộc thôi ở do vi phạm nội quy.');
             $occupancy->check_out_date = now()->toDateString();
             $occupancy->save();
+
+            // Buộc thôi ở: chốt mọi yêu cầu thôi ở đang chờ (nếu có).
+            CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved', 'processed_at' => now()]);
 
             $bed = $occupancy->bed;
             if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
@@ -121,25 +112,25 @@ class ViolationController extends Controller
         }
 
         return response()->json($this->formatViolation(
-            $violation->fresh(['type', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed']),
+            $activity->fresh(['type', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed']),
         ));
     }
 
     public function destroy(int $id): JsonResponse
     {
-        Violation::query()->findOrFail($id)->delete();
+        Activity::query()->findOrFail($id)->delete();
 
         return response()->noContent();
     }
 
     private function isForcedCheckout(?string $status): bool
     {
-        return strtolower(trim((string) $status)) === 'forced_checkout';
+        return strtoupper(trim((string) $status)) === 'TERMINATED';
     }
 
-    private function formatViolation(Violation $violation): array
+    private function formatViolation(Activity $activity): array
     {
-        $occupancy = $violation->occupancy;
+        $occupancy = $activity->occupancy;
         $student = $occupancy?->student ?? $occupancy?->registration?->student;
         $room = $occupancy?->room;
         $bed = $occupancy?->bed;
@@ -148,13 +139,14 @@ class ViolationController extends Controller
         $bedNumber = $bed?->bed_number ? (string) $bed->bed_number : '';
 
         return [
-            'id' => (int) $violation->id,
-            'occupancy_id' => (int) $violation->occupancy_id,
-            'type_id' => (int) $violation->type_id,
-            'violation_date' => $violation->violation_date,
-            'note' => $violation->note ?? '',
-            'status' => $violation->status ?? 'pending',
-            'action_taken' => $violation->action_taken,
+            'id' => (int) $activity->id,
+            'occupancy_id' => (int) $activity->occupancy_id,
+            // Giữ key API cũ (type_id/violation_date) cho frontend, map từ cột mới.
+            'type_id' => (int) $activity->activity_type_id,
+            'violation_date' => $activity->activity_date,
+            'note' => $activity->note ?? '',
+            'status' => $activity->status ?? 'pending',
+            'action_taken' => $activity->action_taken,
             'student' => $student ? [
                 'id' => (int) $student->id,
                 'student_code' => $student->student_code ?? '',
@@ -169,12 +161,12 @@ class ViolationController extends Controller
                 'bed_number' => $bedNumber,
                 'display_name' => $bedNumber !== '' ? '#' . $bedNumber : null,
             ],
-            'type' => $violation->type ? [
-                'id' => (int) $violation->type->id,
-                'name' => $violation->type->name,
-                'level' => strtoupper((string) $violation->type->level),
-                'description' => $violation->type->description ?? '',
-                'status' => strtolower((string) ($violation->type->status ?? 'active')),
+            'type' => $activity->type ? [
+                'id' => (int) $activity->type->id,
+                'name' => $activity->type->name,
+                'level' => strtoupper((string) $activity->type->level),
+                'description' => $activity->type->description ?? '',
+                'status' => strtolower((string) ($activity->type->status ?? 'active')),
             ] : null,
         ];
     }

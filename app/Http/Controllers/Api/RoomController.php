@@ -176,7 +176,8 @@ class RoomController extends Controller
     {
         return Occupancy::query()
             ->where('room_id', $room->id)
-            ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
+            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
+            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->count();
     }
 
@@ -184,7 +185,8 @@ class RoomController extends Controller
     {
         return Occupancy::query()
             ->where('bed_id', $bedId)
-            ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
+            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
+            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->exists();
     }
 
@@ -198,7 +200,8 @@ class RoomController extends Controller
 
         return Occupancy::query()
             ->whereIn('bed_id', $bedIds->all())
-            ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
+            ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
+            ->whereIn('bed_approval_status', ['pending', 'approved'])
             ->pluck('bed_id')
             ->mapWithKeys(fn ($bedId) => [(int) $bedId => true])
             ->all();

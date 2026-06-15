@@ -15,7 +15,7 @@ class RoomFeeBillController extends Controller
     public function index(Request $request): JsonResponse
     {
         $query = RoomFeeBill::query()
-            ->with(['student', 'registration.occupancy.room.floor'])
+            ->with(['student', 'occupancy.registration', 'occupancy.room.floor'])
             ->orderByDesc('year')
             ->orderByDesc('month')
             ->orderByDesc('id');
@@ -24,8 +24,8 @@ class RoomFeeBillController extends Controller
             $query->where('student_id', (int) $request->query('student_id'));
         }
 
-        if ($request->filled('registration_id')) {
-            $query->where('registration_id', (int) $request->query('registration_id'));
+        if ($request->filled('occupancy_id')) {
+            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
         }
 
         if ($request->filled('status')) {
@@ -46,10 +46,9 @@ class RoomFeeBillController extends Controller
             'due_date' => ['required', 'date'],
         ]);
 
-        $activeStatuses = ['active', 'occupied', 'checkout_requested'];
         $occupancies = Occupancy::query()
             ->with(['student', 'registration', 'room.floor'])
-            ->whereIn(DB::raw('LOWER(status)'), $activeStatuses)
+            ->where('status', 'ACTIVE')
             ->whereNotNull('student_id')
             ->whereNotNull('registration_id')
             ->get();
@@ -60,7 +59,7 @@ class RoomFeeBillController extends Controller
         DB::transaction(function () use ($data, $occupancies, &$created, &$skipped) {
             foreach ($occupancies as $occupancy) {
                 $exists = RoomFeeBill::query()
-                    ->where('registration_id', $occupancy->registration_id)
+                    ->where('occupancy_id', $occupancy->id)
                     ->where('month', (int) $data['month'])
                     ->where('year', (int) $data['year'])
                     ->exists();
@@ -72,7 +71,7 @@ class RoomFeeBillController extends Controller
 
                 $created[] = RoomFeeBill::query()->create([
                     'student_id' => $occupancy->student_id,
-                    'registration_id' => $occupancy->registration_id,
+                    'occupancy_id' => $occupancy->id,
                     'month' => (int) $data['month'],
                     'year' => (int) $data['year'],
                     'amount' => $data['amount'],
@@ -86,7 +85,7 @@ class RoomFeeBillController extends Controller
             'created_count' => count($created),
             'skipped_count' => $skipped,
             'items' => collect($created)
-                ->map(fn (RoomFeeBill $bill) => $this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])))
+                ->map(fn (RoomFeeBill $bill) => $this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])))
                 ->values(),
         ], 201);
     }
@@ -108,7 +107,7 @@ class RoomFeeBillController extends Controller
             'status' => 'paid',
         ]);
 
-        return response()->json($this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])));
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
 
     public function updateStatus(Request $request, int $id): JsonResponse
@@ -121,18 +120,20 @@ class RoomFeeBillController extends Controller
 
         $bill->update(['status' => $data['status']]);
 
-        return response()->json($this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])));
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
 
     private function formatBill(RoomFeeBill $bill): array
     {
-        $occupancy = $bill->registration?->occupancy;
+        $occupancy = $bill->occupancy;
         $room = $occupancy?->room;
 
         return [
             'id' => (int) $bill->id,
             'student_id' => (int) $bill->student_id,
-            'registration_id' => (int) $bill->registration_id,
+            'occupancy_id' => (int) $bill->occupancy_id,
+            // Giữ registration_id (suy từ occupancy) để frontend hiện tại không vỡ.
+            'registration_id' => (int) ($occupancy?->registration_id ?? 0),
             'month' => (int) $bill->month,
             'year' => (int) $bill->year,
             'amount' => (float) $bill->amount,

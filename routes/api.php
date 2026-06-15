@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\ProvinceController;
 use App\Http\Controllers\Api\RegistrationController;
 use App\Http\Controllers\Api\StorageController;
 use App\Http\Controllers\Api\BuildingController;
@@ -24,6 +25,9 @@ Route::post('/send-otp', [AuthController::class, 'sendOtp']);
 Route::post('/reset-password-otp', [AuthController::class, 'resetWithOtp']);
 Route::post('/check-email', [AuthController::class, 'checkEmail']);
 Route::post('/check-student-code', [AuthController::class, 'checkStudentCode']);
+
+// Danh mục tỉnh/thành (dropdown form đăng ký)
+Route::get('/provinces', [ProvinceController::class, 'index']);
 
 // Storage routes for Railway volume (must be before any wildcard routes)
 Route::get('/storage/debug', [StorageController::class, 'debug']);

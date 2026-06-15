@@ -7,6 +7,7 @@ use App\Http\Requests\Registration\StoreRegistrationRequest;
 use Illuminate\Http\Request;
 use App\Models\Registration;
 use App\Models\Occupancy;
+use App\Models\CheckoutRequest;
 use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
@@ -49,13 +50,32 @@ class RegistrationController extends Controller
 
     private function formatRegistration(Registration $registration, ?string $emailFallback = null): array
     {
-        $formData = null;
-        if (!empty($registration->form_data)) {
-            $decoded = json_decode($registration->form_data, true);
-            if (is_array($decoded)) {
-                $formData = $decoded;
-            }
-        }
+        // form_data column was removed; rebuild the same shape from the
+        // dedicated registration columns and the linked student record.
+        $student = $registration->student;
+        $formData = [
+            'mssv' => $student?->student_code,
+            'fullName' => $student?->full_name,
+            'birthDate' => $student?->date_of_birth,
+            'gender' => $student?->gender,
+            'class' => $student?->class_name,
+            'department' => $student?->faculty,
+            'nationality' => $student?->nationality,
+            'ethnicity' => $student?->ethnicity,
+            'religion' => $student?->religion,
+            'phone' => $student?->phone,
+            'cccd' => $student?->cccd,
+            'cccdIssueDate' => $student?->cccd_issued_date,
+            'cccdIssuePlace' => $student?->cccd_issued_place,
+            'address' => $student?->permanent_address,
+            'father_name' => $registration->father_name,
+            'father_phone' => $registration->father_phone,
+            'father_job' => $registration->father_job,
+            'mother_name' => $registration->mother_name,
+            'mother_phone' => $registration->mother_phone,
+            'mother_job' => $registration->mother_job,
+            'familyContactAddress' => $registration->parent_address,
+        ];
 
         return [
             'id' => $registration->id,
@@ -77,12 +97,14 @@ class RegistrationController extends Controller
             'stay_from_date' => $registration->stay_from_date,
             'stay_to_date' => $registration->stay_to_date,
             'commitment_confirm' => $registration->commitment_confirm,
-            'reason' => $registration->reason,
+            'reason' => $registration->rejection_reason,
+            'rejection_reason' => $registration->rejection_reason,
             'occupancy_id' => $registration->occupancy?->id,
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
-            'bed_approval_status' => $this->formatBedApprovalStatus($registration->occupancy?->status),
+            'bed_approval_status' => $registration->occupancy?->bed_approval_status,
             'occupancy_status' => $registration->occupancy?->status,
+            'checkout_requested' => (bool) ($registration->occupancy?->pendingCheckoutRequest),
             'occupancy_reason' => $registration->occupancy?->reason,
             'check_in_date' => $registration->occupancy?->check_in_date,
             'check_out_date' => $registration->occupancy?->check_out_date,
@@ -90,21 +112,6 @@ class RegistrationController extends Controller
             'created_at' => $registration->created_at,
             'student' => $registration->student,
         ];
-    }
-
-    private function formatBedApprovalStatus(?string $status): ?string
-    {
-        $normalized = strtolower(trim((string) $status));
-
-        if (in_array($normalized, ['occupied', 'active', 'checkout_requested', 'checked_out', 'forced_checkout'], true)) {
-            return 'approved';
-        }
-
-        if ($normalized === 'pending' || $normalized === 'rejected') {
-            return $normalized;
-        }
-
-        return null;
     }
 
     private function recordRoomChange(?Occupancy $occupancy, ?int $oldRoomId, ?int $oldBedId, ?int $newRoomId, ?int $newBedId, ?string $reason = null): void
@@ -120,13 +127,13 @@ class RegistrationController extends Controller
             'new_room_id' => $newRoomId,
             'new_bed_id' => $newBedId,
             'transfer_reason' => $reason,
-            'transfered_at' => now(),
+            'transferred_at' => now(),
         ]);
     }
     
     public function index()
     {
-        $registrations = Registration::with(['student', 'student.account', 'occupancy'])->get();
+        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])->get();
 
         return $registrations->map(function ($registration) {
             return $this->formatRegistration($registration);
@@ -255,7 +262,7 @@ class RegistrationController extends Controller
 
                 $hasPendingSameSemester = Registration::where('student_id', $student->id)
                     ->where('semester', $data['semester'])
-                    ->where('status', 'pending')
+                    ->where('status', 'submitted')
                     ->lockForUpdate()
                     ->exists();
 
@@ -276,30 +283,7 @@ class RegistrationController extends Controller
                     'cccd_front_url' => $data['cccd_front_url'] ?? null,
                     'cccd_back_url' => $data['cccd_back_url'] ?? null,
                     'semester' => $data['semester'],
-                    'form_data' => json_encode([
-                        'mssv' => $data['student_code'] ?? null,
-                        'fullName' => $data['full_name'] ?? null,
-                        'birthDate' => $data['date_of_birth'] ?? null,
-                        'gender' => $data['gender'] ?? null,
-                        'class' => $data['class_name'] ?? null,
-                        'department' => $data['faculty'] ?? null,
-                        'nationality' => $data['nationality'] ?? null,
-                        'ethnicity' => $data['ethnicity'] ?? null,
-                        'religion' => $data['religion'] ?? null,
-                        'phone' => $data['phone'] ?? null,
-                        'cccd' => $data['cccd'] ?? null,
-                        'cccdIssueDate' => $data['cccd_issued_date'] ?? null,
-                        'cccdIssuePlace' => $data['cccd_issued_place'] ?? null,
-                        'address' => $data['permanent_address'] ?? null,
-                        'father_name' => $data['father_name'] ?? null,
-                        'father_phone' => $data['father_phone'] ?? null,
-                        'father_job' => $data['father_job'] ?? null,
-                        'mother_name' => $data['mother_name'] ?? null,
-                        'mother_phone' => $data['mother_phone'] ?? null,
-                        'mother_job' => $data['mother_job'] ?? null,
-                        'familyContactAddress' => $data['parent_address'] ?? null,
-                    ]),
-                    'status' => 'pending',
+                    'status' => 'submitted',
                     'father_name' => $data['father_name'] ?? ($data['parent_name'] ?? ''),
                     'father_birth_year' => $data['father_birth_year'] ?? '',
                     'father_job' => $data['father_job'] ?? '',
@@ -454,11 +438,9 @@ class RegistrationController extends Controller
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $request->room_id;
         $occupancy->bed_id = null;
-        $occupancy->status = $occupancy->bed_id ? 'occupied' : 'assigned';
-
-        if ($occupancy->status === 'occupied' && !$occupancy->check_in_date) {
-            $occupancy->check_in_date = now()->toDateString();
-        }
+        // Admin confirmed the room; student must still pick a bed.
+        $occupancy->status = 'ROOM_CONFIRMED';
+        $occupancy->bed_approval_status = null;
 
         $occupancy->save();
 
@@ -506,7 +488,8 @@ class RegistrationController extends Controller
             $isOccupiedByAnotherStudent = Occupancy::query()
                 ->where('bed_id', $bed->id)
                 ->where('student_id', '!=', $registration->student_id)
-                ->whereIn(DB::raw('UPPER(status)'), ['ACTIVE', 'OCCUPIED', 'PENDING'])
+                ->whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
+                ->whereIn('bed_approval_status', ['pending', 'approved'])
                 ->exists();
 
             if ($isOccupiedByAnotherStudent) {
@@ -539,7 +522,9 @@ class RegistrationController extends Controller
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $bed->room_id;
         $occupancy->bed_id = $bed->id;
-        $occupancy->status = 'pending';
+        // Bed picked; awaiting admin approval. Lifecycle stays ROOM_CONFIRMED.
+        $occupancy->status = 'ROOM_CONFIRMED';
+        $occupancy->bed_approval_status = 'pending';
         $occupancy->check_out_date = null;
         $occupancy->save();
 
@@ -579,7 +564,8 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường đã có sinh viên ở.'], 422);
         }
 
-        $occupancy->status = 'occupied';
+        $occupancy->status = 'ACTIVE';
+        $occupancy->bed_approval_status = 'approved';
         $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
         $occupancy->check_out_date = null;
         $occupancy->save();
@@ -613,7 +599,9 @@ class RegistrationController extends Controller
             $bed->save();
         }
 
-        $occupancy->status = 'rejected';
+        // Bed rejected; student returns to the bed-selection step.
+        $occupancy->status = 'ROOM_CONFIRMED';
+        $occupancy->bed_approval_status = 'rejected';
         $occupancy->check_in_date = null;
         $occupancy->check_out_date = null;
         $occupancy->save();
@@ -647,12 +635,30 @@ class RegistrationController extends Controller
         }
 
         $occupancy = $registration->occupancy;
-        $occupancy->status = 'checkout_requested';
+
+        // Mỗi occupancy chỉ có 1 yêu cầu thôi ở đang chờ duyệt.
+        $hasPending = CheckoutRequest::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->exists();
+        if ($hasPending) {
+            return response()->json(['message' => 'Đã có yêu cầu thôi ở đang chờ duyệt.'], 422);
+        }
+
+        // Student requested checkout; stays ACTIVE until admin confirms.
+        CheckoutRequest::create([
+            'occupancy_id' => $occupancy->id,
+            'student_id' => $occupancy->student_id ?? $account->student_id,
+            'reason' => $request->reason,
+            'expected_leave_date' => $request->expected_leave_date ?? now()->toDateString(),
+            'status' => 'pending',
+        ]);
+
+        // Giữ hiển thị hiện có: lưu lý do/ngày dự kiến lên occupancy (vẫn ACTIVE).
         $occupancy->reason = $request->reason;
         $occupancy->check_out_date = $request->expected_leave_date;
         $occupancy->save();
 
-        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])));
     }
 
     public function confirmCheckout($id)
@@ -664,9 +670,14 @@ class RegistrationController extends Controller
         }
 
         $occupancy = $registration->occupancy;
-        $occupancy->status = 'checked_out';
+        $occupancy->status = 'COMPLETED';
         $occupancy->check_out_date = $occupancy->check_out_date ?? now()->toDateString();
         $occupancy->save();
+
+        // Chốt yêu cầu thôi ở đang chờ (nếu có).
+        CheckoutRequest::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->update(['status' => 'approved', 'processed_at' => now()]);
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
@@ -690,10 +701,15 @@ class RegistrationController extends Controller
         }
 
         $occupancy = $registration->occupancy;
-        $occupancy->status = 'forced_checkout';
+        $occupancy->status = 'TERMINATED';
         $occupancy->reason = $request->reason;
         $occupancy->check_out_date = now()->toDateString();
         $occupancy->save();
+
+        // Buộc thôi ở: chốt mọi yêu cầu thôi ở đang chờ (nếu có).
+        CheckoutRequest::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->update(['status' => 'approved', 'processed_at' => now()]);
 
         $bed = Bed::find($occupancy->bed_id);
         if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
@@ -717,7 +733,7 @@ class RegistrationController extends Controller
         }
 
         $registration->status = 'rejected';
-        $registration->reason = $request->rejectionReason;
+        $registration->rejection_reason = $request->rejectionReason;
         $registration->save();
 
         return response()->json([
@@ -756,7 +772,7 @@ class RegistrationController extends Controller
             return response()->json([]);
         }
 
-        $registrations = Registration::with(['student', 'student.account', 'occupancy'])
+        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])
             ->where('student_id', $account->student_id)
             ->where('semester', $semester)
             ->orderBy('id', 'asc')

@@ -13,8 +13,10 @@ class Account extends Model
 
     protected $fillable = [
         'student_id',
+        'username',
         'password',
         'role',
+        'is_active',
         'otp_code',
         'otp_expire',
     ];
@@ -22,6 +24,10 @@ class Account extends Model
     protected $hidden = [
         'password',
         'otp_code',
+    ];
+
+    protected $casts = [
+        'is_active' => 'boolean',
     ];
 
     public function student(): BelongsTo

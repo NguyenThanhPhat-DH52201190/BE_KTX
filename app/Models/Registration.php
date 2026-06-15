@@ -13,7 +13,6 @@ class Registration extends Model
     protected $fillable = [
         'student_id',
         'avatar_url',
-        'form_data',
         'semester',
         'school_year',
         'father_name',
@@ -31,10 +30,19 @@ class Registration extends Model
         'cccd_back_url',
         'commitment_confirm',
         'status',
+        'registration_type',
+        'auto_decision',
         'note',
-        'reason',
+        'rejection_reason',
         'approved_at',
+        'registration_period_id',
+        'top_priority_tier',
+        'total_priority_score',
+    ];
 
+    protected $casts = [
+        'top_priority_tier' => 'integer',
+        'total_priority_score' => 'integer',
     ];
 
 

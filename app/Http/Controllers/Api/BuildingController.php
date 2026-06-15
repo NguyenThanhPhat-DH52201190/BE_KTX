@@ -32,7 +32,7 @@ class BuildingController extends Controller
     private function getOccupiedStudentsForBuilding(string $buildingCode): int
     {
         return Occupancy::query()
-            ->where('status', 'occupied')
+            ->where('status', 'ACTIVE')
             ->whereHas('room.floor', function ($query) use ($buildingCode) {
                 $query->where('building_code', $buildingCode);
             })
@@ -254,7 +254,7 @@ class BuildingController extends Controller
         $floor = Floor::query()->where('building_code', $building->building_code)->where('floor_number', $floorNumber)->firstOrFail();
 
         $occupiedStudents = Occupancy::query()
-            ->where('status', 'occupied')
+            ->where('status', 'ACTIVE')
             ->whereHas('room', function ($query) use ($floor) {
                 $query->where('floor_id', $floor->id);
             })

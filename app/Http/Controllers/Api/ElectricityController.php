@@ -30,7 +30,7 @@ class ElectricityController extends Controller
     public function bills(Request $request): JsonResponse
     {
         $query = ElectricityBill::query()
-            ->with(['student', 'registration.occupancy.room.floor'])
+            ->with(['student', 'occupancy.registration', 'occupancy.room.floor'])
             ->orderByDesc('month_year')
             ->orderByDesc('id');
 
@@ -38,8 +38,8 @@ class ElectricityController extends Controller
             $query->where('student_id', (int) $request->query('student_id'));
         }
 
-        if ($request->filled('registration_id')) {
-            $query->where('registration_id', (int) $request->query('registration_id'));
+        if ($request->filled('occupancy_id')) {
+            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
         }
 
         if ($request->filled('status')) {
@@ -81,12 +81,10 @@ class ElectricityController extends Controller
 
         $usageKwh = (int) $data['new_index'] - (int) $data['old_index'];
         $totalAmount = $usageKwh * (float) $data['unit_price'];
-        $activeStatuses = ['active', 'occupied', 'checkout_requested'];
-
         $occupancies = Occupancy::query()
             ->with(['student', 'registration'])
             ->where('room_id', $room->id)
-            ->whereIn(DB::raw('LOWER(status)'), $activeStatuses)
+            ->where('status', 'ACTIVE')
             ->whereNotNull('student_id')
             ->whereNotNull('registration_id')
             ->get();
@@ -113,7 +111,7 @@ class ElectricityController extends Controller
 
             foreach ($occupancies as $occupancy) {
                 $exists = ElectricityBill::query()
-                    ->where('registration_id', $occupancy->registration_id)
+                    ->where('occupancy_id', $occupancy->id)
                     ->where('month_year', trim($data['month_year']))
                     ->exists();
 
@@ -124,7 +122,7 @@ class ElectricityController extends Controller
 
                 $created[] = ElectricityBill::query()->create([
                     'student_id' => $occupancy->student_id,
-                    'registration_id' => $occupancy->registration_id,
+                    'occupancy_id' => $occupancy->id,
                     'month_year' => trim($data['month_year']),
                     'usage_kwh' => $usageKwh,
                     'unit_price' => $data['unit_price'],
@@ -140,7 +138,7 @@ class ElectricityController extends Controller
             'created_count' => count($created),
             'skipped_count' => $skipped,
             'items' => collect($created)
-                ->map(fn (ElectricityBill $bill) => $this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])))
+                ->map(fn (ElectricityBill $bill) => $this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])))
                 ->values(),
         ], 201);
     }
@@ -162,7 +160,7 @@ class ElectricityController extends Controller
             'status' => 'paid',
         ]);
 
-        return response()->json($this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])));
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
 
     public function updateStatus(Request $request, int $id): JsonResponse
@@ -175,7 +173,7 @@ class ElectricityController extends Controller
 
         $bill->update(['status' => $data['status']]);
 
-        return response()->json($this->formatBill($bill->fresh(['student', 'registration.occupancy.room.floor'])));
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
 
     private function formatRecord(ElectricityRecord $record): array
@@ -203,13 +201,15 @@ class ElectricityController extends Controller
 
     private function formatBill(ElectricityBill $bill): array
     {
-        $occupancy = $bill->registration?->occupancy;
+        $occupancy = $bill->occupancy;
         $room = $occupancy?->room;
 
         return [
             'id' => (int) $bill->id,
             'student_id' => (int) $bill->student_id,
-            'registration_id' => (int) $bill->registration_id,
+            'occupancy_id' => (int) $bill->occupancy_id,
+            // Giữ registration_id (suy từ occupancy) để frontend hiện tại không vỡ.
+            'registration_id' => (int) ($occupancy?->registration_id ?? 0),
             'month_year' => $bill->month_year,
             'usage_kwh' => (int) $bill->usage_kwh,
             'unit_price' => (float) $bill->unit_price,

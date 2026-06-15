@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Occupancy extends Model
 {
@@ -19,7 +21,9 @@ class Occupancy extends Model
         'check_in_date',
         'check_out_date',
         'status',
+        'bed_approval_status',
         'reason',
+        'previous_occupancy_id',
     ];
 
     public function registration(): BelongsTo
@@ -40,5 +44,18 @@ class Occupancy extends Model
     public function bed(): BelongsTo
     {
         return $this->belongsTo(Bed::class);
+    }
+
+    public function checkoutRequests(): HasMany
+    {
+        return $this->hasMany(CheckoutRequest::class);
+    }
+
+    /**
+     * Yêu cầu thôi ở đang chờ duyệt (thay cho cột cờ checkout_requested cũ).
+     */
+    public function pendingCheckoutRequest(): HasOne
+    {
+        return $this->hasOne(CheckoutRequest::class)->where('status', 'pending');
     }
 }

@@ -66,7 +66,7 @@ class ViolationTypeSeeder extends Seeder
         ];
 
         foreach ($violationTypes as $violationType) {
-            DB::table('violation_types')->updateOrInsert(
+            DB::table('activity_types')->updateOrInsert(
                 ['name' => $violationType['name']],
                 $violationType,
             );
