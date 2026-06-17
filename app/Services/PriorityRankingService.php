@@ -25,8 +25,12 @@ class PriorityRankingService
 
     /**
      * Compute top_priority_tier (min tier) and total_priority_score (sum) from
-     * the student's VERIFIED priority criteria, then persist onto the
-     * registration. Returns the computed values.
+     * the student's VERIFIED priority criteria for this specific registration,
+     * then persist onto the registration. Returns the computed values.
+     *
+     * Only criteria linked to this exact registration_id are counted.
+     * Unverified (pending) or admin-rejected criteria are excluded.
+     * If a student has no verified criteria, tier = 99 and score = 0.
      *
      * @return array{top_priority_tier: int, total_priority_score: int}
      */
@@ -34,7 +38,7 @@ class PriorityRankingService
     {
         $rows = StudentPriority::query()
             ->join('priority_criteria', 'student_priority.priority_criteria_id', '=', 'priority_criteria.id')
-            ->where('student_priority.student_id', $registration->student_id)
+            ->where('student_priority.registration_id', $registration->id)
             ->where('student_priority.status', 'verified')
             ->get([
                 'priority_criteria.tier as tier',

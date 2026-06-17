@@ -16,6 +16,11 @@ use App\Http\Controllers\Api\PaymentSettingController;
 use App\Http\Controllers\Api\StudentPaymentController;
 use App\Http\Controllers\Api\VnpayPaymentController;
 use App\Http\Controllers\Api\MaintenanceController;
+use App\Http\Controllers\Api\PriorityCriteriaController;
+use App\Http\Controllers\Api\RegistrationPeriodController;
+use App\Http\Controllers\Api\StudentPriorityController;
+use App\Http\Controllers\Api\AutoRoomAssignmentController;
+use Illuminate\Support\Facades\Artisan;
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);
@@ -30,11 +35,23 @@ Route::post('/check-student-code', [AuthController::class, 'checkStudentCode']);
 // Danh mục tỉnh/thành (dropdown form đăng ký)
 Route::get('/provinces', [ProvinceController::class, 'index']);
 
+// Tiêu chí ưu tiên (dùng cho form đăng ký)
+Route::get('/priority-criteria', [PriorityCriteriaController::class, 'index']);
+
+// Quản lý đợt đăng ký
+Route::get('/registration-periods', [RegistrationPeriodController::class, 'index']);
+Route::post('/registration-periods', [RegistrationPeriodController::class, 'store']);
+Route::get('/registration-periods/{id}', [RegistrationPeriodController::class, 'show']);
+Route::put('/registration-periods/{id}', [RegistrationPeriodController::class, 'update']);
+Route::delete('/registration-periods/{id}', [RegistrationPeriodController::class, 'destroy']);
+Route::post('/registration-periods/{id}/process', [RegistrationPeriodController::class, 'process']);
+
 // Storage routes for Railway volume (must be before any wildcard routes)
 Route::get('/storage/debug', [StorageController::class, 'debug']);
 Route::get('/storage/{path}', [StorageController::class, 'serveImage'])->where('path', '.*');
 
-// Tuyến đăng ký - phải đặt /me và /history trước /{id}
+// Tuyến đăng ký - phải đặt /me và /history và /eligibility trước /{id}
+Route::get('/registration/eligibility', [RegistrationController::class, 'eligibility']);
 Route::post('/registration', [RegistrationController::class, 'store']);
 Route::get('/registration/me', [RegistrationController::class, 'getMyRegistration']);
 Route::get('/registration/history/{email}/{semester}', [RegistrationController::class, 'getRegistrationHistory']);
@@ -50,6 +67,23 @@ Route::put('/registration/{id}/reject-bed', [RegistrationController::class, 'rej
 Route::put('/registration/request-checkout', [RegistrationController::class, 'requestCheckout']);
 Route::put('/registration/{id}/confirm-checkout', [RegistrationController::class, 'confirmCheckout']);
 Route::put('/registration/{id}/force-checkout', [RegistrationController::class, 'forceCheckout']);
+Route::patch('/admin/registrations/{id}/auto-decision', [RegistrationController::class, 'patchAutoDecision']);
+Route::post('/admin/registrations/{id}/confirm', [RegistrationController::class, 'confirmSingle']);
+Route::post('/admin/registration-periods/{id}/confirm-batch', [RegistrationController::class, 'confirmBatch']);
+
+// Xác minh tiêu chí ưu tiên
+Route::get('/admin/student-priority', [StudentPriorityController::class, 'index']);
+Route::patch('/admin/student-priority/{id}/verify', [StudentPriorityController::class, 'verify']);
+
+// Phân phòng tự động
+Route::post('/admin/rooms/auto-assign', [AutoRoomAssignmentController::class, 'autoAssign']);
+Route::post('/admin/rooms/confirm-proposals', [AutoRoomAssignmentController::class, 'confirmProposals']);
+
+// Route test thủ công (chỉ dùng local/dev)
+Route::get('/admin/run-period-status-update', function () {
+    Artisan::call('periods:update-status');
+    return response()->json(['output' => Artisan::output()]);
+});
 
 // Danh sách phòng dùng cho frontend
 Route::get('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'index']);

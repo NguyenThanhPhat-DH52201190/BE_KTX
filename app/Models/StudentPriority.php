@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class StudentPriority extends Model
 {
@@ -11,6 +12,7 @@ class StudentPriority extends Model
 
     protected $fillable = [
         'student_id',
+        'registration_id',
         'priority_criteria_id',
         'evidence_url',
         'status',
@@ -27,6 +29,11 @@ class StudentPriority extends Model
         return $this->belongsTo(Student::class);
     }
 
+    public function registration(): BelongsTo
+    {
+        return $this->belongsTo(Registration::class);
+    }
+
     public function criteria(): BelongsTo
     {
         return $this->belongsTo(PriorityCriteria::class, 'priority_criteria_id');
@@ -35,5 +42,10 @@ class StudentPriority extends Model
     public function verifier(): BelongsTo
     {
         return $this->belongsTo(Account::class, 'verified_by');
+    }
+
+    public function evidences(): HasMany
+    {
+        return $this->hasMany(StudentPriorityEvidence::class, 'student_priority_id');
     }
 }

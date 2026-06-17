@@ -31,6 +31,8 @@ class Student extends Model
         'province_code',
         'avatar',
         'status',
+        'academic_status',
+        'current_year',
     ];
 
     

@@ -4,7 +4,6 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-use App\Models\Occupancy;
 
 class Registration extends Model
 {
@@ -32,6 +31,7 @@ class Registration extends Model
         'status',
         'registration_type',
         'auto_decision',
+        'auto_decision_reason',
         'note',
         'rejection_reason',
         'approved_at',
@@ -43,12 +43,18 @@ class Registration extends Model
     protected $casts = [
         'top_priority_tier' => 'integer',
         'total_priority_score' => 'integer',
+        'approved_at' => 'datetime',
     ];
 
 
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
+    }
+
+    public function period(): BelongsTo
+    {
+        return $this->belongsTo(RegistrationPeriod::class, 'registration_period_id');
     }
 
     public function occupancy(): HasOne

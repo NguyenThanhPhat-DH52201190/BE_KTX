@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Registration\StoreRegistrationRequest;
 use Illuminate\Http\Request;
 use App\Models\Registration;
+use App\Models\RegistrationPeriod;
 use App\Models\Occupancy;
 use App\Models\CheckoutRequest;
 use App\Models\Account;
@@ -13,7 +14,12 @@ use App\Models\Student;
 use App\Models\Room;
 use App\Models\Bed;
 use App\Models\Floor;
+use App\Models\StudentPriority;
+use App\Models\Blacklist;
+use App\Models\ElectricityBill;
+use App\Models\RoomFeeBill;
 use App\Helpers\StorageHelper;
+use App\Services\AutoReviewService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -50,8 +56,7 @@ class RegistrationController extends Controller
 
     private function formatRegistration(Registration $registration, ?string $emailFallback = null): array
     {
-        // form_data column was removed; rebuild the same shape from the
-        // dedicated registration columns and the linked student record.
+        $registration->loadMissing('period');
         $student = $registration->student;
         $formData = [
             'mssv' => $student?->student_code,
@@ -99,6 +104,13 @@ class RegistrationController extends Controller
             'commitment_confirm' => $registration->commitment_confirm,
             'reason' => $registration->rejection_reason,
             'rejection_reason' => $registration->rejection_reason,
+            'auto_decision' => $registration->auto_decision,
+            'auto_decision_reason' => $registration->auto_decision_reason,
+            'registration_period_id' => $registration->registration_period_id,
+            'channel' => $registration->period?->channel,
+            'period_name' => $registration->period?->name,
+            'period_status' => $registration->period?->status,
+            'approved_at' => $registration->approved_at?->toDateString(),
             'occupancy_id' => $registration->occupancy?->id,
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
@@ -108,9 +120,32 @@ class RegistrationController extends Controller
             'occupancy_reason' => $registration->occupancy?->reason,
             'check_in_date' => $registration->occupancy?->check_in_date,
             'check_out_date' => $registration->occupancy?->check_out_date,
+            'room_assigned_at' => $registration->occupancy?->created_at,
             'note' => $registration->note,
             'created_at' => $registration->created_at,
             'student' => $registration->student,
+            'priority_criteria' => StudentPriority::with(['criteria', 'evidences'])
+                    ->where('registration_id', $registration->id)
+                    ->get()
+                    ->map(function ($p) {
+                        $urls = $p->evidences
+                            ->map(fn($e) => $this->getImageUrl($e->file_url))
+                            ->values()
+                            ->all();
+                        // Tương thích ngược: đơn cũ lưu 1 ảnh ở evidence_url
+                        if (empty($urls) && $p->evidence_url) {
+                            $urls = [$this->getImageUrl($p->evidence_url)];
+                        }
+                        return [
+                            'id' => $p->id,
+                            'criteria_id' => $p->priority_criteria_id,
+                            'code' => $p->criteria?->code,
+                            'name' => $p->criteria?->name,
+                            'evidence_urls' => $urls,
+                            'status' => $p->status,
+                        ];
+                    })
+                    ->all(),
         ];
     }
 
@@ -135,9 +170,181 @@ class RegistrationController extends Controller
         ]);
     }
     
+    public function eligibility(Request $request): \Illuminate\Http\JsonResponse
+    {
+        $email = $request->query('email');
+
+        if (!$email) {
+            return response()->json(['message' => 'Email là bắt buộc'], 422);
+        }
+
+        $student = Student::where('email', $email)->first();
+
+        if (!$student) {
+            return response()->json(['message' => 'Không tìm thấy sinh viên'], 404);
+        }
+
+        // Check 1: Đã có đơn đang chờ xét duyệt TRONG ĐỢT ĐANG MỞ
+        // Chỉ chặn khi status='submitted' trong period đang active.
+        // Đơn từ đợt cũ đã đóng (submitted/rejected) không chặn sinh viên đăng ký đợt mới.
+        $activePeriodId = RegistrationPeriod::where('status', 'active')->value('id');
+
+        $hasSubmittedInActivePeriod = $activePeriodId !== null
+            && Registration::where('student_id', $student->id)
+                ->where('registration_period_id', $activePeriodId)
+                ->where('status', 'submitted')
+                ->exists();
+
+        if ($hasSubmittedInActivePeriod) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'has_active_application',
+                'reason_message' => 'Đơn của bạn đã được ghi nhận, kết quả sẽ thông báo sau',
+            ]);
+        }
+
+        // Check 1b: Đã có đơn được duyệt — không cho gửi đơn mới
+        $hasApproved = Registration::where('student_id', $student->id)
+            ->where('status', 'approved')
+            ->exists();
+
+        if ($hasApproved) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'already_approved',
+                'reason_message' => 'Đơn đăng ký của bạn đã được duyệt',
+                'redirect'       => '/student/room-status',
+            ]);
+        }
+
+        // Check 2: Đang lưu trú (occupancy ACTIVE)
+        $activeOccupancy = Occupancy::where('student_id', $student->id)
+            ->where('status', 'ACTIVE')
+            ->with('room')
+            ->first();
+
+        if ($activeOccupancy) {
+            $room     = $activeOccupancy->room;
+            $roomName = $room ? ($room->building_code . $room->room_number) : 'phòng hiện tại';
+
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'already_residing',
+                'reason_message' => "Bạn đang ở phòng {$roomName}, muốn ở tiếp dùng chức năng Gia hạn",
+                'redirect'       => '/student/renewal',
+            ]);
+        }
+
+        // Check 3: Tình trạng học tập không hợp lệ
+        $allowedAcademicStatuses = ['studying', 'overtime_training'];
+
+        if (!in_array($student->academic_status, $allowedAcademicStatuses, true)) {
+            $message = match ($student->academic_status) {
+                'graduated'       => 'Bạn đã tốt nghiệp, không thuộc diện được ở KTX.',
+                'transferred'     => 'Bạn đã chuyển trường.',
+                'suspended'       => 'Tài khoản đang bị đình chỉ học tập.',
+                'temporary_leave' => 'Bạn đang trong thời gian bảo lưu học tập.',
+                'dropped_out'     => 'Bạn đã thôi học.',
+                default           => 'Bạn không trong tình trạng đang học.',
+            };
+
+            return response()->json([
+                'eligible'        => false,
+                'reason_code'     => 'not_studying',
+                'academic_status' => $student->academic_status,
+                'reason_message'  => $message,
+            ]);
+        }
+
+        // Check 4: Thuộc blacklist
+        if (Blacklist::isBanned($student->id)) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'blacklisted',
+                'reason_message' => 'Bạn thuộc danh sách không được đăng ký ở KTX',
+            ]);
+        }
+
+        // Check 5: Quá năm học tối đa
+        $maxStudyYear = config('ktx.max_study_year', 6);
+
+        if ($student->current_year !== null && $student->current_year > $maxStudyYear) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'not_eligible_year',
+                'reason_message' => 'Bạn đã quá thời hạn đào tạo tối đa, không thuộc diện ở KTX',
+            ]);
+        }
+
+        // Check 6: Còn nợ hóa đơn
+        $unpaidStatuses = ['unpaid', 'overdue'];
+
+        $hasUnpaidBills = ElectricityBill::where('student_id', $student->id)
+                ->whereIn('status', $unpaidStatuses)
+                ->exists()
+            || RoomFeeBill::where('student_id', $student->id)
+                ->whereIn('status', $unpaidStatuses)
+                ->exists();
+
+        if ($hasUnpaidBills) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'unpaid_bills',
+                'reason_message' => 'Bạn còn hóa đơn chưa thanh toán',
+                'redirect'       => '/student/payment',
+            ]);
+        }
+
+        // Check 7: Không có đợt đăng ký nào đang mở (kiểm tra sau khi đã xác nhận sv đủ điều kiện)
+        // Ưu tiên 1: đợt active (đang mở nhận đơn)
+        $activePeriod = RegistrationPeriod::where('status', 'active')
+            ->orderBy('start_date', 'asc')
+            ->first();
+
+        // Ưu tiên 2: đợt pending gần nhất (sắp mở)
+        if (!$activePeriod) {
+            $activePeriod = RegistrationPeriod::where('status', 'pending')
+                ->orderBy('start_date', 'asc')
+                ->first();
+        }
+
+        // Không có active lẫn pending
+        if (!$activePeriod) {
+            $processingMain = RegistrationPeriod::where('channel', 'main')
+                ->where('status', 'processing')
+                ->exists();
+
+            $message = $processingMain
+                ? 'Đang xử lý đợt đăng ký, vui lòng quay lại sau'
+                : 'Hiện chưa có đợt đăng ký nào đang mở, vui lòng theo dõi thông báo từ Ban quản lý';
+
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'no_open_channel',
+                'reason_message' => $message,
+            ]);
+        }
+
+        // Check 8: Đủ điều kiện (active hoặc pending)
+        return response()->json([
+            'eligible'     => true,
+            'channel_info' => [
+                'channel'         => $activePeriod->channel,
+                'period_name'     => $activePeriod->name,
+                'school_year'     => $activePeriod->school_year,
+                'semester'        => $activePeriod->semester,
+                'start_date'      => $activePeriod->start_date?->toDateString(),
+                'end_date'        => $activePeriod->end_date?->toDateString(),
+                'stay_start_date' => $activePeriod->stay_start_date?->toDateString(),
+                'stay_end_date'   => $activePeriod->stay_end_date?->toDateString(),
+                'status'          => $activePeriod->status,
+            ],
+        ]);
+    }
+
     public function index()
     {
-        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])->get();
+        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest', 'period'])->get();
 
         return $registrations->map(function ($registration) {
             return $this->formatRegistration($registration);
@@ -156,6 +363,36 @@ class RegistrationController extends Controller
 
         if (!$account) {
             return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
+
+        // Re-check điều kiện sinh viên để tránh race condition sau khi eligibility GET đã trả eligible=true
+        $allowedAcademicStatuses = ['studying', 'overtime_training'];
+        if (!in_array($student->academic_status, $allowedAcademicStatuses, true)) {
+            return response()->json(['message' => 'Bạn không đủ điều kiện đăng ký nội trú', 'reason_code' => 'not_studying'], 422);
+        }
+        if (Blacklist::isBanned($student->id)) {
+            return response()->json(['message' => 'Bạn thuộc danh sách không được đăng ký ở KTX', 'reason_code' => 'blacklisted'], 422);
+        }
+        $maxStudyYear = config('ktx.max_study_year', 6);
+        if ($student->current_year !== null && $student->current_year > $maxStudyYear) {
+            return response()->json(['message' => 'Bạn đã quá thời hạn đào tạo tối đa', 'reason_code' => 'not_eligible_year'], 422);
+        }
+        $unpaidStatuses = ['unpaid', 'overdue'];
+        if (ElectricityBill::where('student_id', $student->id)->whereIn('status', $unpaidStatuses)->exists()
+            || RoomFeeBill::where('student_id', $student->id)->whereIn('status', $unpaidStatuses)->exists()) {
+            return response()->json(['message' => 'Bạn còn hóa đơn chưa thanh toán', 'reason_code' => 'unpaid_bills'], 422);
+        }
+        // Chặn nếu đã có đơn được duyệt (1 sinh viên chỉ có 1 đơn approved tại một thời điểm)
+        $hasApproved = Registration::where('student_id', $student->id)
+            ->where('status', 'approved')
+            ->exists();
+        if ($hasApproved) {
+            return response()->json(['message' => 'Bạn đã có đơn được duyệt. Không thể gửi đơn mới.', 'reason_code' => 'already_approved'], 422);
+        }
+
+        $activePeriod = RegistrationPeriod::where('status', 'active')->first();
+        if (!$activePeriod) {
+            return response()->json(['message' => 'Hiện không có đợt đăng ký nào đang mở', 'reason_code' => 'no_open_channel'], 422);
         }
 
         $currentStudent = $student;
@@ -222,8 +459,24 @@ class RegistrationController extends Controller
             }
         }
 
+        $rawCriteriaIds = $request->input('priority_criteria_ids');
+        $criteriaIds = [];
+        if ($rawCriteriaIds) {
+            $parsed = is_array($rawCriteriaIds) ? $rawCriteriaIds : json_decode($rawCriteriaIds, true);
+            $criteriaIds = is_array($parsed) ? array_map('intval', $parsed) : [];
+        }
+
+        // Đã chọn diện ưu tiên thì bắt buộc phải có ít nhất 1 ảnh minh chứng
+        foreach ($criteriaIds as $criteriaId) {
+            if (!$request->hasFile('priority_evidence_' . $criteriaId)) {
+                return response()->json([
+                    'message' => 'Vui lòng tải lên minh chứng cho các diện ưu tiên đã chọn.',
+                ], 422);
+            }
+        }
+
         try {
-            $result = DB::transaction(function () use ($account, $currentStudent, $data) {
+            $result = DB::transaction(function () use ($account, $currentStudent, $data, $criteriaIds, $activePeriod) {
                 // Clean existing avatar if it's a full URL
                 $existingAvatar = null;
                 if ($currentStudent && $currentStudent->avatar) {
@@ -233,7 +486,7 @@ class RegistrationController extends Controller
                         $existingAvatar = $parts[1] ?? $existingAvatar;
                     }
                 }
-                
+
                 $studentPayload = [
                     'student_code' => $data['student_code'],
                     'avatar' => $data['avatar'] ?? $existingAvatar,
@@ -264,56 +517,53 @@ class RegistrationController extends Controller
                     $account->save();
                 }
 
-                $hasPendingSameSemester = Registration::where('student_id', $student->id)
-                    ->where('semester', $data['semester'])
+                // Unique constraint: mỗi sinh viên chỉ có 1 đơn submitted trong 1 đợt
+                $hasPendingInPeriod = Registration::where('student_id', $student->id)
+                    ->where('registration_period_id', $activePeriod->id)
                     ->where('status', 'submitted')
                     ->lockForUpdate()
                     ->exists();
 
-                if ($hasPendingSameSemester) {
+                if ($hasPendingInPeriod) {
                     throw new RuntimeException('DUPLICATE_PENDING_REGISTRATION');
                 }
 
-                $existingRejected = Registration::where('student_id', $student->id)
-                    ->where('semester', $data['semester'])
-                    ->where('status', 'rejected')
-                    ->lockForUpdate()
-                    ->latest('id')
-                    ->first();
-
                 $registrationPayload = [
-                    'student_id' => $student->id,
-                    'avatar_url' => $data['avatar'] ?? $existingAvatar,
-                    'cccd_front_url' => $data['cccd_front_url'] ?? null,
-                    'cccd_back_url' => $data['cccd_back_url'] ?? null,
-                    'semester' => $data['semester'],
-                    'status' => 'submitted',
-                    'father_name' => $data['father_name'] ?? ($data['parent_name'] ?? ''),
-                    'father_birth_year' => $data['father_birth_year'] ?? '',
-                    'father_job' => $data['father_job'] ?? '',
-                    'father_phone' => $data['father_phone'] ?? ($data['parent_phone'] ?? ''),
-                    'mother_name' => $data['mother_name'] ?? '',
-                    'mother_birth_year' => $data['mother_birth_year'] ?? '',
-                    'mother_job' => $data['mother_job'] ?? '',
-                    'mother_phone' => $data['mother_phone'] ?? '',
-                    'parent_address' => $data['parent_address'] ?? ($data['permanent_address'] ?? ''),
-                    'stay_from_date' => $data['stay_from_date'] ?? now()->toDateString(),
-                    'stay_to_date' => $data['stay_to_date'] ?? now()->toDateString(),
-                    'commitment_confirm' => $data['commitment_confirm'] ?? false,
+                    'student_id'             => $student->id,
+                    'registration_period_id' => $activePeriod->id,
+                    'registration_type'      => 'new',
+                    'avatar_url'             => $data['avatar'] ?? $existingAvatar,
+                    'cccd_front_url'         => $data['cccd_front_url'] ?? null,
+                    'cccd_back_url'          => $data['cccd_back_url'] ?? null,
+                    'semester'               => $activePeriod->semester,
+                    'school_year'            => $activePeriod->school_year,
+                    'status'                 => 'submitted',
+                    'father_name'            => $data['father_name'] ?? ($data['parent_name'] ?? ''),
+                    'father_birth_year'      => $data['father_birth_year'] ?? '',
+                    'father_job'             => $data['father_job'] ?? '',
+                    'father_phone'           => $data['father_phone'] ?? ($data['parent_phone'] ?? ''),
+                    'mother_name'            => $data['mother_name'] ?? '',
+                    'mother_birth_year'      => $data['mother_birth_year'] ?? '',
+                    'mother_job'             => $data['mother_job'] ?? '',
+                    'mother_phone'           => $data['mother_phone'] ?? '',
+                    'parent_address'         => $data['parent_address'] ?? ($data['permanent_address'] ?? ''),
+                    'stay_from_date'         => $activePeriod->stay_start_date?->toDateString(),
+                    'stay_to_date'           => $activePeriod->stay_end_date?->toDateString(),
+                    'commitment_confirm'     => $data['commitment_confirm'] ?? false,
                 ];
 
-                if ($existingRejected) {
-                    if (isset($data['cccd_front_url'])) {
-                        $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
-                    }
+                $registration = Registration::create($registrationPayload);
 
-                    if (isset($data['cccd_back_url'])) {
-                        $registrationPayload['cccd_back_url'] = $data['cccd_back_url'];
+                // Lưu tiêu chí ưu tiên nếu sinh viên chọn — gắn với đơn này
+                if (!empty($criteriaIds)) {
+                    foreach ($criteriaIds as $criteriaId) {
+                        StudentPriority::create([
+                            'student_id' => $student->id,
+                            'registration_id' => $registration->id,
+                            'priority_criteria_id' => $criteriaId,
+                            'status' => 'pending',
+                        ]);
                     }
-
-                    $registration = Registration::create($registrationPayload);
-                } else {
-                    $registration = Registration::create($registrationPayload);
                 }
 
                 return [
@@ -331,6 +581,52 @@ class RegistrationController extends Controller
             throw $exception;
         }
 
+        // Xử lý file minh chứng sau transaction (tối đa 6 ảnh / tiêu chí)
+        if (!empty($criteriaIds)) {
+            $registrationId = $result['registration']->id;
+            foreach ($criteriaIds as $criteriaId) {
+                $evidenceKey = 'priority_evidence_' . $criteriaId;
+                if (!$request->hasFile($evidenceKey)) {
+                    continue;
+                }
+
+                $files = $request->file($evidenceKey);
+                if (!is_array($files)) {
+                    $files = [$files];
+                }
+                $files = array_slice($files, 0, 6);
+
+                $priority = StudentPriority::where('registration_id', $registrationId)
+                    ->where('priority_criteria_id', $criteriaId)
+                    ->first();
+                if (!$priority) {
+                    continue;
+                }
+
+                $path = 'students/priority_evidence';
+                foreach ($files as $index => $file) {
+                    $filename = 'evidence_' . $criteriaId . '_' . time() . '_' . uniqid() . '_' . $index . '.' . $file->getClientOriginalExtension();
+
+                    if (StorageHelper::isRailwayWithVolume()) {
+                        $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+                        $fullDir = $volumePath . '/' . $path;
+                        if (!file_exists($fullDir)) {
+                            mkdir($fullDir, 0755, true);
+                        }
+                        $file->move($fullDir, $filename);
+                        $fileUrl = $path . '/' . $filename;
+                    } else {
+                        $fileUrl = $file->store($path, 'public');
+                    }
+
+                    $priority->evidences()->create(['file_url' => $fileUrl]);
+                }
+            }
+        }
+
+        $autoReview = new AutoReviewService();
+        $autoReview->handleAfterSubmission($result['registration']);
+
         return response()->json([
             'message' => 'Đăng ký thành công',
             'data' => $result
@@ -340,7 +636,7 @@ class RegistrationController extends Controller
     public function getMyRegistration(Request $request)
     {
         $email = $request->query('email');
-        $semester = $request->query('semester', '2024-2025');
+        $semester = $request->query('semester');
 
         $student = Student::where('email', $email)->first();
 
@@ -358,9 +654,12 @@ class RegistrationController extends Controller
             return response()->json(null);
         }
 
-        $registration = Registration::with(['student', 'student.account', 'occupancy'])
+        // Chỉ lọc theo semester khi FE truyền vào; mặc định lấy đơn mới nhất
+        // của sinh viên ở bất kỳ học kỳ nào để trạng thái (submitted/approved/
+        // rejected) luôn hiển thị đúng.
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])
             ->where('student_id', $account->student_id)
-            ->where('semester', $semester)
+            ->when($semester, fn ($query) => $query->where('semester', $semester))
             ->latest('id')
             ->first();
 
@@ -380,6 +679,7 @@ class RegistrationController extends Controller
         }
 
         $registration->status = 'approved';
+        $registration->approved_at = now();
         $registration->save();
 
         return response()->json([
@@ -420,7 +720,7 @@ class RegistrationController extends Controller
             'room_id' => 'required|integer|exists:rooms,id',
         ]);
 
-        $registration = Registration::with('occupancy')->find($id);
+        $registration = Registration::with(['occupancy', 'period'])->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
@@ -445,9 +745,13 @@ class RegistrationController extends Controller
             }
         }
 
+        $period = $registration->period;
+
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $request->room_id;
         $occupancy->bed_id = null;
+        $occupancy->check_in_date = $period?->stay_start_date?->toDateString();
+        $occupancy->check_out_date = $period?->stay_end_date?->toDateString();
         // Admin confirmed the room; student must still pick a bed.
         $occupancy->status = 'ROOM_CONFIRMED';
         $occupancy->bed_approval_status = null;
@@ -489,28 +793,32 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn đăng ký'], 404);
         }
 
+        // 1. Tìm giường — phải tồn tại trước khi check bất cứ điều gì
         $bed = Bed::find($request->bed_id);
-        if ($bed && strtolower((string) $bed->status) === 'maintenance') {
-            return response()->json(['message' => 'GiÆ°á»ng Ä‘ang báº£o trÃ¬ nÃªn khÃ´ng thá»ƒ chá»n'], 422);
-        }
-
-        if ($bed) {
-            $isOccupiedByAnotherStudent = Occupancy::query()
-                ->occupiedBeds()
-                ->where('bed_id', $bed->id)
-                ->where('student_id', '!=', $registration->student_id)
-                ->exists();
-
-            if ($isOccupiedByAnotherStudent) {
-                return response()->json(['message' => 'GiÆ°á»ng Ä‘Ã£ cÃ³ sinh viÃªn á»Ÿ'], 422);
-            }
-        }
         if (!$bed) {
-            return response()->json(['message' => 'Giường không tồn tại'], 404);
+            return response()->json(['message' => 'Giường không tồn tại.'], 404);
         }
 
-        if ($registration->occupancy?->room_id && (int) $registration->occupancy->room_id !== (int) $bed->room_id) {
-            return response()->json(['message' => 'Giường không thuộc phòng đã phân.'], 422);
+        // 2. Giường phải thuộc đúng phòng được phân — luôn validate, không bypass dù occupancy null
+        $assignedRoomId = $registration->occupancy?->room_id;
+        if (!$assignedRoomId || (int) $assignedRoomId !== (int) $bed->room_id) {
+            return response()->json(['message' => 'Giường không thuộc phòng của bạn.'], 403);
+        }
+
+        // 3. Giường không được đang bảo trì
+        if (strtolower((string) $bed->status) === 'maintenance') {
+            return response()->json(['message' => 'Giường đang bảo trì, vui lòng chọn giường khác.'], 422);
+        }
+
+        // 4. Giường chưa được sinh viên khác chọn (ROOM_CONFIRMED) hoặc đang ở (ACTIVE)
+        $isOccupiedByAnotherStudent = Occupancy::query()
+            ->occupiedBeds()
+            ->where('bed_id', $bed->id)
+            ->where('student_id', '!=', $registration->student_id)
+            ->exists();
+
+        if ($isOccupiedByAnotherStudent) {
+            return response()->json(['message' => 'Giường vừa được chọn bởi người khác, vui lòng chọn giường khác.'], 422);
         }
 
         $occupancy = Occupancy::firstOrNew([
@@ -531,9 +839,8 @@ class RegistrationController extends Controller
         $occupancy->registration_id = $registration->id;
         $occupancy->room_id = $bed->room_id;
         $occupancy->bed_id = $bed->id;
-        // Bed picked; awaiting admin approval. Lifecycle stays ROOM_CONFIRMED.
-        $occupancy->status = 'ROOM_CONFIRMED';
-        $occupancy->bed_approval_status = 'pending';
+        $occupancy->status = 'ACTIVE';
+        $occupancy->bed_approval_status = 'approved';
         $occupancy->check_out_date = null;
         $occupancy->save();
 
@@ -546,7 +853,7 @@ class RegistrationController extends Controller
             'select_bed'
         );
 
-        return response()->json(['message' => 'Đã chọn giường']);
+        return response()->json(['message' => 'Đã chọn giường.']);
     }
 
     public function approveBed($id)
@@ -735,19 +1042,17 @@ class RegistrationController extends Controller
             'rejectionReason' => 'required|string|max:500',
         ]);
 
-        $registration = Registration::find($id);
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
         $registration->status = 'rejected';
-        $registration->rejection_reason = $request->rejectionReason;
+        $registration->rejection_reason = $request->input('rejectionReason');
         $registration->save();
 
-        return response()->json([
-            'message' => 'Đã từ chối'
-        ]);
+        return response()->json($this->formatRegistration($registration));
     }
 
     public function show($id)
@@ -795,5 +1100,103 @@ class RegistrationController extends Controller
         return $registrations->map(function ($registration) {
             return $this->formatRegistration($registration);
         });
+    }
+
+    public function patchAutoDecision($id, Request $request)
+    {
+        $request->validate([
+            'decision' => 'required|in:approve,reject,review',
+            'reason'   => 'nullable|string|max:1000',
+        ]);
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        $registration->auto_decision = $request->input('decision');
+        $registration->auto_decision_reason = $request->input('reason');
+        $registration->save();
+
+        return response()->json($this->formatRegistration($registration));
+    }
+
+    public function confirmSingle($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if (!in_array($registration->auto_decision, ['approve', 'reject'])) {
+            return response()->json(['message' => 'Đơn chưa có quyết định tự động (auto_decision phải là approve hoặc reject)'], 422);
+        }
+
+        $registration->status = $registration->auto_decision === 'approve' ? 'approved' : 'rejected';
+        if ($registration->status === 'approved') {
+            $registration->approved_at = now();
+        }
+        if ($registration->status === 'rejected' && $registration->auto_decision_reason) {
+            $registration->rejection_reason = $registration->auto_decision_reason;
+        }
+        $registration->save();
+
+        return response()->json($this->formatRegistration($registration));
+    }
+
+    public function confirmBatch($periodId)
+    {
+        $period = RegistrationPeriod::find($periodId);
+
+        if (!$period) {
+            return response()->json(['message' => 'Không tìm thấy đợt đăng ký'], 404);
+        }
+
+        if ($period->channel !== 'main') {
+            return response()->json(['message' => 'Chỉ áp dụng cho đợt kênh chính (main)'], 422);
+        }
+
+        if ($period->status !== 'processing') {
+            return response()->json(['message' => 'Đợt phải đang ở trạng thái processing'], 422);
+        }
+
+        $registrations = Registration::where('registration_period_id', $periodId)
+            ->whereIn('status', ['submitted'])
+            ->get();
+
+        $confirmed = 0;
+        $skippedReview = 0;
+        $skippedNull = 0;
+
+        foreach ($registrations as $reg) {
+            if ($reg->auto_decision === 'approve') {
+                $reg->status = 'approved';
+                $reg->approved_at = now();
+                $reg->save();
+                $confirmed++;
+            } elseif ($reg->auto_decision === 'reject') {
+                $reg->status = 'rejected';
+                if ($reg->auto_decision_reason) {
+                    $reg->rejection_reason = $reg->auto_decision_reason;
+                }
+                $reg->save();
+                $confirmed++;
+            } elseif ($reg->auto_decision === 'review') {
+                $skippedReview++;
+            } else {
+                $skippedNull++;
+            }
+        }
+
+        $period->status = 'closed';
+        $period->save();
+
+        return response()->json([
+            'confirmed'      => $confirmed,
+            'skipped_review' => $skippedReview,
+            'skipped_null'   => $skippedNull,
+        ]);
     }
 }
