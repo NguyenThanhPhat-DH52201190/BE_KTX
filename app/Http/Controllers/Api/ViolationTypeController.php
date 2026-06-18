@@ -26,13 +26,17 @@ class ViolationTypeController extends Controller
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'max:191', 'unique:activity_types,name'],
-            'level' => ['required', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
+            'category' => ['required', 'string', Rule::in(['positive', 'negative'])],
+            'level' => ['nullable', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
+            'points' => ['nullable', 'integer'],
             'description' => ['nullable', 'string'],
         ]);
 
         $type = ActivityType::query()->create([
             'name' => trim($data['name']),
-            'level' => $data['level'],
+            'category' => $data['category'],
+            'level' => $data['category'] === 'negative' ? ($data['level'] ?? 'MINOR') : ($data['level'] ?? 'MINOR'),
+            'points' => (int) ($data['points'] ?? 0),
             'description' => trim((string) ($data['description'] ?? '')),
         ]);
 
@@ -50,13 +54,17 @@ class ViolationTypeController extends Controller
                 'max:191',
                 Rule::unique('activity_types', 'name')->ignore($type->id),
             ],
-            'level' => ['required', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
+            'category' => ['required', 'string', Rule::in(['positive', 'negative'])],
+            'level' => ['nullable', 'string', Rule::in(['MINOR', 'MEDIUM', 'SERIOUS'])],
+            'points' => ['nullable', 'integer'],
             'description' => ['nullable', 'string'],
         ]);
 
         $type->update([
             'name' => trim($data['name']),
-            'level' => $data['level'],
+            'category' => $data['category'],
+            'level' => $data['category'] === 'negative' ? ($data['level'] ?? 'MINOR') : ($data['level'] ?? 'MINOR'),
+            'points' => (int) ($data['points'] ?? 0),
             'description' => trim((string) ($data['description'] ?? '')),
         ]);
 
@@ -68,7 +76,7 @@ class ViolationTypeController extends Controller
         $type = ActivityType::query()->findOrFail($id);
 
         if (DB::table('activities')->where('activity_type_id', $type->id)->exists()) {
-            return response()->json(['message' => 'Không thể xóa loại vi phạm đã được sử dụng.'], 422);
+            return response()->json(['message' => 'Không thể xóa hoạt động đã được ghi nhận.'], 422);
         }
 
         $type->delete();
@@ -82,6 +90,8 @@ class ViolationTypeController extends Controller
             'id' => (int) $type->id,
             'name' => $type->name,
             'level' => strtoupper((string) $type->level),
+            'category' => $type->category ?? 'negative',
+            'points' => (int) ($type->points ?? 0),
             'description' => $type->description ?? '',
         ];
     }

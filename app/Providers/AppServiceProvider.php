@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Models\Occupancy;
+use App\Observers\OccupancyObserver;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\Schema;
 
@@ -20,5 +22,6 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Schema::defaultStringLength(191);
+        Occupancy::observe(OccupancyObserver::class);
     }
 }

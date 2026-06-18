@@ -58,6 +58,9 @@ class RegistrationController extends Controller
     {
         $registration->loadMissing('period');
         $student = $registration->student;
+        $blacklist = $student
+            ? Blacklist::where('student_id', $student->id)->latest('id')->first()
+            : null;
         $formData = [
             'mssv' => $student?->student_code,
             'fullName' => $student?->full_name,
@@ -115,12 +118,17 @@ class RegistrationController extends Controller
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
             'bed_approval_status' => $registration->occupancy?->bed_approval_status,
-            'occupancy_status' => $registration->occupancy?->status,
+            'occupancy_status' => $this->mapOccupancyStatus($registration->occupancy),
             'checkout_requested' => (bool) ($registration->occupancy?->pendingCheckoutRequest),
             'occupancy_reason' => $registration->occupancy?->reason,
             'check_in_date' => $registration->occupancy?->check_in_date,
             'check_out_date' => $registration->occupancy?->check_out_date,
             'room_assigned_at' => $registration->occupancy?->created_at,
+            'blacklist' => $blacklist ? [
+                'reason' => $blacklist->reason,
+                'source' => $blacklist->source,
+                'created_at' => $blacklist->created_at,
+            ] : null,
             'note' => $registration->note,
             'created_at' => $registration->created_at,
             'student' => $registration->student,
@@ -1198,5 +1206,17 @@ class RegistrationController extends Controller
             'skipped_review' => $skippedReview,
             'skipped_null'   => $skippedNull,
         ]);
+    }
+
+    private function mapOccupancyStatus(?Occupancy $occupancy): ?string
+    {
+        if (! $occupancy) {
+            return null;
+        }
+
+        return match ($occupancy->status) {
+            'COMPLETED' => $occupancy->reason === 'FORCE_EVICTED' ? 'forced_checkout' : 'checked_out',
+            default     => $occupancy->status,
+        };
     }
 }

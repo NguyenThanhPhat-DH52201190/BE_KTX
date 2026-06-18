@@ -26,7 +26,10 @@ class RoomFeeBill extends Model
 
     protected $casts = [
         'days_stayed' => 'integer',
-        'total_days' => 'integer',
+        'total_days'  => 'integer',
+        'amount'      => 'integer',
+        'paid_at'     => 'datetime',
+        'due_date'    => 'date',
     ];
 
     public function student(): BelongsTo

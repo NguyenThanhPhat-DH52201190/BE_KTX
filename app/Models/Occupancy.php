@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use App\Models\RoomFeeBill;
 
 class Occupancy extends Model
 {
@@ -75,5 +76,10 @@ class Occupancy extends Model
     public function pendingCheckoutRequest(): HasOne
     {
         return $this->hasOne(CheckoutRequest::class)->where('status', 'pending');
+    }
+
+    public function roomFeeBills(): HasMany
+    {
+        return $this->hasMany(RoomFeeBill::class);
     }
 }

@@ -111,7 +111,7 @@ class ElectricityController extends Controller
 
             foreach ($occupancies as $occupancy) {
                 $exists = ElectricityBill::query()
-                    ->where('occupancy_id', $occupancy->id)
+                    ->where('student_id', $occupancy->student_id)
                     ->where('month_year', trim($data['month_year']))
                     ->exists();
 
@@ -134,7 +134,7 @@ class ElectricityController extends Controller
         });
 
         return response()->json([
-            'record' => $this->formatRecord($record->fresh('room.floor')),
+            'record' => $record ? $this->formatRecord($record->fresh('room.floor')) : null,
             'created_count' => count($created),
             'skipped_count' => $skipped,
             'items' => collect($created)

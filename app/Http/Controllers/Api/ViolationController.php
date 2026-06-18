@@ -4,22 +4,39 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Activity;
+use App\Models\ActivityType;
+use App\Models\Blacklist;
 use App\Models\CheckoutRequest;
 use App\Models\Occupancy;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class ViolationController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
         $query = Activity::query()
-            ->with(['type', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed'])
+            ->with(['type', 'student', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed'])
             ->orderByDesc('activity_date')
             ->orderByDesc('id');
 
         if ($request->filled('occupancy_id')) {
             $query->where('occupancy_id', (int) $request->query('occupancy_id'));
+        }
+
+        if ($request->filled('student_id')) {
+            $query->where('student_id', (int) $request->query('student_id'));
+        }
+
+        if ($request->filled('student_email')) {
+            $email = (string) $request->query('student_email');
+            $query->where(function ($studentScope) use ($email) {
+                $studentScope
+                    ->whereHas('student', fn ($studentQuery) => $studentQuery->where('email', $email))
+                    ->orWhereHas('occupancy.student', fn ($studentQuery) => $studentQuery->where('email', $email));
+            });
         }
 
         return response()->json(
@@ -34,14 +51,26 @@ class ViolationController extends Controller
             'type_id' => ['required', 'integer', 'exists:activity_types,id'],
             'violation_date' => ['required', 'date'],
             'note' => ['nullable', 'string'],
+            'action_taken' => ['nullable', 'string', Rule::in([
+                'reward_recorded',
+                'reminded',
+                'warned',
+                'force_evicted',
+                'WARNING',
+                'FORCED_CHECKOUT',
+            ])],
         ]);
 
         $occupancy = Occupancy::query()->findOrFail((int) $data['occupancy_id']);
         if ($this->isForcedCheckout($occupancy->status)) {
             return response()->json([
-                'message' => 'Sinh viên đã bị buộc thôi ở, không thể thêm vi phạm mới.',
+                'message' => 'Sinh viên không còn lưu trú tại KTX, không thể ghi nhận hoạt động mới.',
             ], 422);
         }
+
+        $type = ActivityType::query()->findOrFail((int) $data['type_id']);
+        $actionTaken = $this->resolveActionTaken($type, $data['action_taken'] ?? null);
+        $status = $actionTaken ? 'resolved' : 'pending';
 
         $activity = Activity::query()->create([
             'occupancy_id' => (int) $data['occupancy_id'],
@@ -49,11 +78,17 @@ class ViolationController extends Controller
             'activity_type_id' => (int) $data['type_id'],
             'activity_date' => $data['violation_date'],
             'note' => trim((string) ($data['note'] ?? '')),
-            'status' => 'pending',
-            'action_taken' => null,
+            'status' => $status,
+            'action_taken' => $actionTaken,
         ]);
 
-        return response()->json($this->formatViolation($activity->load('type')), 201);
+        if ($actionTaken === 'force_evicted') {
+            $this->applyForcedEviction($activity->load(['type', 'occupancy.bed', 'occupancy.student']), trim((string) ($data['note'] ?? '')));
+        }
+
+        return response()->json($this->formatViolation(
+            $activity->fresh(['type', 'student', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed']),
+        ), 201);
     }
 
     public function update(Request $request, int $id): JsonResponse
@@ -80,35 +115,21 @@ class ViolationController extends Controller
         $activity = Activity::query()->with(['occupancy.bed'])->findOrFail($id);
 
         $data = $request->validate([
-            'action_taken' => ['required', 'string', 'in:WARNING,FORCED_CHECKOUT'],
+            'action_taken' => ['required', 'string', Rule::in(['reminded', 'warned', 'force_evicted', 'WARNING', 'FORCED_CHECKOUT'])],
             'note' => ['nullable', 'string'],
         ]);
 
         $note = trim((string) ($data['note'] ?? $activity->note ?? ''));
+        $actionTaken = $this->normalizeActionTaken((string) $data['action_taken']);
 
         $activity->update([
             'note' => $note,
             'status' => 'resolved',
-            'action_taken' => $data['action_taken'],
+            'action_taken' => $actionTaken,
         ]);
 
-        if ($data['action_taken'] === 'FORCED_CHECKOUT' && $activity->occupancy) {
-            $occupancy = $activity->occupancy;
-            $occupancy->status = 'TERMINATED';
-            $occupancy->reason = $note !== '' ? $note : ($activity->type?->name ?? 'Buộc thôi ở do vi phạm nội quy.');
-            $occupancy->check_out_date = now()->toDateString();
-            $occupancy->save();
-
-            // Buộc thôi ở: chốt mọi yêu cầu thôi ở đang chờ (nếu có).
-            CheckoutRequest::where('occupancy_id', $occupancy->id)
-                ->where('status', 'pending')
-                ->update(['status' => 'approved', 'processed_at' => now()]);
-
-            $bed = $occupancy->bed;
-            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-                $bed->status = 'active';
-                $bed->save();
-            }
+        if ($actionTaken === 'force_evicted') {
+            $this->applyForcedEviction($activity->load(['type', 'occupancy.bed', 'occupancy.student']), $note);
         }
 
         return response()->json($this->formatViolation(
@@ -125,13 +146,69 @@ class ViolationController extends Controller
 
     private function isForcedCheckout(?string $status): bool
     {
-        return strtoupper(trim((string) $status)) === 'TERMINATED';
+        return in_array(strtoupper(trim((string) $status)), ['TERMINATED', 'COMPLETED'], true);
+    }
+
+    private function resolveActionTaken(ActivityType $type, ?string $requestedAction): ?string
+    {
+        if (($type->category ?? 'negative') === 'positive') {
+            return 'reward_recorded';
+        }
+
+        return $requestedAction ? $this->normalizeActionTaken($requestedAction) : null;
+    }
+
+    private function normalizeActionTaken(string $action): string
+    {
+        return match (strtoupper(trim($action))) {
+            'WARNING' => 'reminded',
+            'FORCED_CHECKOUT' => 'force_evicted',
+            default => trim($action),
+        };
+    }
+
+    private function applyForcedEviction(Activity $activity, string $note): void
+    {
+        if (! $activity->occupancy) {
+            return;
+        }
+
+        DB::transaction(function () use ($activity, $note) {
+            $activity->loadMissing(['type', 'occupancy.bed', 'occupancy.student']);
+            $occupancy = $activity->occupancy;
+
+            $occupancy->status = 'COMPLETED';
+            $occupancy->reason = 'FORCE_EVICTED';
+            $occupancy->check_out_date = now()->toDateString();
+            $occupancy->save();
+
+            CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved', 'processed_at' => now()]);
+
+            $bed = $occupancy->bed;
+            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+                $bed->status = 'EMPTY';
+                $bed->save();
+            }
+
+            if ($occupancy->student_id) {
+                Blacklist::query()->firstOrCreate(
+                    ['student_id' => $occupancy->student_id],
+                    [
+                        'reason' => trim(($activity->type?->name ?? 'Vi phạm nghiêm trọng') . ($note !== '' ? ' - ' . $note : '')),
+                        'source' => 'serious_violation',
+                        'created_by' => null,
+                    ],
+                );
+            }
+        });
     }
 
     private function formatViolation(Activity $activity): array
     {
         $occupancy = $activity->occupancy;
-        $student = $occupancy?->student ?? $occupancy?->registration?->student;
+        $student = $activity->student ?? $occupancy?->student ?? $occupancy?->registration?->student;
         $room = $occupancy?->room;
         $bed = $occupancy?->bed;
         $buildingCode = $room?->floor?->building_code ?? '';
@@ -165,6 +242,8 @@ class ViolationController extends Controller
                 'id' => (int) $activity->type->id,
                 'name' => $activity->type->name,
                 'level' => strtoupper((string) $activity->type->level),
+                'category' => $activity->type->category ?? 'negative',
+                'points' => (int) ($activity->type->points ?? 0),
                 'description' => $activity->type->description ?? '',
                 'status' => strtolower((string) ($activity->type->status ?? 'active')),
             ] : null,
