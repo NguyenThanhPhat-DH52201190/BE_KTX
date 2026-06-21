@@ -33,15 +33,13 @@ class RegistrationPeriodController extends Controller
           ->addBinding($pendingCriteriaSubquery->getBindings(), 'select');
     }
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $this->syncPeriodStatuses();
 
-        $periods = $this->withBreakdownCounts()
-            ->orderByDesc('created_at')
-            ->get();
+        $query = $this->withBreakdownCounts()->orderByDesc('created_at');
 
-        return response()->json($periods);
+        return response()->json($query->get());
     }
 
     private function syncPeriodStatuses(): void
@@ -56,6 +54,7 @@ class RegistrationPeriodController extends Controller
             ->whereDate('end_date', '<', $today)
             ->update(['status' => 'closed']);
     }
+
     public function show(int $id): JsonResponse
     {
         $period = $this->withBreakdownCounts()->findOrFail($id);
@@ -106,7 +105,7 @@ class RegistrationPeriodController extends Controller
             }
         }
 
-        // Rule 3: Thời gian nhận đơn không được trùng với đợt đang active/pending
+        // Rule 3: Thời gian nhận đơn không được trùng
         $overlap = RegistrationPeriod::whereIn('status', ['active', 'pending'])
             ->where('start_date', '<=', $data['end_date'])
             ->where('end_date', '>=', $data['start_date'])
@@ -145,13 +144,11 @@ class RegistrationPeriodController extends Controller
             'processing_days'    => ['nullable', 'integer', 'min:1'],
         ]);
 
-        // Effective values after merge with existing record
         $channel    = $data['channel']     ?? $period->channel;
         $schoolYear = $data['school_year'] ?? $period->school_year;
         $startDate  = $data['start_date']  ?? $period->start_date?->toDateString();
         $endDate    = $data['end_date']    ?? $period->end_date?->toDateString();
 
-        // Rule 1: Mỗi năm học chỉ được có 1 đợt chính
         if ($channel === 'main') {
             $existing = RegistrationPeriod::where('channel', 'main')
                 ->where('school_year', $schoolYear)
@@ -166,7 +163,6 @@ class RegistrationPeriodController extends Controller
             }
         }
 
-        // Rule 2: Kênh quanh năm chỉ được mở sau khi đợt chính đã đóng
         if ($channel === 'rolling') {
             $mainClosed = RegistrationPeriod::where('channel', 'main')
                 ->where('school_year', $schoolYear)
@@ -181,7 +177,6 @@ class RegistrationPeriodController extends Controller
             }
         }
 
-        // Rule 3: Thời gian nhận đơn không được trùng với đợt đang active/pending
         if ($startDate && $endDate) {
             $overlap = RegistrationPeriod::whereIn('status', ['active', 'pending'])
                 ->where('id', '!=', $id)
@@ -224,11 +219,6 @@ class RegistrationPeriodController extends Controller
         return response()->json(['message' => 'Đã xóa đợt đăng ký.']);
     }
 
-    /**
-     * Run batch priority ranking for a main-channel period.
-     * Sets auto_decision suggestion on each registration; does NOT change status.
-     * Sets period status to 'processing' to block new submissions.
-     */
     public function process(int $id): JsonResponse
     {
         $period = RegistrationPeriod::findOrFail($id);
@@ -245,8 +235,6 @@ class RegistrationPeriodController extends Controller
         $occupiedCount  = Occupancy::occupiedBedsQuery()->pluck('bed_id')->unique()->count();
         $freeBeds       = max(0, $totalAvailable - $occupiedCount);
 
-        // Count registrations that still have pending (unverified) priority criteria.
-        // Ranking will use only verified criteria — unverified ones get tier 99 / score 0.
         $pendingCriteriaCount = \App\Models\StudentPriority::query()
             ->whereHas('registration', fn ($q) => $q->where('registration_period_id', $period->id))
             ->where('status', 'pending')
@@ -272,10 +260,10 @@ class RegistrationPeriodController extends Controller
         $period->save();
 
         return response()->json([
-            'message'               => 'Đã xếp hạng xong.',
-            'free_beds'             => $freeBeds,
-            'approved'              => $result['approved']->count(),
-            'waitlist'              => $result['waitlist']->count(),
+            'message'                => 'Đã xếp hạng xong.',
+            'free_beds'              => $freeBeds,
+            'approved'               => $result['approved']->count(),
+            'waitlist'               => $result['waitlist']->count(),
             'pending_criteria_count' => $pendingCriteriaCount,
         ]);
     }

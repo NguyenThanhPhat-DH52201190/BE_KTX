@@ -18,10 +18,12 @@ use App\Models\StudentPriority;
 use App\Models\Blacklist;
 use App\Models\ElectricityBill;
 use App\Models\RoomFeeBill;
+use App\Models\Notification;
 use App\Helpers\StorageHelper;
 use App\Services\AutoReviewService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use RuntimeException;
 
 class RegistrationController extends Controller
@@ -176,6 +178,98 @@ class RegistrationController extends Controller
             'status' => null,
             'transferred_at' => now(),
         ]);
+    }
+
+    private function notifyRoomAssignmentChange(
+        Registration $registration,
+        ?int $oldRoomId,
+        ?int $oldBedId,
+        ?int $newRoomId,
+        ?int $newBedId,
+    ): void {
+        $student = $registration->student;
+
+        if (! $student || ! $newRoomId || $oldRoomId === $newRoomId) {
+            return;
+        }
+
+        $oldRoom = $oldRoomId ? Room::with('floor')->find($oldRoomId) : null;
+        $newRoom = Room::with('floor')->find($newRoomId);
+        $oldBed = $oldBedId ? Bed::find($oldBedId) : null;
+        $newBed = $newBedId ? Bed::find($newBedId) : null;
+
+        $oldRoomCode = $oldRoom ? (($oldRoom->floor?->building_code ?? '') . ($oldRoom->room_number ?? '')) : null;
+        $newRoomCode = $newRoom ? (($newRoom->floor?->building_code ?? '') . ($newRoom->room_number ?? '')) : null;
+
+        if (! $newRoomCode) {
+            return;
+        }
+
+        $isRoomChange = ! empty($oldRoomCode);
+        $title = $isRoomChange ? 'Thông báo đổi phòng lưu trú' : 'Thông báo phân phòng lưu trú';
+        $type = $isRoomChange ? 'room_assignment_changed' : 'room_assigned';
+        $oldLabel = $oldRoomCode
+            ? "Phòng {$oldRoomCode}" . ($oldBed ? ", Giường {$oldBed->bed_number}" : '')
+            : null;
+        $newLabel = "Phòng {$newRoomCode}" . ($newBed ? ", Giường {$newBed->bed_number}" : '');
+
+        $content = $isRoomChange
+            ? "Ban quản lý đã đổi phòng lưu trú của bạn từ {$oldLabel} sang {$newLabel}."
+            : "Ban quản lý đã phân phòng lưu trú cho bạn: {$newLabel}.";
+
+        if (! $newBed) {
+            $content .= ' Vui lòng đăng nhập hệ thống để chọn giường trong phòng mới.';
+        }
+
+        $this->createStudentNotification($student->id, $title, $content, $type);
+        $this->sendStudentNotificationEmail($student, $title, $content);
+    }
+
+    private function createStudentNotification(int $studentId, string $title, string $content, string $type): void
+    {
+        try {
+            $notification = Notification::create([
+                'student_id'  => $studentId,
+                'title'       => $title,
+                'content'     => $content,
+                'type'        => $type,
+                'target_type' => 'individual',
+                'send_email'  => true,
+            ]);
+            DB::table('notification_recipient')->insert([
+                'notification_id' => $notification->id,
+                'student_id'      => $studentId,
+                'is_read'         => false,
+                'read_at'         => null,
+            ]);
+        } catch (\Exception) {}
+    }
+
+    private function sendStudentNotificationEmail(Student $student, string $title, string $content): void
+    {
+        if (empty($student->email)) {
+            return;
+        }
+
+        try {
+            $name = htmlspecialchars($student->full_name ?? '');
+            $safeTitle = htmlspecialchars($title);
+            $safeContent = nl2br(htmlspecialchars($content));
+            $body = "
+                <div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152;'>
+                    <h2 style='color:#244cb8;margin-top:0;'>{$safeTitle}</h2>
+                    <p>Xin chào <strong>{$name}</strong>,</p>
+                    <p style='line-height:1.7;'>{$safeContent}</p>
+                    <p style='color:#6b7280;font-size:12px;margin-top:32px;'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
+                </div>
+            ";
+
+            Mail::send([], [], function ($message) use ($student, $title, $body) {
+                $message->to($student->email, $student->full_name ?? '')
+                    ->subject("KTX — {$title}")
+                    ->html($body);
+            });
+        } catch (\Exception) {}
     }
     
     public function eligibility(Request $request): \Illuminate\Http\JsonResponse
@@ -728,7 +822,7 @@ class RegistrationController extends Controller
             'room_id' => 'required|integer|exists:rooms,id',
         ]);
 
-        $registration = Registration::with(['occupancy', 'period'])->find($id);
+        $registration = Registration::with(['occupancy', 'period', 'student'])->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
@@ -773,6 +867,14 @@ class RegistrationController extends Controller
             (int) $request->room_id,
             $occupancy->bed_id,
             'assign_room'
+        );
+
+        $this->notifyRoomAssignmentChange(
+            $registration,
+            $oldRoomId,
+            $oldBedId,
+            (int) $request->room_id,
+            $occupancy->bed_id,
         );
 
         return response()->json(['message' => 'Đã phân phòng']);

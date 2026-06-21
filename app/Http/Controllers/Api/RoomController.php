@@ -6,11 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Models\Bed;
 use App\Models\Floor;
 use App\Models\MaintenanceRequest;
+use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
+use App\Models\Student;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
 
 class RoomController extends Controller
 {
@@ -411,7 +414,9 @@ class RoomController extends Controller
             return response()->json(['message' => 'Giường chuyển đến đang bảo trì.'], 422);
         }
 
-        $updatedRoom = DB::transaction(function () use ($room, $sourceBed, $targetBed, $data) {
+        $notifData = null;
+
+        $updatedRoom = DB::transaction(function () use ($room, $sourceBed, $targetBed, $data, &$notifData) {
             $occupancy = Occupancy::occupiedBedsQuery()
                 ->where('bed_id', $sourceBed->id)
                 ->lockForUpdate()
@@ -477,10 +482,115 @@ class RoomController extends Controller
                 'transferred_at' => now(),
             ]);
 
+            // Prepare notification inside transaction so it rolls back on failure
+            $notifData = $this->createBedTransferNotification(
+                $occupancy->student_id,
+                $oldRoomId,
+                $oldBedId,
+                (int) $targetBed->id,
+                $changeType,
+                $maintenanceReason,
+                $changeType === 'TEMPORARY_MAINTENANCE' ? ($data['expected_return_date'] ?? null) : null,
+            );
+
             return $room->fresh(['floor', 'beds']);
         });
 
+        // Send email outside the transaction
+        if ($notifData) {
+            $this->sendBedTransferEmail($notifData);
+        }
+
         return response()->json($this->formatRoom($updatedRoom, $this->getOccupiedBedIdSet(collect([$updatedRoom]))));
+    }
+
+    private function createBedTransferNotification(
+        int $studentId,
+        int $oldRoomId,
+        int $oldBedId,
+        int $newBedId,
+        string $changeType,
+        string $reason,
+        ?string $expectedReturnDate,
+    ): ?array {
+        $student = Student::find($studentId);
+        if (! $student) {
+            return null;
+        }
+
+        $oldRoom = Room::with('floor')->find($oldRoomId);
+        $oldBed  = Bed::find($oldBedId);
+        $newBed  = Bed::with('room.floor')->find($newBedId);
+
+        $oldCode  = ($oldRoom?->floor?->building_code ?? '') . ($oldRoom?->room_number ?? '');
+        $newCode  = ($newBed?->room?->floor?->building_code ?? '') . ($newBed?->room?->room_number ?? '');
+        $oldLabel = "Phòng {$oldCode}, Giường " . ($oldBed?->bed_number ?? '?');
+        $newLabel = "Phòng {$newCode}, Giường " . ($newBed?->bed_number ?? '?');
+
+        if ($changeType === 'PERMANENT') {
+            $title   = 'Thay đổi giường lưu trú';
+            $content = "Bạn đã được chuyển vĩnh viễn từ {$oldLabel} sang {$newLabel}.";
+            if ($reason !== '') {
+                $content .= " Lý do: {$reason}.";
+            }
+            $type = 'bed_transferred_permanent';
+        } else {
+            $title   = 'Chuyển giường tạm thời — Bảo trì';
+            $content = "{$oldLabel} đang được bảo trì. Bạn được chuyển tạm sang {$newLabel}.";
+            if ($expectedReturnDate) {
+                $dt       = \Carbon\Carbon::parse($expectedReturnDate)->format('d/m/Y');
+                $content .= " Dự kiến hoàn tất: {$dt}.";
+            }
+            $type = 'bed_transferred_temporary';
+        }
+
+        try {
+            $notification = Notification::create([
+                'student_id'  => $student->id,
+                'title'       => $title,
+                'content'     => $content,
+                'type'        => $type,
+                'target_type' => 'individual',
+                'send_email'  => true,
+            ]);
+            DB::table('notification_recipient')->insert([
+                'notification_id' => $notification->id,
+                'student_id'      => $student->id,
+                'is_read'         => false,
+                'read_at'         => null,
+            ]);
+        } catch (\Exception) {}
+
+        return [
+            'email'   => $student->email,
+            'name'    => $student->full_name ?? '',
+            'subject' => 'KTX — ' . $title,
+            'title'   => $title,
+            'content' => $content,
+        ];
+    }
+
+    private function sendBedTransferEmail(array $data): void
+    {
+        if (empty($data['email'])) {
+            return;
+        }
+        try {
+            $name    = htmlspecialchars($data['name']);
+            $title   = htmlspecialchars($data['title']);
+            $content = nl2br(htmlspecialchars($data['content']));
+            $body    = "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
+                <h2 style='color:#244cb8;margin-top:0'>{$title}</h2>
+                <p>Xin chào <strong>{$name}</strong>,</p>
+                <p>{$content}</p>
+                <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
+            </div>";
+            Mail::send([], [], function ($message) use ($data, $body) {
+                $message->to($data['email'], $data['name'])
+                    ->subject($data['subject'])
+                    ->html($body);
+            });
+        } catch (\Exception) {}
     }
 
     private function assertUniqueRoomNumber(int $floorId, string $roomNumber, ?int $ignoreRoomId = null): void

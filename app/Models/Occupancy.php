@@ -82,4 +82,9 @@ class Occupancy extends Model
     {
         return $this->hasMany(RoomFeeBill::class);
     }
+
+    public function extensions(): HasMany
+    {
+        return $this->hasMany(OccupancyExtension::class);
+    }
 }

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+
 class RegistrationPeriod extends Model
 {
     protected $table = 'registration_periods';
@@ -41,4 +42,5 @@ class RegistrationPeriod extends Model
     {
         return $this->hasMany(Waitlist::class);
     }
+
 }

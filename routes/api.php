@@ -20,6 +20,11 @@ use App\Http\Controllers\Api\PriorityCriteriaController;
 use App\Http\Controllers\Api\RegistrationPeriodController;
 use App\Http\Controllers\Api\StudentPriorityController;
 use App\Http\Controllers\Api\AutoRoomAssignmentController;
+use App\Http\Controllers\Api\StudentSupportRequestController;
+use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\AdminNotificationController;
+use App\Http\Controllers\Api\OccupancyExtensionController;
+use App\Http\Controllers\Api\OccupancyPeriodController;
 use Illuminate\Support\Facades\Artisan;
 
 // Tuyến xác thực
@@ -142,6 +147,50 @@ Route::put('/electricity-bills/{id}/confirm-payment', [ElectricityController::cl
 Route::put('/electricity-bills/{id}/status', [ElectricityController::class, 'updateStatus']);
 
 Route::get('/student/payments', [StudentPaymentController::class, 'myBills']);
+Route::get('/student/support-requests', [StudentSupportRequestController::class, 'studentIndex']);
+Route::get('/student/support-requests/roommate-target', [StudentSupportRequestController::class, 'roommateTarget']);
+Route::get('/student/support-requests/{id}', [StudentSupportRequestController::class, 'studentShow']);
+Route::post('/student/support-requests', [StudentSupportRequestController::class, 'store']);
+
+Route::get('/admin/support-requests', [StudentSupportRequestController::class, 'adminIndex']);
+Route::get('/admin/support-requests/{id}', [StudentSupportRequestController::class, 'adminShow']);
+Route::put('/admin/support-requests/{id}/status', [StudentSupportRequestController::class, 'updateStatus']);
+Route::put('/admin/support-requests/{id}/process', [StudentSupportRequestController::class, 'process']);
+Route::put('/admin/support-requests/{id}/approve', [StudentSupportRequestController::class, 'approve']);
+Route::put('/admin/support-requests/{id}/reject', [StudentSupportRequestController::class, 'reject']);
+Route::put('/admin/support-requests/{id}/complete', [StudentSupportRequestController::class, 'complete']);
+// Đợt gia hạn lưu trú
+Route::get('/occupancy-periods', [OccupancyPeriodController::class, 'index']);
+Route::post('/occupancy-periods', [OccupancyPeriodController::class, 'store']);
+Route::get('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'show']);
+Route::put('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'update']);
+Route::delete('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'destroy']);
+Route::put('/occupancy-periods/{id}/open', [OccupancyPeriodController::class, 'open']);
+Route::put('/occupancy-periods/{id}/close', [OccupancyPeriodController::class, 'close']);
+
+// Thông báo sinh viên
+Route::get('/student/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+Route::get('/student/notifications', [NotificationController::class, 'index']);
+Route::put('/student/notifications/read-all', [NotificationController::class, 'markAllRead']);
+Route::put('/student/notifications/{id}/read', [NotificationController::class, 'markRead'])->whereNumber('id');
+
+// Thông báo admin
+Route::get('/admin/notifications/unread-count', [AdminNotificationController::class, 'unreadCount']);
+Route::get('/admin/notifications', [AdminNotificationController::class, 'index']);
+Route::put('/admin/notifications/read-all', [AdminNotificationController::class, 'markAllRead']);
+Route::put('/admin/notifications/{id}/read', [AdminNotificationController::class, 'markRead'])->whereNumber('id');
+
+// Yêu cầu gia hạn lưu trú
+Route::get('/student/extensions/eligibility', [OccupancyExtensionController::class, 'eligibility']);
+Route::get('/student/extensions', [OccupancyExtensionController::class, 'studentIndex']);
+Route::post('/student/extensions', [OccupancyExtensionController::class, 'store']);
+
+Route::get('/admin/extensions/stats', [OccupancyExtensionController::class, 'stats']);
+Route::get('/admin/extensions', [OccupancyExtensionController::class, 'adminIndex']);
+Route::get('/admin/extensions/{id}', [OccupancyExtensionController::class, 'adminShow']);
+Route::put('/admin/extensions/{id}/approve', [OccupancyExtensionController::class, 'approve']);
+Route::put('/admin/extensions/{id}/reject', [OccupancyExtensionController::class, 'reject']);
+
 Route::post('/payments/vnpay/create', [VnpayPaymentController::class, 'create']);
 Route::post('/payments/vnpay/verify', [VnpayPaymentController::class, 'verify']);
 Route::get('/payments/vnpay/return', [VnpayPaymentController::class, 'handleReturn']);
