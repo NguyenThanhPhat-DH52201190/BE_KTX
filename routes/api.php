@@ -25,6 +25,8 @@ use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\OccupancyExtensionController;
 use App\Http\Controllers\Api\OccupancyPeriodController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\StudentDashboardController;
 use Illuminate\Support\Facades\Artisan;
 
 // Tuyến xác thực
@@ -83,6 +85,11 @@ Route::patch('/admin/student-priority/{id}/verify', [StudentPriorityController::
 // Phân phòng tự động
 Route::post('/admin/rooms/auto-assign', [AutoRoomAssignmentController::class, 'autoAssign']);
 Route::post('/admin/rooms/confirm-proposals', [AutoRoomAssignmentController::class, 'confirmProposals']);
+
+// Dashboard admin
+Route::get('/admin/dashboard', [DashboardController::class, 'index']);
+Route::get('/admin/dashboard/finance', [DashboardController::class, 'finance']);
+Route::get('/admin/dashboard/revenue-trend', [DashboardController::class, 'revenueTrend']);
 
 // Route test thủ công (chỉ dùng local/dev)
 Route::get('/admin/run-period-status-update', function () {
@@ -146,6 +153,7 @@ Route::get('/electricity-bills', [ElectricityController::class, 'bills']);
 Route::put('/electricity-bills/{id}/confirm-payment', [ElectricityController::class, 'confirmPayment']);
 Route::put('/electricity-bills/{id}/status', [ElectricityController::class, 'updateStatus']);
 
+Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 Route::get('/student/payments', [StudentPaymentController::class, 'myBills']);
 Route::get('/student/support-requests', [StudentSupportRequestController::class, 'studentIndex']);
 Route::get('/student/support-requests/roommate-target', [StudentSupportRequestController::class, 'roommateTarget']);
