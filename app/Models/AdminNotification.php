@@ -12,6 +12,7 @@ class AdminNotification extends Model
         'title',
         'content',
         'type',
+        'related_id',
         'is_read',
         'read_at',
         'created_at',

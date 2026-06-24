@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ElectricityBill;
 use App\Models\ElectricityRecord;
+use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -133,6 +135,8 @@ class ElectricityController extends Controller
             }
         });
 
+        $this->notifyStudents($created, $occupancies, $room, $data['month_year'], $data['due_date']);
+
         return response()->json([
             'record' => $record ? $this->formatRecord($record->fresh('room.floor')) : null,
             'created_count' => count($created),
@@ -174,6 +178,41 @@ class ElectricityController extends Controller
         $bill->update(['status' => $data['status']]);
 
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
+    }
+
+    private function notifyStudents(array $bills, $occupancies, Room $room, string $monthYear, string $dueDate): void
+    {
+        [$year, $month] = explode('-', $monthYear);
+        $roomCode = ($room->floor?->building_code ?? '') . $room->room_number;
+        $formattedDue = Carbon::parse($dueDate)->format('d/m/Y');
+
+        foreach ($bills as $bill) {
+            try {
+                $occupancy = $occupancies->first(fn ($o) => (int) $o->student_id === (int) $bill->student_id);
+                $student = $occupancy?->student;
+                if (! $student) {
+                    continue;
+                }
+
+                $formattedAmount = number_format((float) $bill->amount, 0, ',', '.');
+                $notification = Notification::create([
+                    'student_id'  => $student->id,
+                    'title'       => "Hóa đơn tiền điện tháng {$month}/{$year}",
+                    'content'     => "Hóa đơn tiền điện tháng {$month}/{$year} phòng {$roomCode} vừa được tạo. Số tiền: {$formattedAmount}đ. Hạn thanh toán: {$formattedDue}.",
+                    'type'        => 'electricity_bill_created',
+                    'related_id'  => $bill->id,
+                    'target_type' => 'individual',
+                    'send_email'  => false,
+                ]);
+
+                DB::table('notification_recipient')->insert([
+                    'notification_id' => $notification->id,
+                    'student_id'      => $student->id,
+                    'is_read'         => false,
+                    'read_at'         => null,
+                ]);
+            } catch (\Exception) {}
+        }
     }
 
     private function formatRecord(ElectricityRecord $record): array

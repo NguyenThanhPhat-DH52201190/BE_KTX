@@ -17,6 +17,7 @@ class Notification extends Model
         'title',
         'content',
         'type',
+        'related_id',
         'target_type',
         'send_email',
     ];

@@ -39,6 +39,7 @@ class NotificationController extends Controller
                 'n.title',
                 'n.content',
                 'n.type',
+                'n.related_id',
                 'n.created_at',
                 'nr.is_read',
                 'nr.read_at',

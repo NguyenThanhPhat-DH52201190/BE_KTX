@@ -130,7 +130,22 @@ class StudentSupportRequestController extends Controller
             return response()->json(['message' => 'Không tìm thấy sinh viên.'], 422);
         }
 
-        if (in_array($request->string('request_type')->toString(), ['room_change', 'bed_change', 'roommate_request'], true)) {
+        $requestType = $request->string('request_type')->toString();
+
+        $existingPending = StudentSupportRequest::query()
+            ->where('student_id', $student->id)
+            ->where('request_type', $requestType)
+            ->whereIn('status', ['pending', 'processing'])
+            ->exists();
+
+        if ($existingPending) {
+            $typeLabel = $this->getTypeLabel($requestType);
+            return response()->json([
+                'message' => "Bạn đã có yêu cầu \"{$typeLabel}\" đang chờ xử lý. Vui lòng chờ admin phản hồi trước khi gửi yêu cầu mới.",
+            ], 422);
+        }
+
+        if (in_array($requestType, ['room_change', 'bed_change', 'roommate_request'], true)) {
             $invalidTargetResponse = $this->validateTransferRequestTarget($request, $student);
             if ($invalidTargetResponse) {
                 return $invalidTargetResponse;
@@ -139,7 +154,7 @@ class StudentSupportRequestController extends Controller
 
         $supportRequest = StudentSupportRequest::query()->create([
             'student_id'        => $student->id,
-            'request_type'      => $request->string('request_type')->toString(),
+            'request_type'      => $requestType,
             'title'             => trim($request->string('title')->toString()),
             'content'           => trim($request->string('content')->toString()),
             'attachment_url'    => $request->filled('attachment_url')
@@ -183,9 +198,15 @@ class StudentSupportRequestController extends Controller
             return response()->json(['message' => 'Giường đích không hợp lệ hoặc đang bảo trì.'], 422);
         }
 
-        $targetRoom = Room::query()->find($targetBed->room_id);
+        $targetRoom = Room::query()->with('floor')->find($targetBed->room_id);
         if (! $targetRoom || strtolower((string) $targetRoom->status) === 'maintenance') {
             return response()->json(['message' => 'Phòng đích không hợp lệ hoặc đang bảo trì.'], 422);
+        }
+
+        $targetFloorGender = $targetRoom->floor?->gender;
+        if ($targetFloorGender && $targetFloorGender !== $requester->gender) {
+            $genderLabel = $requester->gender === 'male' ? 'nam' : 'nữ';
+            return response()->json(['message' => "Bạn chỉ có thể đổi sang phòng dành cho {$genderLabel}."], 422);
         }
 
         if ((int) $targetBed->id === (int) $currentOccupancy->bed_id) {
@@ -559,6 +580,7 @@ class StudentSupportRequestController extends Controller
                 'title'       => $title,
                 'content'     => $content,
                 'type'        => $type,
+                'related_id'  => $supportRequest->id,
                 'target_type' => 'individual',
                 'send_email'  => true,
             ]);
@@ -632,6 +654,7 @@ class StudentSupportRequestController extends Controller
                 'title'      => $title,
                 'content'    => $content,
                 'type'       => 'support_request_new',
+                'related_id' => $req->id,
                 'created_at' => now(),
             ]);
         } catch (\Exception) {}

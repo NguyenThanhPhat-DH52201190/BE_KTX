@@ -27,3 +27,6 @@ Schedule::command('occupancies:expire')->dailyAt('00:30');
 
 // Gửi nhắc nhở gia hạn lưu trú: 30 ngày và 7 ngày trước khi hết hạn (chạy lúc 08:00)
 Schedule::command('extensions:send-reminders')->dailyAt('08:00');
+
+// Tự động hoàn tất bảo trì đã đến ngày dự kiến kết thúc (chạy lúc 06:00)
+Schedule::command('maintenance:auto-complete')->dailyAt('06:00');
