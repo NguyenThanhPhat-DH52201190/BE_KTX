@@ -10,8 +10,7 @@ class OccupancyObserver
     public function __construct(private RoomFeeBillingService $billingService) {}
 
     /**
-     * Xử lý khi occupancy được tạo mới với status = ACTIVE.
-     * (Ít gặp nhưng cần cover để tránh bỏ sót hóa đơn.)
+     * Khi admin tạo occupancy thẳng với ACTIVE (hiếm) → sinh hóa đơn.
      */
     public function created(Occupancy $occupancy): void
     {
@@ -21,7 +20,11 @@ class OccupancyObserver
     }
 
     /**
-     * Xử lý khi occupancy chuyển sang ACTIVE (PROPOSED/ROOM_CONFIRMED -> ACTIVE).
+     * Khi occupancy chuyển sang ACTIVE:
+     * - Luồng sinh viên (PENDING_PAYMENT → ACTIVE qua VNPay): hóa đơn đã có,
+     *   createBillsOnActivation() bỏ qua nhờ idempotency check.
+     * - Luồng admin (ROOM_CONFIRMED → ACTIVE qua approveBed): chưa có hóa đơn,
+     *   sinh tại đây.
      */
     public function updated(Occupancy $occupancy): void
     {

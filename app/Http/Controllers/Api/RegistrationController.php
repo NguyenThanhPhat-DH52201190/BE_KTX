@@ -21,6 +21,7 @@ use App\Models\RoomFeeBill;
 use App\Models\Notification;
 use App\Helpers\StorageHelper;
 use App\Services\AutoReviewService;
+use App\Services\RoomFeeBillingService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -829,7 +830,8 @@ class RegistrationController extends Controller
         }
 
         $occupancy = Occupancy::firstOrNew([
-            'student_id' => $registration->student_id,
+            'student_id'      => $registration->student_id,
+            'registration_id' => $registration->id,
         ]);
 
         $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
@@ -932,7 +934,8 @@ class RegistrationController extends Controller
         }
 
         $occupancy = Occupancy::firstOrNew([
-            'student_id' => $registration->student_id,
+            'student_id'      => $registration->student_id,
+            'registration_id' => $registration->id,
         ]);
 
         $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
@@ -946,12 +949,15 @@ class RegistrationController extends Controller
             }
         }
 
-        $occupancy->registration_id = $registration->id;
-        $occupancy->room_id = $bed->room_id;
-        $occupancy->bed_id = $bed->id;
-        $occupancy->status = 'ACTIVE';
+        $period = $registration->period;
+
+        $occupancy->registration_id    = $registration->id;
+        $occupancy->room_id            = $bed->room_id;
+        $occupancy->bed_id             = $bed->id;
+        $occupancy->status             = 'PENDING_PAYMENT';
         $occupancy->bed_approval_status = 'approved';
-        $occupancy->check_out_date = null;
+        $occupancy->check_in_date  = $occupancy->check_in_date  ?? $period?->stay_start_date?->toDateString();
+        $occupancy->check_out_date = $occupancy->check_out_date ?? $period?->stay_end_date?->toDateString();
         $occupancy->save();
 
         $this->recordRoomChange(
@@ -963,7 +969,14 @@ class RegistrationController extends Controller
             'select_bed'
         );
 
-        return response()->json(['message' => 'Đã chọn giường.']);
+        // Sinh hóa đơn tháng đầu để sinh viên thanh toán trước khi ACTIVE
+        $billingService = app(RoomFeeBillingService::class);
+        $bill = $billingService->createInitialBill($occupancy);
+
+        return response()->json([
+            'message' => 'Đã chọn giường. Vui lòng thanh toán hóa đơn để hoàn tất lưu trú.',
+            'bill_id' => $bill?->id,
+        ]);
     }
 
     public function approveBed($id)
@@ -990,10 +1003,12 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường đã có sinh viên ở.'], 422);
         }
 
+        $period = $registration->period;
+
         $occupancy->status = 'ACTIVE';
         $occupancy->bed_approval_status = 'approved';
-        $occupancy->check_in_date = $occupancy->check_in_date ?? now()->toDateString();
-        $occupancy->check_out_date = null;
+        $occupancy->check_in_date  = $occupancy->check_in_date  ?? $period?->stay_start_date?->toDateString() ?? now()->toDateString();
+        $occupancy->check_out_date = $occupancy->check_out_date ?? $period?->stay_end_date?->toDateString();
         $occupancy->save();
 
         $bed = Bed::find($occupancy->bed_id);

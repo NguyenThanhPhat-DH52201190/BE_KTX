@@ -59,6 +59,41 @@ class RoomFeeBillingService
         }
     }
 
+    /**
+     * Tạo (hoặc lấy lại) hóa đơn tháng đầu khi sinh viên chọn giường.
+     * Trả về bill để selectBed có thể trả bill_id về FE.
+     * due_date = ngày tạo bill + initial_payment_due_days (lấy từ registration_period).
+     */
+    public function createInitialBill(Occupancy $occupancy): ?RoomFeeBill
+    {
+        if (! $occupancy->check_in_date) {
+            return null;
+        }
+
+        $dueDays = $occupancy->registration?->period?->initial_payment_due_days;
+        if (! $dueDays) {
+            return null;
+        }
+
+        $pricePerMonth = $this->getRoomFeePerMonth();
+        $checkIn       = Carbon::parse($occupancy->check_in_date)->startOfDay();
+        $month         = $checkIn->month;
+        $year          = $checkIn->year;
+        $dueDate       = Carbon::today('Asia/Ho_Chi_Minh')->addDays($dueDays)->toDateString();
+
+        // Nếu đã tồn tại (idempotent) thì trả về bill cũ
+        $existing = RoomFeeBill::where('student_id', $occupancy->student_id)
+            ->where('month', $month)
+            ->where('year', $year)
+            ->first();
+
+        if ($existing) {
+            return $existing;
+        }
+
+        return $this->createProratedBill($occupancy, $checkIn, $pricePerMonth, $dueDate);
+    }
+
     // -------------------------------------------------------------------------
     // Scheduler flow (gọi bởi GenerateMonthlyRoomFeeBillsCommand ngày 01)
     // -------------------------------------------------------------------------
@@ -160,9 +195,9 @@ class RoomFeeBillingService
      *
      * Công thức: amount = price / total_days * days_stayed
      * days_stayed = (ngày cuối tháng - ngày check-in + 1)
-     * due_date    = ngày 20 của tháng TIẾP THEO (cho thêm thời gian thanh toán)
+     * due_date    = truyền vào từ caller (createInitialBill) hoặc ngày 20 tháng sau (generateBillsForOccupancy)
      */
-    private function createProratedBill(Occupancy $occupancy, Carbon $checkIn, int $pricePerMonth): RoomFeeBill
+    private function createProratedBill(Occupancy $occupancy, Carbon $checkIn, int $pricePerMonth, ?string $dueDate = null): RoomFeeBill
     {
         $month      = $checkIn->month;
         $year       = $checkIn->year;
@@ -172,7 +207,7 @@ class RoomFeeBillingService
             ? $pricePerMonth
             : (int) round($pricePerMonth / $totalDays * $daysStayed);
 
-        $dueDate = Carbon::create($year, $month, 1)
+        $dueDate ??= Carbon::create($year, $month, 1)
             ->addMonthNoOverflow()
             ->setDay(20)
             ->toDateString();

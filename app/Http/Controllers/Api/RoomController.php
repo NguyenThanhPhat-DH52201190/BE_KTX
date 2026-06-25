@@ -228,9 +228,15 @@ class RoomController extends Controller
             } elseif ($student) {
                 $displayStatus = 'occupied';
             }
+            // Bed-level: all TEMPORARY_MAINTENANCE events involving this physical bed (for maintenance_history)
             $bedHistoryLogs = $historyLogs->filter(
                 fn ($log) => (int) $log->old_bed_id === (int) $bed->id || (int) $log->new_bed_id === (int) $bed->id,
             )->values();
+            // Student-level: only the current occupant's own moves (for transfer_history)
+            $currentOccupancyId = $occupancy?->id;
+            $studentHistoryLogs = $currentOccupancyId
+                ? $historyLogs->filter(fn ($log) => (int) $log->occupancy_id === $currentOccupancyId)->values()
+                : collect();
             $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms) {
                 $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
                 $oldRoom = $historyRooms->get($log->old_room_id);
@@ -264,7 +270,7 @@ class RoomController extends Controller
                 'status' => strtoupper((string) $bed->status) === 'MAINTENANCE' ? 'maintenance' : 'active',
                 'display_status' => $displayStatus,
                 'occupied' => (bool) $student,
-                'transfer_history' => $bedHistoryLogs->map($formatHistory)->all(),
+                'transfer_history' => $studentHistoryLogs->map($formatHistory)->all(),
                 'maintenance_history' => $bedHistoryLogs
                     ->filter(fn ($log) => $log->maintenance_request_id || in_array($log->transfer_reason, ['BED_MAINTENANCE', 'ROOM_MAINTENANCE'], true))
                     ->map($formatHistory)

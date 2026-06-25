@@ -23,6 +23,8 @@ use App\Http\Controllers\Api\AutoRoomAssignmentController;
 use App\Http\Controllers\Api\StudentSupportRequestController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\AdminNotificationController;
+use App\Http\Controllers\Api\OccupancyController;
+use App\Http\Controllers\Api\StudentSearchController;
 use App\Http\Controllers\Api\OccupancyExtensionController;
 use App\Http\Controllers\Api\OccupancyPeriodController;
 use App\Http\Controllers\Api\DashboardController;
@@ -167,6 +169,12 @@ Route::put('/admin/support-requests/{id}/process', [StudentSupportRequestControl
 Route::put('/admin/support-requests/{id}/approve', [StudentSupportRequestController::class, 'approve']);
 Route::put('/admin/support-requests/{id}/reject', [StudentSupportRequestController::class, 'reject']);
 Route::put('/admin/support-requests/{id}/complete', [StudentSupportRequestController::class, 'complete']);
+// Chi tiết lưu trú (admin)
+Route::get('/admin/occupancies/{id}/detail', [OccupancyController::class, 'detail'])->whereNumber('id');
+
+// Tìm kiếm sinh viên (autocomplete)
+Route::get('/admin/students/search', [StudentSearchController::class, 'search']);
+
 // Đợt gia hạn lưu trú
 Route::get('/occupancy-periods', [OccupancyPeriodController::class, 'index']);
 Route::post('/occupancy-periods', [OccupancyPeriodController::class, 'store']);

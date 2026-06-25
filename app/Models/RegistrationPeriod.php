@@ -22,6 +22,7 @@ class RegistrationPeriod extends Model
         'semester',
         'bed_selection_days',
         'processing_days',
+        'initial_payment_due_days',
     ];
 
     protected $casts = [
@@ -29,8 +30,9 @@ class RegistrationPeriod extends Model
         'end_date'        => 'date:Y-m-d',
         'stay_start_date' => 'date:Y-m-d',
         'stay_end_date'   => 'date:Y-m-d',
-        'bed_selection_days' => 'integer',
-        'processing_days'    => 'integer',
+        'bed_selection_days'       => 'integer',
+        'processing_days'          => 'integer',
+        'initial_payment_due_days' => 'integer',
     ];
 
     public function registrations(): HasMany

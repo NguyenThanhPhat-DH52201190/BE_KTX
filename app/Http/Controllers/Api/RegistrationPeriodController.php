@@ -72,8 +72,9 @@ class RegistrationPeriodController extends Controller
             'end_date'           => ['required', 'date', 'after_or_equal:start_date'],
             'stay_start_date'    => ['nullable', 'date'],
             'stay_end_date'      => ['nullable', 'date', 'after_or_equal:stay_start_date'],
-            'bed_selection_days' => ['nullable', 'integer', 'min:0'],
-            'processing_days'    => ['nullable', 'integer', 'min:1'],
+            'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
+            'processing_days'           => ['nullable', 'integer', 'min:1'],
+            'initial_payment_due_days'  => ['required', 'integer', 'min:1'],
         ]);
 
         // Rule 1: Mỗi năm học chỉ được có 1 đợt chính
@@ -140,8 +141,9 @@ class RegistrationPeriodController extends Controller
             'end_date'           => ['sometimes', 'date', 'after_or_equal:start_date'],
             'stay_start_date'    => ['nullable', 'date'],
             'stay_end_date'      => ['nullable', 'date'],
-            'bed_selection_days' => ['nullable', 'integer', 'min:0'],
-            'processing_days'    => ['nullable', 'integer', 'min:1'],
+            'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
+            'processing_days'           => ['nullable', 'integer', 'min:1'],
+            'initial_payment_due_days'  => ['sometimes', 'integer', 'min:1'],
         ]);
 
         $channel    = $data['channel']     ?? $period->channel;
