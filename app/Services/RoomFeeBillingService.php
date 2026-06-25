@@ -12,6 +12,8 @@ class RoomFeeBillingService
 {
     private const DEFAULT_PRICE = 350000;
 
+    public function __construct(private readonly FeeDiscountService $discountService) {}
+
     // -------------------------------------------------------------------------
     // Activation flow (gọi bởi OccupancyObserver khi status -> ACTIVE)
     // -------------------------------------------------------------------------
@@ -195,7 +197,7 @@ class RoomFeeBillingService
      *
      * Công thức: amount = price / total_days * days_stayed
      * days_stayed = (ngày cuối tháng - ngày check-in + 1)
-     * due_date    = truyền vào từ caller (createInitialBill) hoặc ngày 20 tháng sau (generateBillsForOccupancy)
+     * due_date    = truyền vào từ caller (createInitialBill) hoặc ngày 20 tháng sau
      */
     private function createProratedBill(Occupancy $occupancy, Carbon $checkIn, int $pricePerMonth, ?string $dueDate = null): RoomFeeBill
     {
@@ -203,7 +205,7 @@ class RoomFeeBillingService
         $year       = $checkIn->year;
         $totalDays  = $checkIn->daysInMonth;
         $daysStayed = $totalDays - $checkIn->day + 1;
-        $amount     = ($daysStayed === $totalDays)
+        $rawAmount  = ($daysStayed === $totalDays)
             ? $pricePerMonth
             : (int) round($pricePerMonth / $totalDays * $daysStayed);
 
@@ -212,16 +214,22 @@ class RoomFeeBillingService
             ->setDay(20)
             ->toDateString();
 
+        $discount = $this->discountService->calculate($occupancy, $rawAmount);
+
         return RoomFeeBill::create([
-            'student_id'   => $occupancy->student_id,
-            'occupancy_id' => $occupancy->id,
-            'month'        => $month,
-            'year'         => $year,
-            'amount'       => $amount,
-            'days_stayed'  => $daysStayed,
-            'total_days'   => $totalDays,
-            'due_date'     => $dueDate,
-            'status'       => 'unpaid',
+            'student_id'       => $occupancy->student_id,
+            'occupancy_id'     => $occupancy->id,
+            'month'            => $month,
+            'year'             => $year,
+            'amount'           => $discount['final_amount'],
+            'original_amount'  => $discount['original_amount'],
+            'discount_percent' => $discount['discount_percent'],
+            'discount_amount'  => $discount['discount_amount'],
+            'discount_reason'  => $discount['discount_reason'],
+            'days_stayed'      => $daysStayed,
+            'total_days'       => $totalDays,
+            'due_date'         => $dueDate,
+            'status'           => 'unpaid',
         ]);
     }
 
@@ -235,16 +243,22 @@ class RoomFeeBillingService
         $totalDays = Carbon::create($year, $month, 1)->daysInMonth;
         $dueDate   = Carbon::create($year, $month, 20)->toDateString();
 
+        $discount = $this->discountService->calculate($occupancy, $pricePerMonth);
+
         return RoomFeeBill::create([
-            'student_id'   => $occupancy->student_id,
-            'occupancy_id' => $occupancy->id,
-            'month'        => $month,
-            'year'         => $year,
-            'amount'       => $pricePerMonth,
-            'days_stayed'  => $totalDays,
-            'total_days'   => $totalDays,
-            'due_date'     => $dueDate,
-            'status'       => 'unpaid',
+            'student_id'       => $occupancy->student_id,
+            'occupancy_id'     => $occupancy->id,
+            'month'            => $month,
+            'year'             => $year,
+            'amount'           => $discount['final_amount'],
+            'original_amount'  => $discount['original_amount'],
+            'discount_percent' => $discount['discount_percent'],
+            'discount_amount'  => $discount['discount_amount'],
+            'discount_reason'  => $discount['discount_reason'],
+            'days_stayed'      => $totalDays,
+            'total_days'       => $totalDays,
+            'due_date'         => $dueDate,
+            'status'           => 'unpaid',
         ]);
     }
 

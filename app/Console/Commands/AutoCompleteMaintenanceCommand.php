@@ -2,6 +2,8 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Account;
+use App\Models\AdminNotification;
 use App\Models\Bed;
 use App\Models\MaintenanceRequest;
 use App\Models\Notification;
@@ -286,7 +288,50 @@ class AutoCompleteMaintenanceCommand extends Command
             $content     = "Bảo trì phòng đã hoàn tất. Bạn đã được chuyển về Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}).";
             $this->saveNotification($student->id, $title, $content, 'room_maintenance_return');
             $pendingEmails[] = $this->buildPayload($student, $title, $content);
+
+            // Thông báo admin
+            $adminTitle   = "Bảo trì hoàn tất — Sinh viên trả về phòng {$oldRoomCode}";
+            $adminContent = "Sinh viên {$student->full_name} ({$student->student_code}) đã được hệ thống tự động "
+                          . "chuyển về Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}) sau khi bảo trì hoàn tất.";
+            $this->saveAdminNotification($adminTitle, $adminContent, 'room_maintenance_return', $log->maintenance_request_id ?? null);
+            $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent);
         }
+    }
+
+    private function saveAdminNotification(string $title, string $content, string $type, mixed $relatedId = null): void
+    {
+        try {
+            AdminNotification::create([
+                'title'      => $title,
+                'content'    => $content,
+                'type'       => $type,
+                'related_id' => $relatedId,
+                'created_at' => now(),
+            ]);
+        } catch (\Exception) {}
+    }
+
+    private function buildAdminPayload(string $title, string $content): array
+    {
+        $adminEmails = Account::where('role', 'admin')
+            ->with('student')
+            ->get()
+            ->map(fn ($acc) => $acc->student?->email)
+            ->push(config('auth.admin_login_email'))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        return [
+            'admin_emails' => $adminEmails,
+            'subject'      => 'KTX — ' . $title,
+            'body'         => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
+                <h2 style='color:#244cb8;margin-top:0'>" . htmlspecialchars($title) . "</h2>
+                <p>" . nl2br(htmlspecialchars($content)) . "</p>
+                <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
+            </div>",
+        ];
     }
 
     private function saveNotification(int $studentId, string $title, string $content, string $type): void
@@ -330,6 +375,18 @@ class AutoCompleteMaintenanceCommand extends Command
 
     private function sendEmail(array $payload): void
     {
+        // Admin bulk payload
+        if (isset($payload['admin_emails'])) {
+            foreach ($payload['admin_emails'] as $email) {
+                try {
+                    Mail::send([], [], function ($message) use ($email, $payload) {
+                        $message->to($email)->subject($payload['subject'])->html($payload['body']);
+                    });
+                } catch (\Exception) {}
+            }
+            return;
+        }
+
         if (empty($payload['email'])) {
             return;
         }

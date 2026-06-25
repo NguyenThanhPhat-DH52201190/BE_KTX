@@ -15,6 +15,11 @@ class RoomFeeBill extends Model
         'month',
         'year',
         'amount',
+        'original_amount',
+        'discount_percent',
+        'discount_amount',
+        'discount_reason',
+        'priority_criteria_id',
         'days_stayed',
         'total_days',
         'due_date',
@@ -25,11 +30,14 @@ class RoomFeeBill extends Model
     ];
 
     protected $casts = [
-        'days_stayed' => 'integer',
-        'total_days'  => 'integer',
-        'amount'      => 'integer',
-        'paid_at'     => 'datetime',
-        'due_date'    => 'date',
+        'days_stayed'      => 'integer',
+        'total_days'       => 'integer',
+        'amount'           => 'integer',
+        'original_amount'  => 'float',
+        'discount_percent' => 'float',
+        'discount_amount'  => 'float',
+        'paid_at'          => 'datetime',
+        'due_date'         => 'date',
     ];
 
     public function student(): BelongsTo

@@ -4,10 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ElectricityBill;
+use App\Models\Notification;
+use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class StudentPaymentController extends Controller
 {
@@ -68,6 +72,74 @@ class StudentPaymentController extends Controller
         ]);
     }
 
+    public function confirmFree(Request $request, int $id): JsonResponse
+    {
+        $email = trim((string) $request->input('email', ''));
+
+        if ($email === '') {
+            return response()->json(['message' => 'Thiếu email sinh viên.'], 422);
+        }
+
+        $bill = RoomFeeBill::query()->with(['student', 'occupancy.room.floor'])->find($id);
+
+        if (! $bill) {
+            return response()->json(['message' => 'Không tìm thấy hóa đơn.'], 404);
+        }
+
+        $studentEmail = trim((string) ($bill->student?->email ?? ''));
+        if (strcasecmp($studentEmail, $email) !== 0) {
+            return response()->json(['message' => 'Hóa đơn không thuộc sinh viên này.'], 403);
+        }
+
+        if (($bill->status ?? 'unpaid') === 'paid') {
+            return response()->json(['message' => 'Hóa đơn đã được thanh toán.'], 422);
+        }
+
+        if ((float) $bill->amount > 0) {
+            return response()->json(['message' => 'Hóa đơn này không được miễn phí hoàn toàn.'], 422);
+        }
+
+        DB::transaction(function () use ($bill) {
+            $bill->update([
+                'status'         => 'paid',
+                'payment_method' => 'Miễn phí',
+                'paid_at'        => Carbon::now(),
+            ]);
+
+            // Kích hoạt lưu trú nếu occupancy đang PENDING_PAYMENT
+            if ($bill->occupancy_id) {
+                $occupancy = Occupancy::query()->lockForUpdate()->find($bill->occupancy_id);
+
+                if ($occupancy?->status === 'PENDING_PAYMENT' && $occupancy->bed_id) {
+                    $occupancy->update(['status' => 'ACTIVE']);
+
+                    $room     = $occupancy->room;
+                    $floor    = $room?->floor;
+                    $bed      = $occupancy->bed;
+                    $roomCode = ($floor?->building_code ?? '') . ($room?->room_number ?? '');
+                    $bedNo    = $bed?->bed_number ?? '';
+
+                    $notification = Notification::create([
+                        'student_id' => $occupancy->student_id,
+                        'title'      => 'Xác nhận lưu trú thành công!',
+                        'content'    => "Bạn đã được miễn phí 100% và chính thức lưu trú tại phòng {$roomCode}" . ($bedNo ? " giường #{$bedNo}" : '') . '. Chào mừng bạn đến với KTX!',
+                        'type'       => 'payment_success',
+                    ]);
+                    DB::table('notification_recipient')->insert([
+                        'notification_id' => $notification->id,
+                        'student_id'      => $occupancy->student_id,
+                        'is_read'         => false,
+                        'read_at'         => null,
+                    ]);
+                }
+            }
+        });
+
+        $bill->load(['student', 'occupancy.room.floor']);
+
+        return response()->json($this->formatRoomFeeBill($bill));
+    }
+
     private function formatRoomFeeBill(RoomFeeBill $bill): array
     {
         $occupancy = $bill->occupancy;
@@ -79,6 +151,10 @@ class StudentPaymentController extends Controller
             'title' => 'Tiền phòng tháng ' . $bill->month . '/' . $bill->year,
             'period' => 'Tháng ' . $bill->month . '/' . $bill->year,
             'amount' => (float) $bill->amount,
+            'original_amount' => $bill->original_amount !== null ? (float) $bill->original_amount : null,
+            'discount_percent' => $bill->discount_percent !== null ? (float) $bill->discount_percent : null,
+            'discount_amount' => (float) ($bill->discount_amount ?? 0),
+            'discount_reason' => $bill->discount_reason,
             'due_date' => $bill->getRawOriginal('due_date'),
             'payment_method' => $bill->payment_method,
             'transaction_code' => $bill->transaction_code,

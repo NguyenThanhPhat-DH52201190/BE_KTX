@@ -3,11 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Account;
+use App\Models\AdminNotification;
 use App\Models\Bed;
 use App\Models\MaintenanceRequest;
 use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -275,6 +278,101 @@ class MaintenanceController extends Controller
             'note' => ['nullable', 'string', 'max:1000'],
         ]);
 
+        $isFuture = Carbon::parse($data['started_at'])->startOfDay()->gt(Carbon::today());
+
+        if ($isFuture) {
+            return $this->schedulePendingRoomMaintenance($roomId, $data);
+        }
+
+        return $this->executeRoomMaintenance($roomId, $data);
+    }
+
+    private function schedulePendingRoomMaintenance(int $roomId, array $data): JsonResponse
+    {
+        $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
+        $targets = collect($data['assignments'])->pluck('target_bed_id')->map(fn ($id) => (int) $id);
+
+        if ($targets->unique()->count() !== $targets->count()) {
+            return response()->json(['message' => 'Mỗi sinh viên phải có một giường đích khác nhau.'], 422);
+        }
+
+        $targetBeds = Bed::query()->with('room.floor')->whereIn('id', $targets->all())->get()->keyBy('id');
+        foreach ($targets as $targetBedId) {
+            $targetBed = $targetBeds->get($targetBedId);
+            if (! $targetBed) {
+                return response()->json(['message' => 'Không tìm thấy giường đích.'], 404);
+            }
+            if ((int) $targetBed->room_id === (int) $room->id) {
+                return response()->json(['message' => 'Giường đích không được nằm trong phòng đang bảo trì.'], 422);
+            }
+            $this->assertTargetBedAvailable($targetBed);
+            $this->assertTargetGenderMatches($targetBed, $room);
+        }
+
+        $startDate   = Carbon::parse($data['started_at'])->format('d/m/Y');
+        $expectedEnd = Carbon::parse($data['expected_end_at'])->format('d/m/Y');
+        $roomCode    = ($room->floor?->building_code ?? '') . $room->room_number;
+
+        $pendingEmails = [];
+
+        DB::transaction(function () use ($room, $data, $targetBeds, $startDate, $expectedEnd, $roomCode, &$pendingEmails) {
+            $maintenanceRequest = MaintenanceRequest::create([
+                'type'                => 'ROOM',
+                'room_id'             => $room->id,
+                'reason'              => trim($data['reason']),
+                'note'                => $data['note'] ?? null,
+                'pending_assignments' => $data['assignments'],
+                'status'              => 'PENDING',
+                'started_at'          => $data['started_at'],
+                'expected_end_at'     => $data['expected_end_at'],
+            ]);
+
+            // Thông báo trước cho sinh viên rằng phòng sẽ bảo trì
+            foreach ($data['assignments'] as $assignment) {
+                $occupancy = $this->activeOccupancyQuery()
+                    ->where('id', (int) $assignment['occupancy_id'])
+                    ->where('room_id', $room->id)
+                    ->with(['student', 'bed'])
+                    ->first();
+
+                if (! $occupancy) {
+                    continue;
+                }
+
+                $targetBed  = $targetBeds->get((int) $assignment['target_bed_id']);
+                $newRoomCode = $targetBed
+                    ? ($targetBed->room?->floor?->building_code ?? '') . ($targetBed->room?->room_number ?? '')
+                    : '(chưa xác định)';
+                $oldBedNum = $occupancy->bed?->bed_number ?? '';
+
+                $student = $occupancy->student;
+                if ($student) {
+                    $title   = 'Thông báo bảo trì phòng — Lịch di dời';
+                    $content = "Phòng {$roomCode} sẽ được bảo trì từ ngày {$startDate} đến {$expectedEnd}. "
+                             . "Bạn sẽ được chuyển tạm từ Giường {$oldBedNum} (Phòng {$roomCode}) "
+                             . "sang Giường {$targetBed?->bed_number} (Phòng {$newRoomCode}) vào ngày {$startDate}.";
+                    $this->createNotifRecord($student->id, $title, $content, 'room_maintenance_scheduled');
+                    $pendingEmails[] = $this->buildEmailPayload($student, $title, $content);
+                }
+            }
+
+            // Thông báo admin
+            $adminTitle   = "Lịch bảo trì phòng {$roomCode}";
+            $adminContent = "Phòng {$roomCode} đã được lên lịch bảo trì từ {$startDate} đến {$expectedEnd}. "
+                          . "Hệ thống sẽ tự động di dời sinh viên vào ngày bắt đầu.";
+            $this->createAdminNotif($adminTitle, $adminContent, 'room_maintenance_scheduled', $maintenanceRequest->id);
+            $pendingEmails[] = $this->buildAdminEmailPayload($adminTitle, $adminContent);
+        });
+
+        foreach ($pendingEmails as $emailData) {
+            $this->sendNotificationEmail($emailData);
+        }
+
+        return response()->json($this->formatRoom($room->fresh(['floor', 'beds'])));
+    }
+
+    public function executeRoomMaintenance(int $roomId, array $data): JsonResponse
+    {
         $pendingEmails = [];
 
         $updatedRoom = DB::transaction(function () use ($roomId, $data, &$pendingEmails) {
@@ -298,15 +396,30 @@ class MaintenanceController extends Controller
                 $this->assertTargetGenderMatches($targetBed, $room);
             }
 
-            $maintenanceRequest = MaintenanceRequest::create([
-                'type' => 'ROOM',
-                'room_id' => $room->id,
-                'bed_id' => null,
-                'reason' => trim($data['reason']),
-                'status' => 'IN_PROGRESS',
-                'started_at' => $data['started_at'],
-                'expected_end_at' => $data['expected_end_at'],
-            ]);
+            // Tìm hoặc tạo maintenance request (có thể đã PENDING)
+            $maintenanceRequest = MaintenanceRequest::query()
+                ->where('room_id', $room->id)
+                ->where('type', 'ROOM')
+                ->where('status', 'PENDING')
+                ->latest()
+                ->first();
+
+            if ($maintenanceRequest) {
+                $maintenanceRequest->update([
+                    'status'              => 'IN_PROGRESS',
+                    'pending_assignments' => null,
+                ]);
+            } else {
+                $maintenanceRequest = MaintenanceRequest::create([
+                    'type'            => 'ROOM',
+                    'room_id'         => $room->id,
+                    'reason'          => trim($data['reason']),
+                    'note'            => $data['note'] ?? null,
+                    'status'          => 'IN_PROGRESS',
+                    'started_at'      => $data['started_at'],
+                    'expected_end_at' => $data['expected_end_at'],
+                ]);
+            }
 
             foreach ($data['assignments'] as $assignment) {
                 $occupancy = $this->activeOccupancyQuery()
@@ -325,7 +438,6 @@ class MaintenanceController extends Controller
                 $oldBedId = (int) $occupancy->bed_id;
                 $oldBedNum = $occupancy->bed?->bed_number ?? $oldBedId;
 
-                // Clear stale non-active occupancy records pointing at the target bed.
                 DB::table('occupancy')
                     ->where('bed_id', $targetBed->id)
                     ->where('id', '!=', $occupancy->id)
@@ -359,12 +471,11 @@ class MaintenanceController extends Controller
                     $data['started_at'],
                 );
 
-                // Notification for each student
                 $student = $occupancy->student;
                 if ($student) {
                     $oldRoomCode = ($room->floor?->building_code ?? '') . $room->room_number;
                     $newRoomCode = ($targetBed->room?->floor?->building_code ?? '') . ($targetBed->room?->room_number ?? '');
-                    $expectedEnd = \Carbon\Carbon::parse($data['expected_end_at'])->format('d/m/Y');
+                    $expectedEnd = Carbon::parse($data['expected_end_at'])->format('d/m/Y');
                     $title   = 'Chuyển phòng tạm thời — Bảo trì phòng';
                     $content = "Phòng {$oldRoomCode} đang được bảo trì (dự kiến đến {$expectedEnd}). "
                              . "Bạn được chuyển tạm từ Giường {$oldBedNum} (Phòng {$oldRoomCode}) "
@@ -402,10 +513,6 @@ class MaintenanceController extends Controller
                 ->orderBy('id')
                 ->lockForUpdate()
                 ->get();
-
-            if ($logs->isEmpty() && false) {
-                abort(response()->json(['message' => 'Không tìm thấy lịch sử chuyển tạm của phòng này.'], 422));
-            }
 
             foreach ($logs as $log) {
                 $this->returnRoomMaintenanceLog($log, $pendingEmails);
@@ -635,7 +742,7 @@ class MaintenanceController extends Controller
         );
         DB::table('room_change_log')->where('id', $log->id)->update(['status' => 'RETURNED', 'completed_at' => now()]);
 
-        // Notification
+        // Notification sinh viên
         $student = $occupancy->student;
         if ($student) {
             $oldRoom = Room::with('floor')->find($log->old_room_id);
@@ -644,7 +751,50 @@ class MaintenanceController extends Controller
             $content = "Bảo trì phòng đã hoàn tất. Bạn đã được chuyển về Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}).";
             $this->createNotifRecord($student->id, $title, $content, 'room_maintenance_return');
             $pendingEmails[] = $this->buildEmailPayload($student, $title, $content);
+
+            // Notification admin
+            $adminTitle   = "Bảo trì hoàn tất — Sinh viên trả về phòng {$oldRoomCode}";
+            $adminContent = "Sinh viên {$student->full_name} ({$student->student_code}) đã được chuyển về "
+                          . "Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}) sau khi bảo trì hoàn tất.";
+            $this->createAdminNotif($adminTitle, $adminContent, 'room_maintenance_return', $log->maintenance_request_id ?? null);
+            $pendingEmails[] = $this->buildAdminEmailPayload($adminTitle, $adminContent);
         }
+    }
+
+    private function createAdminNotif(string $title, string $content, string $type, mixed $relatedId = null): void
+    {
+        try {
+            AdminNotification::create([
+                'title'      => $title,
+                'content'    => $content,
+                'type'       => $type,
+                'related_id' => $relatedId,
+                'created_at' => now(),
+            ]);
+        } catch (\Exception) {}
+    }
+
+    private function buildAdminEmailPayload(string $title, string $content): array
+    {
+        $adminEmails = Account::where('role', 'admin')
+            ->with('student')
+            ->get()
+            ->map(fn ($acc) => $acc->student?->email)
+            ->push(config('auth.admin_login_email'))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        return [
+            'admin_emails' => $adminEmails,
+            'subject'      => 'KTX — ' . $title,
+            'body'         => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
+                <h2 style='color:#244cb8;margin-top:0'>" . htmlspecialchars($title) . "</h2>
+                <p>" . nl2br(htmlspecialchars($content)) . "</p>
+                <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
+            </div>",
+        ];
     }
 
     private function createNotifRecord(int $studentId, string $title, string $content, string $type): void
@@ -689,6 +839,18 @@ class MaintenanceController extends Controller
 
     private function sendNotificationEmail(array $data): void
     {
+        // Admin bulk email payload
+        if (isset($data['admin_emails'])) {
+            foreach ($data['admin_emails'] as $email) {
+                try {
+                    Mail::send([], [], function ($message) use ($email, $data) {
+                        $message->to($email)->subject($data['subject'])->html($data['body']);
+                    });
+                } catch (\Exception) {}
+            }
+            return;
+        }
+
         if (empty($data['email'])) {
             return;
         }

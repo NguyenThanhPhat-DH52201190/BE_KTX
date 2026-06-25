@@ -157,6 +157,7 @@ Route::put('/electricity-bills/{id}/status', [ElectricityController::class, 'upd
 
 Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 Route::get('/student/payments', [StudentPaymentController::class, 'myBills']);
+Route::post('/student/payments/room-fee-bills/{id}/confirm-free', [StudentPaymentController::class, 'confirmFree']);
 Route::get('/student/support-requests', [StudentSupportRequestController::class, 'studentIndex']);
 Route::get('/student/support-requests/roommate-target', [StudentSupportRequestController::class, 'roommateTarget']);
 Route::get('/student/support-requests/{id}', [StudentSupportRequestController::class, 'studentShow']);

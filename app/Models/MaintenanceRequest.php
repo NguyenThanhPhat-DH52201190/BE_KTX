@@ -14,6 +14,8 @@ class MaintenanceRequest extends Model
         'room_id',
         'bed_id',
         'reason',
+        'pending_assignments',
+        'note',
         'status',
         'started_at',
         'expected_end_at',
@@ -22,9 +24,10 @@ class MaintenanceRequest extends Model
     ];
 
     protected $casts = [
-        'started_at' => 'datetime',
-        'expected_end_at' => 'datetime',
-        'completed_at' => 'datetime',
+        'started_at'          => 'datetime',
+        'expected_end_at'     => 'datetime',
+        'completed_at'        => 'datetime',
+        'pending_assignments' => 'array',
     ];
 
     public function room(): BelongsTo
