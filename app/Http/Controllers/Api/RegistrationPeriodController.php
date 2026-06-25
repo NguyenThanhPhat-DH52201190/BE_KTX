@@ -119,6 +119,23 @@ class RegistrationPeriodController extends Controller
             ], 422);
         }
 
+        // Rule 4: stay_start_date >= end_date + processing_days + bed_selection_days + initial_payment_due_days
+        if (!empty($data['stay_start_date'])) {
+            $stayStartError = $this->validateStayStartDate(
+                $data['end_date'],
+                $data['processing_days'] ?? 0,
+                $data['bed_selection_days'] ?? 0,
+                $data['initial_payment_due_days'],
+                $data['stay_start_date'],
+            );
+            if ($stayStartError) {
+                return response()->json([
+                    'message' => $stayStartError,
+                    'errors'  => ['stay_start_date' => [$stayStartError]],
+                ], 422);
+            }
+        }
+
         $today = \Carbon\Carbon::today()->toDateString();
         $data['status'] = ($data['start_date'] === $today) ? 'active' : 'pending';
 
@@ -190,6 +207,29 @@ class RegistrationPeriodController extends Controller
                 return response()->json([
                     'message' => $msg,
                     'errors'  => ['start_date' => [$msg]],
+                ], 422);
+            }
+        }
+
+        // Rule 4: stay_start_date >= end_date + processing_days + bed_selection_days + initial_payment_due_days
+        $stayStart         = $data['stay_start_date']         ?? $period->stay_start_date?->toDateString();
+        $effectiveEndDate  = $endDate;
+        $effectiveProcDays = $data['processing_days']          ?? $period->processing_days          ?? 0;
+        $effectiveBedDays  = $data['bed_selection_days']       ?? $period->bed_selection_days        ?? 0;
+        $effectiveDueDays  = $data['initial_payment_due_days'] ?? $period->initial_payment_due_days;
+
+        if ($stayStart && $effectiveEndDate && $effectiveDueDays !== null) {
+            $stayStartError = $this->validateStayStartDate(
+                $effectiveEndDate,
+                (int) $effectiveProcDays,
+                (int) $effectiveBedDays,
+                (int) $effectiveDueDays,
+                $stayStart,
+            );
+            if ($stayStartError) {
+                return response()->json([
+                    'message' => $stayStartError,
+                    'errors'  => ['stay_start_date' => [$stayStartError]],
                 ], 422);
             }
         }
@@ -268,5 +308,25 @@ class RegistrationPeriodController extends Controller
             'waitlist'               => $result['waitlist']->count(),
             'pending_criteria_count' => $pendingCriteriaCount,
         ]);
+    }
+
+    private function validateStayStartDate(
+        string $endDate,
+        int $processingDays,
+        int $bedSelectionDays,
+        int $initialPaymentDueDays,
+        string $stayStartDate,
+    ): ?string {
+        $totalDays = $processingDays + $bedSelectionDays + $initialPaymentDueDays;
+        $minDate   = \Carbon\Carbon::parse($endDate)->addDays($totalDays)->toDateString();
+
+        if ($stayStartDate < $minDate) {
+            $minFormatted = \Carbon\Carbon::parse($minDate)->format('d/m/Y');
+            return "Ngày bắt đầu lưu trú tối thiểu phải là {$minFormatted} "
+                . "(sau {$processingDays} ngày xử lý + {$bedSelectionDays} ngày chọn giường "
+                . "+ {$initialPaymentDueDays} ngày thanh toán).";
+        }
+
+        return null;
     }
 }

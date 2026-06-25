@@ -922,7 +922,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường đang bảo trì, vui lòng chọn giường khác.'], 422);
         }
 
-        // 4. Giường chưa được sinh viên khác chọn (ROOM_CONFIRMED) hoặc đang ở (ACTIVE)
+        // 4. Giường chưa được sinh viên khác giữ chỗ hoặc đang ở.
         $isOccupiedByAnotherStudent = Occupancy::query()
             ->occupiedBeds()
             ->where('bed_id', $bed->id)
@@ -1001,6 +1001,17 @@ class RegistrationController extends Controller
 
         if ($isOccupiedByAnotherStudent) {
             return response()->json(['message' => 'Giường đã có sinh viên ở.'], 422);
+        }
+
+        $hasPaidInitialBill = RoomFeeBill::query()
+            ->where('occupancy_id', $occupancy->id)
+            ->where('status', 'paid')
+            ->exists();
+
+        if (! $hasPaidInitialBill) {
+            return response()->json([
+                'message' => 'Sinh viên chưa thanh toán hóa đơn đầu. Chưa thể kích hoạt lưu trú.',
+            ], 422);
         }
 
         $period = $registration->period;
@@ -1331,8 +1342,13 @@ class RegistrationController extends Controller
             return null;
         }
 
+        if ($occupancy->pendingCheckoutRequest) {
+            return 'checkout_requested';
+        }
+
         return match ($occupancy->status) {
             'COMPLETED' => $occupancy->reason === 'FORCE_EVICTED' ? 'forced_checkout' : 'checked_out',
+            'TERMINATED' => 'forced_checkout',
             default     => $occupancy->status,
         };
     }

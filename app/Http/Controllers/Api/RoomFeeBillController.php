@@ -100,12 +100,16 @@ class RoomFeeBillController extends Controller
             'paid_at' => ['nullable', 'date'],
         ]);
 
-        $bill->update([
-            'payment_method' => trim($data['payment_method']),
-            'transaction_code' => trim((string) ($data['transaction_code'] ?? '')),
-            'paid_at' => $data['paid_at'] ?? now(),
-            'status' => 'paid',
-        ]);
+        DB::transaction(function () use ($bill, $data) {
+            $bill->update([
+                'payment_method' => trim($data['payment_method']),
+                'transaction_code' => trim((string) ($data['transaction_code'] ?? '')),
+                'paid_at' => $data['paid_at'] ?? now(),
+                'status' => 'paid',
+            ]);
+
+            $this->activatePendingOccupancy($bill);
+        });
 
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
@@ -118,9 +122,31 @@ class RoomFeeBillController extends Controller
             'status' => ['required', 'string', Rule::in(['unpaid', 'paid', 'overdue'])],
         ]);
 
-        $bill->update(['status' => $data['status']]);
+        DB::transaction(function () use ($bill, $data) {
+            $bill->update([
+                'status' => $data['status'],
+                'paid_at' => $data['status'] === 'paid' ? ($bill->paid_at ?? now()) : $bill->paid_at,
+            ]);
+
+            if ($data['status'] === 'paid') {
+                $this->activatePendingOccupancy($bill);
+            }
+        });
 
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
+    }
+
+    private function activatePendingOccupancy(RoomFeeBill $bill): void
+    {
+        if (! $bill->occupancy_id) {
+            return;
+        }
+
+        $occupancy = Occupancy::query()->lockForUpdate()->find($bill->occupancy_id);
+
+        if ($occupancy?->status === 'PENDING_PAYMENT' && $occupancy->bed_id) {
+            $occupancy->update(['status' => 'ACTIVE']);
+        }
     }
 
     private function formatBill(RoomFeeBill $bill): array

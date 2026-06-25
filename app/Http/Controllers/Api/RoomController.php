@@ -225,6 +225,8 @@ class RoomController extends Controller
             $displayStatus = 'empty';
             if ($roomInMaintenance || strtoupper((string) $bed->status) === 'MAINTENANCE') {
                 $displayStatus = 'maintenance';
+            } elseif ($occupancy?->status === 'PENDING_PAYMENT') {
+                $displayStatus = 'reserved';
             } elseif ($student) {
                 $displayStatus = 'occupied';
             }

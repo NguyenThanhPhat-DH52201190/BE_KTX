@@ -15,7 +15,7 @@ class Occupancy extends Model
 
     public $timestamps = false;
 
-    public const OCCUPIED_BED_STATUSES = ['ROOM_CONFIRMED', 'ACTIVE'];
+    public const OCCUPIED_BED_STATUSES = ['ROOM_CONFIRMED', 'PENDING_PAYMENT', 'ACTIVE'];
 
     public const OCCUPIED_BED_APPROVAL_STATUSES = ['pending', 'approved'];
 

@@ -32,7 +32,7 @@ class AutoRoomAssignmentService
      */
     public function run(?int $registrationPeriodId = null): array
     {
-        // 1. Eligible: approved with no ROOM_CONFIRMED / ACTIVE occupancy
+        // 1. Eligible: approved with no confirmed, pending-payment, or active occupancy
         //    (includes registrations with existing PROPOSED — we will update them)
         $query = Registration::query()
             ->where('status', 'approved')
@@ -40,7 +40,7 @@ class AutoRoomAssignmentService
             ->whereNotExists(function ($sub) {
                 $sub->from('occupancy')
                     ->whereColumn('occupancy.registration_id', 'registrations.id')
-                    ->whereIn('occupancy.status', ['ROOM_CONFIRMED', 'ACTIVE']);
+                    ->whereIn('occupancy.status', ['ROOM_CONFIRMED', 'PENDING_PAYMENT', 'ACTIVE']);
             })
             ->orderBy('top_priority_tier', 'asc')
             ->orderByDesc('total_priority_score')
@@ -79,8 +79,8 @@ class AutoRoomAssignmentService
             return $a->created_at <=> $b->created_at;
         })->values();
 
-        // 4. Room availability map (PROPOSED occupancies do NOT count as occupied —
-        //    only ROOM_CONFIRMED / ACTIVE do, so re-runs recalculate cleanly)
+        // 4. Room availability map (PROPOSED occupancies do NOT count as occupied;
+        //    confirmed rooms and pending-payment bed selections still reserve capacity)
         $roomMap    = $this->buildRoomMap();
         $roomTrack  = [];   // room_id => ['province'=>[], 'faculty'=>[], 'year'=>[]]
         $provinceFloor = []; // province_code => floor_id of first assigned room
@@ -218,8 +218,8 @@ class AutoRoomAssignmentService
             ->whereHas('floor', fn ($q) => $q->where('status', 'active'))
             ->get();
 
-        // Only ROOM_CONFIRMED / ACTIVE count as occupied capacity
-        $occupiedPerRoom = Occupancy::whereIn('status', ['ROOM_CONFIRMED', 'ACTIVE'])
+        // Confirmed rooms and pending-payment bed selections still reserve capacity.
+        $occupiedPerRoom = Occupancy::whereIn('status', ['ROOM_CONFIRMED', 'PENDING_PAYMENT', 'ACTIVE'])
             ->selectRaw('room_id, COUNT(*) as cnt')
             ->groupBy('room_id')
             ->pluck('cnt', 'room_id');
