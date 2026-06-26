@@ -507,11 +507,7 @@ class StudentSupportRequestController extends Controller
             $occupancy->bed_id  = $targetBed->id;
             $occupancy->save();
 
-            $reason = match ($supportRequest->request_type) {
-                'room_change' => 'student_room_change_request',
-                'roommate_request' => 'student_roommate_request',
-                default => 'student_bed_change_request',
-            };
+            $reason = $this->resolveSupportTransferReason($supportRequest);
 
             DB::table('room_change_log')->insert([
                 'occupancy_id'    => $occupancy->id,
@@ -546,6 +542,28 @@ class StudentSupportRequestController extends Controller
         return response()->json(
             (new StudentSupportRequestResource($supportRequest->fresh(self::WITH_ALL)))->resolve(),
         );
+    }
+
+    private function resolveSupportTransferReason(StudentSupportRequest $supportRequest): string
+    {
+        foreach (preg_split('/\R/u', (string) $supportRequest->content) ?: [] as $line) {
+            $line = trim((string) $line);
+            if (
+                preg_match('/^Lý do\s*:\s*(.+)$/u', $line, $matches)
+                || preg_match('/^Ly do\s*:\s*(.+)$/iu', $line, $matches)
+            ) {
+                $reason = trim((string) ($matches[1] ?? ''));
+                if ($reason !== '' && $reason !== '-') {
+                    return $reason;
+                }
+            }
+        }
+
+        return match ($supportRequest->request_type) {
+            'room_change' => 'Đổi phòng theo yêu cầu sinh viên',
+            'roommate_request' => 'Ở cùng bạn theo yêu cầu sinh viên',
+            default => 'Đổi giường theo yêu cầu sinh viên',
+        };
     }
 
     private function buildTransferNotifData(

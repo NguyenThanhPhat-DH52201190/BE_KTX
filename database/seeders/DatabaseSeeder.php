@@ -18,6 +18,7 @@ class DatabaseSeeder extends Seeder
             ProvinceSeeder::class,
             StudentSeeder::class,
             ViolationTypeSeeder::class,
+            StaticPageSeeder::class,
         ]);
     }
 }

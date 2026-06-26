@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\StaticPageController;
 use App\Http\Controllers\Api\ProvinceController;
 use App\Http\Controllers\Api\RegistrationController;
 use App\Http\Controllers\Api\StorageController;
@@ -30,6 +31,12 @@ use App\Http\Controllers\Api\OccupancyPeriodController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\StudentDashboardController;
 use Illuminate\Support\Facades\Artisan;
+
+// Trang tĩnh (public)
+Route::get('/pages/{slug}', [StaticPageController::class, 'show']);
+
+// Quản lý nội dung trang tĩnh (admin) — POST để hỗ trợ multipart/form-data (upload ảnh)
+Route::post('/admin/pages/{slug}', [StaticPageController::class, 'update']);
 
 // Tuyến xác thực
 Route::post('/register', [AuthController::class, 'register']);

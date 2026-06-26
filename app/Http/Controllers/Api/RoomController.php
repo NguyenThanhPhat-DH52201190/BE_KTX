@@ -10,6 +10,7 @@ use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
 use App\Models\Student;
+use App\Models\StudentSupportRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -162,7 +163,7 @@ class RoomController extends Controller
             ->get()
             ->keyBy('id');
         $historyLogs = DB::table('room_change_log')
-            ->where('change_type', 'TEMPORARY_MAINTENANCE')
+            ->whereIn('change_type', ['PERMANENT', 'TEMPORARY_MAINTENANCE'])
             ->where(function ($query) use ($beds) {
                 $bedIds = $beds->pluck('id')->all();
                 $query->whereIn('old_bed_id', $bedIds)
@@ -175,6 +176,14 @@ class RoomController extends Controller
             ->whereIn('id', $historyLogs->pluck('occupancy_id')->filter()->unique()->all())
             ->get()
             ->keyBy('id');
+        $historySupportRequests = StudentSupportRequest::query()
+            ->whereIn('student_id', $historyOccupancies->pluck('student_id')->filter()->unique()->all())
+            ->whereIn('target_bed_id', $historyLogs->pluck('new_bed_id')->filter()->unique()->all())
+            ->whereIn('request_type', ['room_change', 'bed_change', 'roommate_request'])
+            ->where('status', 'completed')
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy(fn (StudentSupportRequest $request) => ((int) $request->student_id) . ':' . ((int) $request->target_bed_id));
         $historyBedIds = $historyLogs
             ->flatMap(fn ($log) => [$log->old_bed_id, $log->new_bed_id])
             ->filter()
@@ -209,6 +218,7 @@ class RoomController extends Controller
             $temporaryBeds,
             $historyLogs,
             $historyOccupancies,
+            $historySupportRequests,
             $historyBeds,
             $historyRooms,
             $roomInMaintenance
@@ -239,12 +249,13 @@ class RoomController extends Controller
             $studentHistoryLogs = $currentOccupancyId
                 ? $historyLogs->filter(fn ($log) => (int) $log->occupancy_id === $currentOccupancyId)->values()
                 : collect();
-            $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms) {
+            $formatHistory = function ($log) use ($historyOccupancies, $historySupportRequests, $historyBeds, $historyRooms) {
                 $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
                 $oldRoom = $historyRooms->get($log->old_room_id);
                 $newRoom = $historyRooms->get($log->new_room_id);
                 $oldBed = $historyBeds->get($log->old_bed_id);
                 $newBed = $historyBeds->get($log->new_bed_id);
+                $reason = $this->resolveHistoryReason($log, $historyOccupancy, $historySupportRequests);
 
                 return [
                     'id' => $log->id,
@@ -254,7 +265,7 @@ class RoomController extends Controller
                     'old_bed_number' => $oldBed?->bed_number ? (string) $oldBed->bed_number : null,
                     'new_room_code' => $newRoom ? (($newRoom->floor?->building_code ?? '') . $newRoom->room_number) : null,
                     'new_bed_number' => $newBed?->bed_number ? (string) $newBed->bed_number : null,
-                    'reason' => $log->transfer_reason,
+                    'reason' => $reason,
                     'change_type' => $log->change_type,
                     'status' => $log->status,
                     'is_temporary' => (bool) $log->is_temporary,
@@ -357,6 +368,47 @@ class RoomController extends Controller
         return $isProduction
             ? url('/api/storage/' . $cleanPath)
             : url('/storage/' . $cleanPath);
+    }
+
+    private function resolveHistoryReason(object $log, ?Occupancy $historyOccupancy, $historySupportRequests): ?string
+    {
+        $reason = $log->transfer_reason;
+        $studentRequestReasons = [
+            'student_room_change_request' => 'Đổi phòng theo yêu cầu sinh viên',
+            'student_bed_change_request' => 'Đổi giường theo yêu cầu sinh viên',
+            'student_roommate_request' => 'Ở cùng bạn theo yêu cầu sinh viên',
+        ];
+
+        if (! array_key_exists((string) $reason, $studentRequestReasons)) {
+            return $reason;
+        }
+
+        $studentId = $historyOccupancy?->student_id;
+        $targetBedId = $log->new_bed_id;
+        $supportRequest = ($studentId && $targetBedId)
+            ? $historySupportRequests->get(((int) $studentId) . ':' . ((int) $targetBedId))?->first()
+            : null;
+
+        return $this->extractSupportRequestReason($supportRequest?->content)
+            ?? $studentRequestReasons[(string) $reason];
+    }
+
+    private function extractSupportRequestReason(?string $content): ?string
+    {
+        foreach (preg_split('/\R/u', (string) $content) ?: [] as $line) {
+            $line = trim((string) $line);
+            if (
+                preg_match('/^Lý do\s*:\s*(.+)$/u', $line, $matches)
+                || preg_match('/^Ly do\s*:\s*(.+)$/iu', $line, $matches)
+            ) {
+                $reason = trim((string) ($matches[1] ?? ''));
+                if ($reason !== '' && $reason !== '-') {
+                    return $reason;
+                }
+            }
+        }
+
+        return null;
     }
 
     public function updateBed(Request $request, int $roomId, int $bedId): JsonResponse
