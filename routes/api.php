@@ -30,6 +30,9 @@ use App\Http\Controllers\Api\OccupancyExtensionController;
 use App\Http\Controllers\Api\OccupancyPeriodController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\StudentDashboardController;
+use App\Http\Controllers\Api\AdmissionCandidateController;
+use App\Http\Controllers\Api\DormReservationController;
+use App\Http\Controllers\Api\ReservationPriorityController;
 use Illuminate\Support\Facades\Artisan;
 
 // Trang tĩnh (public)
@@ -218,3 +221,49 @@ Route::put('/admin/extensions/{id}/reject', [OccupancyExtensionController::class
 Route::post('/payments/vnpay/create', [VnpayPaymentController::class, 'create']);
 Route::post('/payments/vnpay/verify', [VnpayPaymentController::class, 'verify']);
 Route::get('/payments/vnpay/return', [VnpayPaymentController::class, 'handleReturn']);
+
+// =====================================================================
+// Tân sinh viên — hồ sơ trúng tuyển & giữ chỗ KTX
+// =====================================================================
+
+// Public: xác minh thí sinh trúng tuyển
+Route::post('/admission-candidates/verify', [DormReservationController::class, 'verify']);
+
+// Public: tạo hồ sơ giữ chỗ
+Route::post('/dorm-reservations', [DormReservationController::class, 'store']);
+Route::post('/dorm-reservations/{id}/upload-document', [DormReservationController::class, 'uploadDocument'])->whereNumber('id');
+
+// Public: khai báo + xoá tiêu chí ưu tiên, upload/xoá minh chứng
+Route::post('/dorm-reservations/{id}/priorities', [ReservationPriorityController::class, 'store'])->whereNumber('id');
+Route::delete('/reservation-priorities/{id}', [ReservationPriorityController::class, 'destroy'])->whereNumber('id');
+Route::post('/reservation-priorities/{id}/evidences', [ReservationPriorityController::class, 'storeEvidence'])->whereNumber('id');
+Route::delete('/reservation-priority-evidences/{id}', [ReservationPriorityController::class, 'destroyEvidence'])->whereNumber('id');
+
+// Admin: quản lý thí sinh trúng tuyển
+Route::get('/admin/admission-candidates', [AdmissionCandidateController::class, 'index']);
+Route::post('/admin/admission-candidates', [AdmissionCandidateController::class, 'store']);
+Route::get('/admin/admission-candidates/import-template', [AdmissionCandidateController::class, 'importTemplate']);
+Route::post('/admin/admission-candidates/bulk-enroll', [AdmissionCandidateController::class, 'bulkEnroll']);
+Route::get('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'show'])->whereNumber('id');
+Route::put('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'update'])->whereNumber('id');
+Route::delete('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'destroy'])->whereNumber('id');
+Route::post('/admin/admission-candidates/{id}/enroll', [AdmissionCandidateController::class, 'enroll'])->whereNumber('id');
+
+// Admin: xác minh tiêu chí ưu tiên cho hồ sơ giữ chỗ
+Route::get('/admin/reservation-priorities', [ReservationPriorityController::class, 'index']);
+Route::patch('/admin/reservation-priorities/{id}/verify', [ReservationPriorityController::class, 'verify'])->whereNumber('id');
+Route::patch('/admin/reservation-priorities/{id}/reject', [ReservationPriorityController::class, 'reject'])->whereNumber('id');
+
+// Admin: xếp hạng + batch convert (phải đặt trước {id} routes để tránh conflict)
+Route::post('/admin/dorm-reservations/rank', [DormReservationController::class, 'rankReservations']);
+Route::post('/admin/dorm-reservations/batch-convert', [DormReservationController::class, 'batchConvert']);
+
+// Admin: quản lý hồ sơ giữ chỗ KTX
+Route::get('/admin/dorm-reservations', [DormReservationController::class, 'index']);
+Route::get('/admin/dorm-reservations/{id}', [DormReservationController::class, 'show'])->whereNumber('id');
+Route::put('/admin/dorm-reservations/{id}/approve', [DormReservationController::class, 'approve'])->whereNumber('id');
+Route::put('/admin/dorm-reservations/{id}/reject', [DormReservationController::class, 'reject'])->whereNumber('id');
+Route::put('/admin/dorm-reservations/{id}/waitlist', [DormReservationController::class, 'waitlist'])->whereNumber('id');
+Route::put('/admin/dorm-reservations/{id}/cancel', [DormReservationController::class, 'cancel'])->whereNumber('id');
+Route::put('/admin/dorm-reservations/{id}/note', [DormReservationController::class, 'note'])->whereNumber('id');
+Route::post('/admin/dorm-reservations/{id}/convert-to-registration', [DormReservationController::class, 'convertToRegistration'])->whereNumber('id');

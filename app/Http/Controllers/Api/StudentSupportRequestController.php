@@ -664,9 +664,8 @@ class StudentSupportRequestController extends Controller
     private function notifyAdmin(Student $student, StudentSupportRequest $req): void
     {
         try {
-            $typeLabel = $this->getTypeLabel($req->request_type);
-            $title     = "Yêu cầu hỗ trợ mới — {$typeLabel}";
-            $content   = "Sinh viên {$student->full_name} ({$student->student_code}) vừa gửi yêu cầu hỗ trợ loại \"{$typeLabel}\": {$req->title}.";
+            $title   = 'Yêu cầu hỗ trợ mới';
+            $content = "Sinh viên {$student->full_name} ({$student->student_code}) vừa gửi yêu cầu hỗ trợ: {$req->title}.";
 
             AdminNotification::create([
                 'title'      => $title,
@@ -691,8 +690,7 @@ class StudentSupportRequestController extends Controller
                 return;
             }
 
-            $typeLabel = $this->getTypeLabel($req->request_type);
-            $subject   = "[KTX STU] Yêu cầu hỗ trợ mới — {$typeLabel}";
+            $subject   = '[KTX STU] Yêu cầu hỗ trợ mới';
             $body      = "
                 <div style='font-family:sans-serif;max-width:600px;margin:auto;padding:24px;background:#f8fbff;border-radius:12px;'>
                     <h2 style='color:#1a2d52;margin-bottom:8px;'>Yêu cầu hỗ trợ mới</h2>
@@ -707,10 +705,6 @@ class StudentSupportRequestController extends Controller
                             <td style='padding:10px 16px;color:#1f3152;border-top:1px solid #e8eef8;'>{$student->email}</td>
                         </tr>
                         <tr style='background:#eef4ff;'>
-                            <td style='padding:10px 16px;font-weight:bold;color:#244cb8;border-top:1px solid #e8eef8;'>Loại yêu cầu</td>
-                            <td style='padding:10px 16px;color:#1f3152;border-top:1px solid #e8eef8;'>{$typeLabel}</td>
-                        </tr>
-                        <tr>
                             <td style='padding:10px 16px;font-weight:bold;color:#244cb8;border-top:1px solid #e8eef8;'>Tiêu đề</td>
                             <td style='padding:10px 16px;color:#1f3152;border-top:1px solid #e8eef8;'>{$req->title}</td>
                         </tr>

@@ -75,6 +75,9 @@ class RegistrationPeriodController extends Controller
             'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
             'processing_days'           => ['nullable', 'integer', 'min:1'],
             'initial_payment_due_days'  => ['required', 'integer', 'min:1'],
+            'round_number'              => ['nullable', 'integer', 'min:1'],
+            'allow_admission_candidates' => ['sometimes', 'boolean'],
+            'requires_student_code'     => ['sometimes', 'boolean'],
         ]);
 
         // Rule 1: Mỗi năm học chỉ được có 1 đợt chính
@@ -161,6 +164,9 @@ class RegistrationPeriodController extends Controller
             'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
             'processing_days'           => ['nullable', 'integer', 'min:1'],
             'initial_payment_due_days'  => ['sometimes', 'integer', 'min:1'],
+            'round_number'              => ['nullable', 'integer', 'min:1'],
+            'allow_admission_candidates' => ['sometimes', 'boolean'],
+            'requires_student_code'     => ['sometimes', 'boolean'],
         ]);
 
         $channel    = $data['channel']     ?? $period->channel;

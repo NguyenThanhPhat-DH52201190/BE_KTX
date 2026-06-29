@@ -19,6 +19,7 @@ class DatabaseSeeder extends Seeder
             StudentSeeder::class,
             ViolationTypeSeeder::class,
             StaticPageSeeder::class,
+            AdmissionCandidateSeeder::class,
         ]);
     }
 }

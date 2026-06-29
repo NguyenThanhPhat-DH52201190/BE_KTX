@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\FeeDiscountPolicy;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
+use App\Models\StudentPriority;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -53,10 +55,25 @@ class RoomFeeBillController extends Controller
             ->whereNotNull('registration_id')
             ->get();
 
+        // Load active discount policies keyed by priority_criteria_id
+        $discountPolicies = FeeDiscountPolicy::query()
+            ->where('is_active', true)
+            ->get()
+            ->keyBy('priority_criteria_id');
+
+        // Load verified priorities for all relevant students
+        $studentIds = $occupancies->pluck('student_id')->unique()->filter()->values();
+        $studentPriorities = StudentPriority::query()
+            ->with('criteria')
+            ->whereIn('student_id', $studentIds)
+            ->where('status', 'verified')
+            ->get()
+            ->groupBy('student_id');
+
         $created = [];
         $skipped = 0;
 
-        DB::transaction(function () use ($data, $occupancies, &$created, &$skipped) {
+        DB::transaction(function () use ($data, $occupancies, &$created, &$skipped, $discountPolicies, $studentPriorities) {
             foreach ($occupancies as $occupancy) {
                 $exists = RoomFeeBill::query()
                     ->where('occupancy_id', $occupancy->id)
@@ -69,15 +86,50 @@ class RoomFeeBillController extends Controller
                     continue;
                 }
 
-                $created[] = RoomFeeBill::query()->create([
-                    'student_id' => $occupancy->student_id,
+                $baseAmount = (int) $data['amount'];
+                $discountPercent = null;
+                $discountAmount = 0;
+                $discountReason = null;
+                $priorityCriteriaId = null;
+
+                // Pick the highest active discount among verified priorities
+                $priorities = $studentPriorities->get($occupancy->student_id, collect());
+                $bestDiscount = 0.0;
+                foreach ($priorities as $priority) {
+                    $criteriaId = $priority->priority_criteria_id;
+                    if ($discountPolicies->has($criteriaId)) {
+                        $policy = $discountPolicies->get($criteriaId);
+                        if ((float) $policy->discount_percent > $bestDiscount) {
+                            $bestDiscount = (float) $policy->discount_percent;
+                            $discountReason = $priority->criteria?->name;
+                            $priorityCriteriaId = $criteriaId;
+                        }
+                    }
+                }
+
+                $billData = [
+                    'student_id'  => $occupancy->student_id,
                     'occupancy_id' => $occupancy->id,
-                    'month' => (int) $data['month'],
-                    'year' => (int) $data['year'],
-                    'amount' => $data['amount'],
-                    'due_date' => $data['due_date'],
-                    'status' => 'unpaid',
-                ]);
+                    'month'        => (int) $data['month'],
+                    'year'         => (int) $data['year'],
+                    'due_date'     => $data['due_date'],
+                    'status'       => 'unpaid',
+                ];
+
+                if ($bestDiscount > 0) {
+                    $discountPercent = $bestDiscount;
+                    $discountAmount  = (int) round($baseAmount * $bestDiscount / 100);
+                    $billData['original_amount']      = $baseAmount;
+                    $billData['discount_percent']     = $discountPercent;
+                    $billData['discount_amount']      = $discountAmount;
+                    $billData['discount_reason']      = $discountReason;
+                    $billData['priority_criteria_id'] = $priorityCriteriaId;
+                    $billData['amount']               = $baseAmount - $discountAmount;
+                } else {
+                    $billData['amount'] = $baseAmount;
+                }
+
+                $created[] = RoomFeeBill::query()->create($billData);
             }
         });
 

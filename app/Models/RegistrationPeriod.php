@@ -23,6 +23,9 @@ class RegistrationPeriod extends Model
         'bed_selection_days',
         'processing_days',
         'initial_payment_due_days',
+        'round_number',
+        'allow_admission_candidates',
+        'requires_student_code',
     ];
 
     protected $casts = [
@@ -30,9 +33,12 @@ class RegistrationPeriod extends Model
         'end_date'        => 'date:Y-m-d',
         'stay_start_date' => 'date:Y-m-d',
         'stay_end_date'   => 'date:Y-m-d',
-        'bed_selection_days'       => 'integer',
-        'processing_days'          => 'integer',
-        'initial_payment_due_days' => 'integer',
+        'bed_selection_days'         => 'integer',
+        'processing_days'            => 'integer',
+        'initial_payment_due_days'   => 'integer',
+        'round_number'               => 'integer',
+        'allow_admission_candidates' => 'boolean',
+        'requires_student_code'      => 'boolean',
     ];
 
     public function registrations(): HasMany
@@ -45,4 +51,8 @@ class RegistrationPeriod extends Model
         return $this->hasMany(Waitlist::class);
     }
 
+    public function dormReservations(): HasMany
+    {
+        return $this->hasMany(DormReservation::class);
+    }
 }

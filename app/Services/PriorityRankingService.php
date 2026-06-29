@@ -2,7 +2,9 @@
 
 namespace App\Services;
 
+use App\Models\DormReservation;
 use App\Models\Registration;
+use App\Models\ReservationPriority;
 use App\Models\StudentPriority;
 use Illuminate\Support\Collection;
 
@@ -72,6 +74,89 @@ class PriorityRankingService
             ->get()
             ->each(fn (Registration $registration) => $this->calculateForRegistration($registration));
     }
+
+    // =========================================================
+    // Dorm Reservation priority (tân sinh viên)
+    // =========================================================
+
+    /**
+     * Compute top_priority_tier and total_priority_score from VERIFIED
+     * reservation_priorities for this dorm_reservation, then persist.
+     *
+     * @return array{top_priority_tier: int, total_priority_score: int}
+     */
+    public function calculateForReservation(DormReservation $reservation): array
+    {
+        $rows = ReservationPriority::query()
+            ->join('priority_criteria', 'reservation_priorities.priority_criteria_id', '=', 'priority_criteria.id')
+            ->where('reservation_priorities.dorm_reservation_id', $reservation->id)
+            ->where('reservation_priorities.status', 'verified')
+            ->get([
+                'priority_criteria.tier as tier',
+                'priority_criteria.priority_score as priority_score',
+            ]);
+
+        if ($rows->isEmpty()) {
+            $tier  = self::NO_PRIORITY_TIER;
+            $score = 0;
+        } else {
+            $tier  = (int) $rows->min('tier');
+            $score = (int) $rows->sum('priority_score');
+        }
+
+        $reservation->top_priority_tier    = $tier;
+        $reservation->total_priority_score = $score;
+        $reservation->save();
+
+        return [
+            'top_priority_tier'    => $tier,
+            'total_priority_score' => $score,
+        ];
+    }
+
+    /**
+     * Recalculate all submitted/waitlisted reservations in a period.
+     */
+    public function recalculateReservationPeriod(int $periodId): void
+    {
+        DormReservation::where('registration_period_id', $periodId)
+            ->whereIn('status', ['submitted', 'waitlisted'])
+            ->get()
+            ->each(fn (DormReservation $r) => $this->calculateForReservation($r));
+    }
+
+    /**
+     * Rank submitted+waitlisted reservations for a period and split into
+     * approved (top N) and waitlist (remainder).
+     *
+     * @return array{ranked: Collection<int, DormReservation>, approved: Collection<int, DormReservation>, waitlist: Collection<int, DormReservation>}
+     */
+    public function rankReservationPeriod(int $periodId, int $availableBeds, bool $recalculate = true): array
+    {
+        if ($recalculate) {
+            $this->recalculateReservationPeriod($periodId);
+        }
+
+        $ranked = DormReservation::where('registration_period_id', $periodId)
+            ->whereIn('status', ['submitted', 'waitlisted'])
+            ->orderBy('top_priority_tier', 'asc')
+            ->orderByDesc('total_priority_score')
+            ->orderBy('created_at', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        $availableBeds = max(0, $availableBeds);
+
+        return [
+            'ranked'   => $ranked,
+            'approved' => $ranked->take($availableBeds)->values(),
+            'waitlist' => $ranked->slice($availableBeds)->values(),
+        ];
+    }
+
+    // =========================================================
+    // Registration priority (sinh viên cũ)
+    // =========================================================
 
     /**
      * Rank a period's registrations by the tiered policy and split them into

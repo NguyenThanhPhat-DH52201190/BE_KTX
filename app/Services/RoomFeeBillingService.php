@@ -62,9 +62,14 @@ class RoomFeeBillingService
     }
 
     /**
-     * Tạo (hoặc lấy lại) hóa đơn tháng đầu khi sinh viên chọn giường.
-     * Trả về bill để selectBed có thể trả bill_id về FE.
-     * due_date = ngày tạo bill + initial_payment_due_days (lấy từ registration_period).
+     * Tạo hóa đơn ban đầu khi sinh viên chọn giường.
+     *
+     * Quy tắc:
+     * - Luôn tạo hóa đơn FULL tháng đầu (không pro-rated).
+     * - Nếu vào giữa tháng (check_in_date.day > 1): tạo thêm hóa đơn quý kế tiếp
+     *   (= phí tháng × 3) để sinh viên biết nghĩa vụ thanh toán tiếp theo.
+     * - Idempotent: trả về bill cũ nếu đã tồn tại.
+     * due_date của tháng đầu = hôm nay + initial_payment_due_days.
      */
     public function createInitialBill(Occupancy $occupancy): ?RoomFeeBill
     {
@@ -77,23 +82,81 @@ class RoomFeeBillingService
             return null;
         }
 
-        $pricePerMonth = $this->getRoomFeePerMonth();
-        $checkIn       = Carbon::parse($occupancy->check_in_date)->startOfDay();
-        $month         = $checkIn->month;
-        $year          = $checkIn->year;
-        $dueDate       = Carbon::today('Asia/Ho_Chi_Minh')->addDays($dueDays)->toDateString();
+        $pricePerMonth  = $this->getRoomFeePerMonth();
+        $checkIn        = Carbon::parse($occupancy->check_in_date)->startOfDay();
+        $month          = $checkIn->month;
+        $year           = $checkIn->year;
+        $initialDueDate = Carbon::today('Asia/Ho_Chi_Minh')->addDays($dueDays)->toDateString();
+        $totalDays      = $checkIn->daysInMonth;
 
-        // Nếu đã tồn tại (idempotent) thì trả về bill cũ
-        $existing = RoomFeeBill::where('student_id', $occupancy->student_id)
+        // Hóa đơn tháng đầu (full tháng, không pro-rated) — idempotent
+        $firstBill = RoomFeeBill::where('student_id', $occupancy->student_id)
             ->where('month', $month)
             ->where('year', $year)
             ->first();
 
-        if ($existing) {
-            return $existing;
+        if (! $firstBill) {
+            $discount  = $this->discountService->calculate($occupancy, $pricePerMonth);
+            $firstBill = RoomFeeBill::create([
+                'student_id'       => $occupancy->student_id,
+                'occupancy_id'     => $occupancy->id,
+                'month'            => $month,
+                'year'             => $year,
+                'amount'           => $discount['final_amount'],
+                'original_amount'  => $discount['original_amount'],
+                'discount_percent' => $discount['discount_percent'],
+                'discount_amount'  => $discount['discount_amount'],
+                'discount_reason'  => $discount['discount_reason'],
+                'days_stayed'      => $totalDays,
+                'total_days'       => $totalDays,
+                'due_date'         => $initialDueDate,
+                'status'           => 'unpaid',
+            ]);
         }
 
-        return $this->createProratedBill($occupancy, $checkIn, $pricePerMonth, $dueDate);
+        // Nếu vào giữa tháng → tạo thêm hóa đơn quý kế tiếp
+        if ($checkIn->day > 1) {
+            [$nextQMonth, $nextQYear] = $this->nextQuarterFirstMonth($month, $year);
+
+            if (! $this->billExists($occupancy->student_id, $nextQMonth, $nextQYear)) {
+                $quarterlyBase = $pricePerMonth * 3;
+                $discount      = $this->discountService->calculate($occupancy, $quarterlyBase);
+
+                RoomFeeBill::create([
+                    'student_id'       => $occupancy->student_id,
+                    'occupancy_id'     => $occupancy->id,
+                    'month'            => $nextQMonth,
+                    'year'             => $nextQYear,
+                    'amount'           => $discount['final_amount'],
+                    'original_amount'  => $discount['original_amount'],
+                    'discount_percent' => $discount['discount_percent'],
+                    'discount_amount'  => $discount['discount_amount'],
+                    'discount_reason'  => $discount['discount_reason'],
+                    'days_stayed'      => null,
+                    'total_days'       => null,
+                    'due_date'         => Carbon::create($nextQYear, $nextQMonth, 20)->toDateString(),
+                    'status'           => 'unpaid',
+                ]);
+            }
+        }
+
+        return $firstBill;
+    }
+
+    /**
+     * Trả về [month, year] của tháng đầu tiên trong quý kế tiếp.
+     * Ví dụ: tháng 6 (Q2) → trả về [7, $year] (Q3 bắt đầu tháng 7).
+     *         tháng 12 (Q4) → trả về [1, $year+1].
+     */
+    private function nextQuarterFirstMonth(int $month, int $year): array
+    {
+        $nextQFirstMonth = (int) ceil($month / 3) * 3 + 1;
+
+        if ($nextQFirstMonth > 12) {
+            return [1, $year + 1];
+        }
+
+        return [$nextQFirstMonth, $year];
     }
 
     // -------------------------------------------------------------------------

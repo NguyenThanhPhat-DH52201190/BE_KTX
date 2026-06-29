@@ -22,6 +22,7 @@ use App\Models\Notification;
 use App\Helpers\StorageHelper;
 use App\Services\AutoReviewService;
 use App\Services\RoomFeeBillingService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -1122,20 +1123,40 @@ class RegistrationController extends Controller
         }
 
         $occupancy = $registration->occupancy;
-        $occupancy->status = 'COMPLETED';
-        $occupancy->check_out_date = $occupancy->check_out_date ?? now()->toDateString();
-        $occupancy->save();
 
-        // Chốt yêu cầu thôi ở đang chờ (nếu có).
-        CheckoutRequest::where('occupancy_id', $occupancy->id)
-            ->where('status', 'pending')
-            ->update(['status' => 'approved', 'processed_at' => now()]);
+        DB::transaction(function () use ($occupancy) {
+            $now          = Carbon::now();
+            $currentMonth = $now->month;
+            $currentYear  = $now->year;
 
-        $bed = Bed::find($occupancy->bed_id);
-        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'active';
-            $bed->save();
-        }
+            // Hủy tất cả hóa đơn CHƯA thanh toán của các quý SAU tháng hiện tại.
+            // Hóa đơn quý hiện tại (bill.month <= currentMonth trong cùng năm) được giữ lại —
+            // sinh viên không hoàn tiền dù rời đi trước khi hết quý.
+            RoomFeeBill::where('occupancy_id', $occupancy->id)
+                ->where('status', 'unpaid')
+                ->where(function ($q) use ($currentMonth, $currentYear) {
+                    $q->where('year', '>', $currentYear)
+                      ->orWhere(function ($q2) use ($currentMonth, $currentYear) {
+                          $q2->where('year', $currentYear)->where('month', '>', $currentMonth);
+                      });
+                })
+                ->delete();
+
+            $occupancy->status         = 'COMPLETED';
+            $occupancy->check_out_date = $occupancy->check_out_date ?? now()->toDateString();
+            $occupancy->save();
+
+            // Chốt yêu cầu thôi ở đang chờ (nếu có).
+            CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved', 'processed_at' => now()]);
+
+            $bed = Bed::find($occupancy->bed_id);
+            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+                $bed->status = 'active';
+                $bed->save();
+            }
+        });
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
@@ -1153,21 +1174,38 @@ class RegistrationController extends Controller
         }
 
         $occupancy = $registration->occupancy;
-        $occupancy->status = 'TERMINATED';
-        $occupancy->reason = $request->reason;
-        $occupancy->check_out_date = now()->toDateString();
-        $occupancy->save();
 
-        // Buộc thôi ở: chốt mọi yêu cầu thôi ở đang chờ (nếu có).
-        CheckoutRequest::where('occupancy_id', $occupancy->id)
-            ->where('status', 'pending')
-            ->update(['status' => 'approved', 'processed_at' => now()]);
+        DB::transaction(function () use ($occupancy, $request) {
+            $now          = Carbon::now();
+            $currentMonth = $now->month;
+            $currentYear  = $now->year;
 
-        $bed = Bed::find($occupancy->bed_id);
-        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-            $bed->status = 'active';
-            $bed->save();
-        }
+            // Hủy hóa đơn chưa trả của các quý sau (áp dụng chính sách không hoàn tiền)
+            RoomFeeBill::where('occupancy_id', $occupancy->id)
+                ->where('status', 'unpaid')
+                ->where(function ($q) use ($currentMonth, $currentYear) {
+                    $q->where('year', '>', $currentYear)
+                      ->orWhere(function ($q2) use ($currentMonth, $currentYear) {
+                          $q2->where('year', $currentYear)->where('month', '>', $currentMonth);
+                      });
+                })
+                ->delete();
+
+            $occupancy->status         = 'TERMINATED';
+            $occupancy->reason         = $request->reason;
+            $occupancy->check_out_date = now()->toDateString();
+            $occupancy->save();
+
+            CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved', 'processed_at' => now()]);
+
+            $bed = Bed::find($occupancy->bed_id);
+            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+                $bed->status = 'active';
+                $bed->save();
+            }
+        });
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
