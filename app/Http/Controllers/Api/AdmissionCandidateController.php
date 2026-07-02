@@ -11,6 +11,7 @@ use App\Models\RegistrationPeriod;
 use App\Models\Student;
 use App\Models\StudentPriority;
 use App\Models\StudentPriorityEvidence;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -230,6 +231,9 @@ class AdmissionCandidateController extends Controller
 
             if ($fullReservation) {
                 $period = RegistrationPeriod::find($fullReservation->registration_period_id);
+                // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
+                // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
+                $isPreApproved = $fullReservation->status === 'approved';
                 $reg = Registration::create([
                     'student_id'             => $student->id,
                     'registration_period_id' => $fullReservation->registration_period_id,
@@ -248,7 +252,8 @@ class AdmissionCandidateController extends Controller
                     'mother_phone'           => $fullReservation->mother_phone,
                     'parent_address'         => $fullReservation->parent_address,
                     'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
-                    'status'                 => 'submitted',
+                    'status'                 => $isPreApproved ? 'approved' : 'submitted',
+                    'approved_at'            => $isPreApproved ? now() : null,
                     'avatar_url'             => $fullReservation->avatar_url,
                     'cccd_front_url'         => $fullReservation->cccd_front_url,
                     'cccd_back_url'          => $fullReservation->cccd_back_url,
@@ -488,6 +493,9 @@ class AdmissionCandidateController extends Controller
 
                         if ($fullReservation) {
                             $period = RegistrationPeriod::find($fullReservation->registration_period_id);
+                            // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
+                            // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
+                            $isPreApproved = $fullReservation->status === 'approved';
                             $reg = Registration::create([
                                 'student_id'             => $student->id,
                                 'registration_period_id' => $fullReservation->registration_period_id,
@@ -506,7 +514,8 @@ class AdmissionCandidateController extends Controller
                                 'mother_phone'           => $fullReservation->mother_phone,
                                 'parent_address'         => $fullReservation->parent_address,
                                 'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
-                                'status'                 => 'submitted',
+                                'status'                 => $isPreApproved ? 'approved' : 'submitted',
+                                'approved_at'            => $isPreApproved ? now() : null,
                                 'avatar_url'             => $fullReservation->avatar_url,
                                 'cccd_front_url'         => $fullReservation->cccd_front_url,
                                 'cccd_back_url'          => $fullReservation->cccd_back_url,
@@ -519,6 +528,18 @@ class AdmissionCandidateController extends Controller
                                 'converted_registration_id' => $reg->id,
                             ]);
                             $linkedNote .= ' Đã tự động tạo đơn đăng ký lưu trú.';
+
+                            // Hồ sơ giữ chỗ đã duyệt sẵn -> đơn nội trú tạo ra cũng
+                            // approved luôn, sinh viên chỉ còn chờ phân phòng.
+                            if ($isPreApproved) {
+                                app(StudentNotificationService::class)->notifyStudent(
+                                    $student,
+                                    'Đơn đăng ký nội trú đã được duyệt',
+                                    'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                                    'registration_approved',
+                                    $reg->id,
+                                );
+                            }
                         }
                     }
                 }

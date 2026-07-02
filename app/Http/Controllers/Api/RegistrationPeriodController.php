@@ -139,6 +139,19 @@ class RegistrationPeriodController extends Controller
             }
         }
 
+        // Rule 5: đợt quanh năm chỉ được ở tới cùng mốc kết thúc lưu trú với đợt chính
+        // cùng năm học (sinh viên đăng ký giữa năm vẫn theo chu kỳ năm học chung, không
+        // được cộng thêm 1 năm kể từ ngày đăng ký) — ghi đè stay_end_date, không cho nhập tay.
+        if ($data['channel'] === 'rolling') {
+            $mainStayEndError = $this->applyRollingStayEndDate($data, $data['school_year']);
+            if ($mainStayEndError) {
+                return response()->json([
+                    'message' => $mainStayEndError,
+                    'errors'  => ['stay_end_date' => [$mainStayEndError]],
+                ], 422);
+            }
+        }
+
         $today = \Carbon\Carbon::today()->toDateString();
         $data['status'] = ($data['start_date'] === $today) ? 'active' : 'pending';
 
@@ -240,7 +253,26 @@ class RegistrationPeriodController extends Controller
             }
         }
 
+        // Rule 5: đợt quanh năm luôn theo đúng stay_end_date của đợt chính cùng năm học.
+        if ($channel === 'rolling') {
+            $mainStayEndError = $this->applyRollingStayEndDate($data, $schoolYear, $id);
+            if ($mainStayEndError) {
+                return response()->json([
+                    'message' => $mainStayEndError,
+                    'errors'  => ['stay_end_date' => [$mainStayEndError]],
+                ], 422);
+            }
+        }
+
         $period->update($data);
+
+        // Nếu vừa đổi stay_end_date của đợt chính, đồng bộ lại cho mọi đợt quanh năm
+        // cùng năm học để không lệch mốc kết thúc lưu trú.
+        if ($channel === 'main' && array_key_exists('stay_end_date', $data)) {
+            RegistrationPeriod::where('channel', 'rolling')
+                ->where('school_year', $schoolYear)
+                ->update(['stay_end_date' => $data['stay_end_date']]);
+        }
 
         if (in_array($period->status, ['pending', 'active'], true)) {
             $today     = \Carbon\Carbon::today();
@@ -314,6 +346,29 @@ class RegistrationPeriodController extends Controller
             'waitlist'               => $result['waitlist']->count(),
             'pending_criteria_count' => $pendingCriteriaCount,
         ]);
+    }
+
+    /**
+     * Ghi đè $data['stay_end_date'] bằng đúng stay_end_date của đợt chính (channel=main)
+     * cùng school_year — đợt quanh năm không được tự chọn ngày kết thúc lưu trú riêng.
+     *
+     * @param array<string, mixed> $data Tham chiếu — sẽ bị sửa trực tiếp nếu hợp lệ.
+     * @return string|null Thông báo lỗi nếu chưa thể xác định được mốc kết thúc, null nếu đã ghi đè thành công.
+     */
+    private function applyRollingStayEndDate(array &$data, string $schoolYear, ?int $excludeId = null): ?string
+    {
+        $mainPeriod = RegistrationPeriod::where('channel', 'main')
+            ->where('school_year', $schoolYear)
+            ->when($excludeId, fn ($q) => $q->where('id', '!=', $excludeId))
+            ->first();
+
+        if (! $mainPeriod || ! $mainPeriod->stay_end_date) {
+            return 'Đợt chính chưa có ngày kết thúc lưu trú, vui lòng cập nhật đợt chính trước khi mở đợt quanh năm.';
+        }
+
+        $data['stay_end_date'] = $mainPeriod->stay_end_date->toDateString();
+
+        return null;
     }
 
     private function validateStayStartDate(

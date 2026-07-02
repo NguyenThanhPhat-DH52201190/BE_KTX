@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\FeeDiscountPolicy;
+use App\Models\StudentPaymentPlan;
 use App\Models\StudentPriority;
 use App\Models\Occupancy;
 
@@ -11,8 +12,9 @@ class FeeDiscountService
     /**
      * Tính miễn/giảm tiền phòng cho một occupancy.
      *
-     * Lấy tất cả student_priority có status=verified của sinh viên trong đăng ký đó,
-     * đối chiếu với fee_discount_policies đang active, chọn mức giảm cao nhất.
+     * So sánh 2 nguồn giảm giá và lấy mức % cao hơn (không cộng dồn):
+     * - Theo chính sách: student_priority verified đối chiếu fee_discount_policies active.
+     * - Theo chế độ đặc biệt admin duyệt thủ công: student_payment_plans (type=discount, active).
      *
      * @return array{
      *   original_amount: int,
@@ -39,6 +41,9 @@ class FeeDiscountService
             return $noDiscount;
         }
 
+        $policyPercent = 0.0;
+        $policyReason  = null;
+
         // Lấy các diện ưu tiên đã verified của sinh viên trong đăng ký này
         $verifiedPriorityIds = StudentPriority::query()
             ->where('registration_id', $registrationId)
@@ -46,32 +51,51 @@ class FeeDiscountService
             ->where('status', 'verified')
             ->pluck('priority_criteria_id');
 
-        if ($verifiedPriorityIds->isEmpty()) {
-            return $noDiscount;
+        if ($verifiedPriorityIds->isNotEmpty()) {
+            // Tìm policy active có mức giảm cao nhất
+            $bestPolicy = FeeDiscountPolicy::query()
+                ->with('criteria')
+                ->whereIn('priority_criteria_id', $verifiedPriorityIds)
+                ->where('is_active', true)
+                ->orderByDesc('discount_percent')
+                ->first();
+
+            if ($bestPolicy && $bestPolicy->discount_percent > 0) {
+                $policyPercent = (float) $bestPolicy->discount_percent;
+                $policyReason  = $bestPolicy->criteria?->name ?? null;
+            }
         }
 
-        // Tìm policy active có mức giảm cao nhất
-        $bestPolicy = FeeDiscountPolicy::query()
-            ->with('criteria')
-            ->whereIn('priority_criteria_id', $verifiedPriorityIds)
+        // Chế độ giảm giá dài hạn do admin duyệt thủ công cho sinh viên khó khăn
+        $plan = StudentPaymentPlan::query()
+            ->where('student_id', $studentId)
+            ->where('type', 'discount')
             ->where('is_active', true)
-            ->orderByDesc('discount_percent')
             ->first();
 
-        if (! $bestPolicy || $bestPolicy->discount_percent <= 0) {
+        $planPercent = $plan ? (float) $plan->discount_percent : 0.0;
+
+        if ($planPercent > $policyPercent) {
+            $discountPercent = $planPercent;
+            $discountReason  = $plan->reason ?: 'Hỗ trợ sinh viên khó khăn';
+        } else {
+            $discountPercent = $policyPercent;
+            $discountReason  = $policyReason;
+        }
+
+        if ($discountPercent <= 0) {
             return $noDiscount;
         }
 
-        $discountPercent = (float) $bestPolicy->discount_percent;
-        $discountAmount  = (int) round($originalAmount * $discountPercent / 100);
-        $finalAmount     = max(0, $originalAmount - $discountAmount);
+        $discountAmount = (int) round($originalAmount * $discountPercent / 100);
+        $finalAmount    = max(0, $originalAmount - $discountAmount);
 
         return [
             'original_amount' => $originalAmount,
             'discount_percent' => $discountPercent,
             'discount_amount'  => $discountAmount,
             'final_amount'     => $finalAmount,
-            'discount_reason'  => $bestPolicy->criteria?->name ?? null,
+            'discount_reason'  => $discountReason,
         ];
     }
 }

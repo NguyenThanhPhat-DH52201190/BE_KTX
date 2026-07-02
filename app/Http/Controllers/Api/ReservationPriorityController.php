@@ -114,7 +114,7 @@ class ReservationPriorityController extends Controller
         }
 
         $file     = $request->file('file');
-        $path     = $file->store('reservation-evidences');
+        $path     = $file->store('reservation-evidences', 'public');
         $fileUrl  = '/api/storage/' . $path;
 
         $evidence = ReservationPriorityEvidence::create([

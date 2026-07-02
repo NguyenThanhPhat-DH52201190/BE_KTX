@@ -27,6 +27,9 @@ class RoomFeeBill extends Model
         'transaction_code',
         'paid_at',
         'status',
+        'admin_note',
+        'exempted_by',
+        'exempted_at',
     ];
 
     protected $casts = [
@@ -38,6 +41,7 @@ class RoomFeeBill extends Model
         'discount_amount'  => 'float',
         'paid_at'          => 'datetime',
         'due_date'         => 'date',
+        'exempted_at'      => 'datetime',
     ];
 
     public function student(): BelongsTo

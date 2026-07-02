@@ -31,6 +31,14 @@ Schedule::command('extensions:send-reminders')->dailyAt('09:00');
 // Nhắc sinh viên chọn giường trước 1 ngày khi hết hạn (chạy lúc 08:30)
 Schedule::command('bed-selection:send-reminders')->dailyAt('08:30');
 
+// Huỷ hồ sơ đã phân phòng nhưng quá hạn chọn giường: không tự gán giường,
+// sinh viên phải đăng ký lại nếu vẫn muốn ở KTX (chạy lúc 00:20)
+Schedule::command('bed-selection:expire')->dailyAt('00:20');
+
+// Huỷ giữ chỗ của sinh viên đã chọn giường nhưng quá hạn đóng tiền lần đầu
+// (initial_payment_due_days): giải phóng giường, sinh viên phải đăng ký lại (chạy lúc 00:25)
+Schedule::command('initial-payment:expire')->dailyAt('00:25');
+
 // Tự động bắt đầu bảo trì phòng đã đến ngày started_at (chạy lúc 05:30)
 Schedule::command('maintenance:auto-start')->dailyAt('05:30');
 

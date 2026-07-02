@@ -18,14 +18,13 @@ use App\Models\StudentPriority;
 use App\Models\Blacklist;
 use App\Models\ElectricityBill;
 use App\Models\RoomFeeBill;
-use App\Models\Notification;
 use App\Helpers\StorageHelper;
 use App\Services\AutoReviewService;
 use App\Services\RoomFeeBillingService;
+use App\Services\StudentNotificationService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 use RuntimeException;
 
 class RegistrationController extends Controller
@@ -43,8 +42,11 @@ class RegistrationController extends Controller
         if (filter_var($path, FILTER_VALIDATE_URL)) {
             return $path;
         }
-        
-        $cleanPath = ltrim($path, '/');
+
+        // Some records (e.g. registrations converted from a tân sinh viên
+        // dorm reservation) already have a storage prefix baked into the
+        // stored path — strip it so it isn't duplicated below.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
         
         // Check if we're in production (Railway)
         $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
@@ -221,59 +223,61 @@ class RegistrationController extends Controller
 
         if (! $newBed) {
             $content .= ' Vui lòng đăng nhập hệ thống để chọn giường trong phòng mới.';
+
+            $deadline = $this->bedSelectionDeadline($registration);
+            if ($deadline) {
+                $content .= " Hạn chót chọn giường: {$deadline->format('d/m/Y')}."
+                    . ' Nếu quá hạn, hồ sơ đăng ký sẽ tự động bị huỷ và giường sẽ không được giữ lại — bạn sẽ cần đăng ký lại nếu vẫn muốn ở KTX.';
+            }
         }
 
-        $this->createStudentNotification($student->id, $title, $content, $type);
-        $this->sendStudentNotificationEmail($student, $title, $content);
+        $this->notifier()->notifyStudent($student, $title, $content, $type);
     }
 
-    private function createStudentNotification(int $studentId, string $title, string $content, string $type): void
+    /**
+     * Hạn chọn giường = ngày đơn được duyệt + registration_periods.bed_selection_days.
+     * Cùng công thức với SendBedSelectionRemindersCommand/ExpireBedSelectionCommand
+     * để nội dung thông báo luôn khớp với thời điểm hệ thống thực sự huỷ hồ sơ.
+     */
+    private function bedSelectionDeadline(Registration $registration): ?Carbon
     {
-        try {
-            $notification = Notification::create([
-                'student_id'  => $studentId,
-                'title'       => $title,
-                'content'     => $content,
-                'type'        => $type,
-                'target_type' => 'individual',
-                'send_email'  => true,
-            ]);
-            DB::table('notification_recipient')->insert([
-                'notification_id' => $notification->id,
-                'student_id'      => $studentId,
-                'is_read'         => false,
-                'read_at'         => null,
-            ]);
-        } catch (\Exception) {}
-    }
+        $days = $registration->period?->bed_selection_days;
 
-    private function sendStudentNotificationEmail(Student $student, string $title, string $content): void
-    {
-        if (empty($student->email)) {
-            return;
+        if (! $days || ! $registration->approved_at) {
+            return null;
         }
 
-        try {
-            $name = htmlspecialchars($student->full_name ?? '');
-            $safeTitle = htmlspecialchars($title);
-            $safeContent = nl2br(htmlspecialchars($content));
-            $body = "
-                <div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152;'>
-                    <h2 style='color:#244cb8;margin-top:0;'>{$safeTitle}</h2>
-                    <p>Xin chào <strong>{$name}</strong>,</p>
-                    <p style='line-height:1.7;'>{$safeContent}</p>
-                    <p style='color:#6b7280;font-size:12px;margin-top:32px;'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
-                </div>
-            ";
-
-            Mail::send([], [], function ($message) use ($student, $title, $body) {
-                $message->to($student->email, $student->full_name ?? '')
-                    ->subject("KTX — {$title}")
-                    ->html($body);
-            });
-        } catch (\Exception) {}
+        return Carbon::parse($registration->approved_at)->addDays($days);
     }
-    
+
+    private function notifier(): StudentNotificationService
+    {
+        return app(StudentNotificationService::class);
+    }
+
+    private function notifyRegistrationDecision(Registration $registration): void
+    {
+        if ($registration->status === 'approved') {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đơn đăng ký nội trú đã được duyệt',
+                'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                'registration_approved',
+                $registration->id,
+            );
+        } elseif ($registration->status === 'rejected') {
+            $reason = $registration->rejection_reason ? " Lý do: {$registration->rejection_reason}" : '';
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đơn đăng ký nội trú bị từ chối',
+                "Đơn đăng ký nội trú KTX của bạn đã bị từ chối.{$reason}",
+                'registration_rejected',
+                $registration->id,
+            );
+        }
+    }
+
+
     public function eligibility(Request $request): \Illuminate\Http\JsonResponse
     {
         $email = $request->query('email');
@@ -776,7 +780,7 @@ class RegistrationController extends Controller
 
     public function approve($id, Request $request)
     {
-        $registration = Registration::find($id);
+        $registration = Registration::with('student')->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
@@ -785,6 +789,10 @@ class RegistrationController extends Controller
         $registration->status = 'approved';
         $registration->approved_at = now();
         $registration->save();
+
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
 
         return response()->json([
             'message' => 'Đã duyệt'
@@ -1029,6 +1037,16 @@ class RegistrationController extends Controller
             $bed->save();
         }
 
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Lưu trú đã được kích hoạt',
+                'Chỗ ở của bạn tại KTX đã được kích hoạt. Chúc bạn có thời gian lưu trú thoải mái.',
+                'occupancy_activated',
+                $registration->id,
+            );
+        }
+
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
 
@@ -1058,6 +1076,16 @@ class RegistrationController extends Controller
         $occupancy->check_in_date = null;
         $occupancy->check_out_date = null;
         $occupancy->save();
+
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Giường đã chọn bị từ chối',
+                'Giường bạn vừa chọn không được chấp nhận. Vui lòng đăng nhập hệ thống để chọn lại giường khác.',
+                'bed_rejected',
+                $registration->id,
+            );
+        }
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
@@ -1158,6 +1186,16 @@ class RegistrationController extends Controller
             }
         });
 
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đã hoàn tất thủ tục thôi ở',
+                'Yêu cầu thôi ở của bạn tại KTX đã được xác nhận hoàn tất.',
+                'checkout_completed',
+                $registration->id,
+            );
+        }
+
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
 
@@ -1207,6 +1245,16 @@ class RegistrationController extends Controller
             }
         });
 
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Buộc thôi ở tại KTX',
+                'Bạn đã bị buộc thôi ở tại KTX. Lý do: ' . $request->input('reason'),
+                'force_checkout',
+                $registration->id,
+            );
+        }
+
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
 
@@ -1225,6 +1273,10 @@ class RegistrationController extends Controller
         $registration->status = 'rejected';
         $registration->rejection_reason = $request->input('rejectionReason');
         $registration->save();
+
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
 
         return response()->json($this->formatRegistration($registration));
     }
@@ -1317,6 +1369,10 @@ class RegistrationController extends Controller
         }
         $registration->save();
 
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
+
         return response()->json($this->formatRegistration($registration));
     }
 
@@ -1336,7 +1392,8 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Đợt phải đang ở trạng thái processing'], 422);
         }
 
-        $registrations = Registration::where('registration_period_id', $periodId)
+        $registrations = Registration::with('student')
+            ->where('registration_period_id', $periodId)
             ->whereIn('status', ['submitted'])
             ->get();
 
@@ -1349,6 +1406,9 @@ class RegistrationController extends Controller
                 $reg->status = 'approved';
                 $reg->approved_at = now();
                 $reg->save();
+                if ($reg->student) {
+                    $this->notifyRegistrationDecision($reg);
+                }
                 $confirmed++;
             } elseif ($reg->auto_decision === 'reject') {
                 $reg->status = 'rejected';
@@ -1356,6 +1416,9 @@ class RegistrationController extends Controller
                     $reg->rejection_reason = $reg->auto_decision_reason;
                 }
                 $reg->save();
+                if ($reg->student) {
+                    $this->notifyRegistrationDecision($reg);
+                }
                 $confirmed++;
             } elseif ($reg->auto_decision === 'review') {
                 $skippedReview++;

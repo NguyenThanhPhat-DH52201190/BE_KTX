@@ -8,6 +8,7 @@ use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
+use App\Models\StudentPaymentPlan;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection;
@@ -32,11 +33,19 @@ class ProcessOverdueBillsCommand extends Command
     private int $level3Days;
     private int $evictionDays;
 
+    /** @var \Illuminate\Support\Collection<int, int> Sinh viên đang có chế độ "đóng theo tháng" active — bỏ qua buộc thôi ở/blacklist */
+    private \Illuminate\Support\Collection $installmentStudentIds;
+
     public function handle(): int
     {
         $this->isDry = (bool) $this->option('dry-run');
 
         $this->loadOverdueSettings();
+
+        $this->installmentStudentIds = StudentPaymentPlan::query()
+            ->where('type', 'installment')
+            ->where('is_active', true)
+            ->pluck('student_id');
 
         $this->info(sprintf(
             '[bills:process-overdue] %s',
@@ -87,7 +96,12 @@ class ProcessOverdueBillsCommand extends Command
         $daysOverdue = (int) Carbon::parse($oldestBill->due_date)->diffInDays(Carbon::today());
 
         // ---- Buộc thôi ở (evictionDays + đã có LEVEL_3) --------------------
-        if ($daysOverdue >= $this->evictionDays && $this->hasReminder($student->id, 3)) {
+        // Bỏ qua nếu sinh viên đang được duyệt "đóng theo tháng" — vẫn nhắc nợ bình thường bên dưới.
+        if (
+            ! $this->installmentStudentIds->contains($student->id)
+            && $daysOverdue >= $this->evictionDays
+            && $this->hasReminder($student->id, 3)
+        ) {
             $this->forceEviction($occupancy, $student, $overdueBills, $overdueElecBills);
             return;
         }

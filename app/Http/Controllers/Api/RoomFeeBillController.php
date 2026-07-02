@@ -3,10 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\FeeDiscountPolicy;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
-use App\Models\StudentPriority;
+use App\Models\StudentPaymentPlan;
+use App\Services\FeeDiscountService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +14,10 @@ use Illuminate\Validation\Rule;
 
 class RoomFeeBillController extends Controller
 {
+    public function __construct(private readonly FeeDiscountService $discountService)
+    {
+    }
+
     public function index(Request $request): JsonResponse
     {
         $query = RoomFeeBill::query()
@@ -48,32 +52,25 @@ class RoomFeeBillController extends Controller
             'due_date' => ['required', 'date'],
         ]);
 
+        // Sinh viên đang ở chế độ "đóng theo tháng" không được tạo bill gộp thủ công ở đây —
+        // cron bills:generate-monthly sẽ tự bill riêng từng tháng cho họ.
+        $installmentStudentIds = StudentPaymentPlan::query()
+            ->where('type', 'installment')
+            ->where('is_active', true)
+            ->pluck('student_id');
+
         $occupancies = Occupancy::query()
             ->with(['student', 'registration', 'room.floor'])
             ->where('status', 'ACTIVE')
             ->whereNotNull('student_id')
             ->whereNotNull('registration_id')
+            ->whereNotIn('student_id', $installmentStudentIds)
             ->get();
-
-        // Load active discount policies keyed by priority_criteria_id
-        $discountPolicies = FeeDiscountPolicy::query()
-            ->where('is_active', true)
-            ->get()
-            ->keyBy('priority_criteria_id');
-
-        // Load verified priorities for all relevant students
-        $studentIds = $occupancies->pluck('student_id')->unique()->filter()->values();
-        $studentPriorities = StudentPriority::query()
-            ->with('criteria')
-            ->whereIn('student_id', $studentIds)
-            ->where('status', 'verified')
-            ->get()
-            ->groupBy('student_id');
 
         $created = [];
         $skipped = 0;
 
-        DB::transaction(function () use ($data, $occupancies, &$created, &$skipped, $discountPolicies, $studentPriorities) {
+        DB::transaction(function () use ($data, $occupancies, &$created, &$skipped) {
             foreach ($occupancies as $occupancy) {
                 $exists = RoomFeeBill::query()
                     ->where('occupancy_id', $occupancy->id)
@@ -87,25 +84,7 @@ class RoomFeeBillController extends Controller
                 }
 
                 $baseAmount = (int) $data['amount'];
-                $discountPercent = null;
-                $discountAmount = 0;
-                $discountReason = null;
-                $priorityCriteriaId = null;
-
-                // Pick the highest active discount among verified priorities
-                $priorities = $studentPriorities->get($occupancy->student_id, collect());
-                $bestDiscount = 0.0;
-                foreach ($priorities as $priority) {
-                    $criteriaId = $priority->priority_criteria_id;
-                    if ($discountPolicies->has($criteriaId)) {
-                        $policy = $discountPolicies->get($criteriaId);
-                        if ((float) $policy->discount_percent > $bestDiscount) {
-                            $bestDiscount = (float) $policy->discount_percent;
-                            $discountReason = $priority->criteria?->name;
-                            $priorityCriteriaId = $criteriaId;
-                        }
-                    }
-                }
+                $discount   = $this->discountService->calculate($occupancy, $baseAmount);
 
                 $billData = [
                     'student_id'  => $occupancy->student_id,
@@ -114,19 +93,14 @@ class RoomFeeBillController extends Controller
                     'year'         => (int) $data['year'],
                     'due_date'     => $data['due_date'],
                     'status'       => 'unpaid',
+                    'amount'       => $discount['final_amount'],
                 ];
 
-                if ($bestDiscount > 0) {
-                    $discountPercent = $bestDiscount;
-                    $discountAmount  = (int) round($baseAmount * $bestDiscount / 100);
-                    $billData['original_amount']      = $baseAmount;
-                    $billData['discount_percent']     = $discountPercent;
-                    $billData['discount_amount']      = $discountAmount;
-                    $billData['discount_reason']      = $discountReason;
-                    $billData['priority_criteria_id'] = $priorityCriteriaId;
-                    $billData['amount']               = $baseAmount - $discountAmount;
-                } else {
-                    $billData['amount'] = $baseAmount;
+                if ($discount['discount_percent'] > 0) {
+                    $billData['original_amount']  = $discount['original_amount'];
+                    $billData['discount_percent'] = $discount['discount_percent'];
+                    $billData['discount_amount']  = $discount['discount_amount'];
+                    $billData['discount_reason']  = $discount['discount_reason'];
                 }
 
                 $created[] = RoomFeeBill::query()->create($billData);
@@ -188,6 +162,62 @@ class RoomFeeBillController extends Controller
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
 
+    public function exempt(Request $request, int $id): JsonResponse
+    {
+        $bill = RoomFeeBill::query()->findOrFail($id);
+
+        $data = $request->validate([
+            'admin_note'  => ['nullable', 'string', 'max:191'],
+            'exempted_by' => ['nullable', 'string', 'max:191'],
+        ]);
+
+        if (($bill->status ?? 'unpaid') === 'paid') {
+            return response()->json(['message' => 'Hóa đơn đã thanh toán, không thể miễn.'], 422);
+        }
+
+        DB::transaction(function () use ($bill, $data) {
+            $bill->update([
+                'status'      => 'exempted',
+                'admin_note'  => $data['admin_note'] ?? $bill->admin_note,
+                'exempted_by' => $data['exempted_by'] ?? $bill->exempted_by,
+                'exempted_at' => now(),
+            ]);
+
+            $this->activatePendingOccupancy($bill);
+        });
+
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
+    }
+
+    public function applyOneTimeDiscount(Request $request, int $id): JsonResponse
+    {
+        $bill = RoomFeeBill::query()->findOrFail($id);
+
+        $data = $request->validate([
+            'discount_percent' => ['required', 'numeric', 'min:0', 'max:100'],
+            'reason'           => ['nullable', 'string', 'max:191'],
+        ]);
+
+        if (in_array($bill->status ?? 'unpaid', ['paid', 'exempted'], true)) {
+            return response()->json(['message' => 'Không thể giảm giá hóa đơn đã thanh toán hoặc đã miễn.'], 422);
+        }
+
+        $base            = (int) ($bill->original_amount ?? $bill->amount);
+        $discountPercent = (float) $data['discount_percent'];
+        $discountAmount  = (int) round($base * $discountPercent / 100);
+        $finalAmount     = max(0, $base - $discountAmount);
+
+        $bill->update([
+            'original_amount'  => $base,
+            'discount_percent' => $discountPercent,
+            'discount_amount'  => $discountAmount,
+            'discount_reason'  => $data['reason'] ?? $bill->discount_reason,
+            'amount'           => $finalAmount,
+        ]);
+
+        return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
+    }
+
     private function activatePendingOccupancy(RoomFeeBill $bill): void
     {
         if (! $bill->occupancy_id) {
@@ -214,11 +244,16 @@ class RoomFeeBillController extends Controller
             'registration_id' => (int) ($occupancy?->registration_id ?? 0),
             'month' => (int) $bill->month,
             'year' => (int) $bill->year,
+            // true nếu bill này gộp cả quý (3 tháng), false nếu là bill riêng 1 tháng.
+            'is_quarterly' => $bill->total_days === null,
             'amount' => (float) $bill->amount,
             'original_amount' => $bill->original_amount !== null ? (float) $bill->original_amount : null,
             'discount_percent' => $bill->discount_percent !== null ? (float) $bill->discount_percent : null,
             'discount_amount' => (float) ($bill->discount_amount ?? 0),
             'discount_reason' => $bill->discount_reason,
+            'admin_note' => $bill->admin_note,
+            'exempted_by' => $bill->exempted_by,
+            'exempted_at' => $bill->exempted_at,
             'due_date' => $bill->due_date,
             'payment_method' => $bill->payment_method,
             'transaction_code' => $bill->transaction_code,

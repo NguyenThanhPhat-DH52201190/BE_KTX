@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\RoomController;
 use App\Http\Controllers\Api\ViolationController;
 use App\Http\Controllers\Api\ViolationTypeController;
 use App\Http\Controllers\Api\RoomFeeBillController;
+use App\Http\Controllers\Api\StudentPaymentPlanController;
 use App\Http\Controllers\Api\ElectricityController;
 use App\Http\Controllers\Api\PaymentSettingController;
 use App\Http\Controllers\Api\StudentPaymentController;
@@ -158,6 +159,12 @@ Route::get('/room-fee-bills', [RoomFeeBillController::class, 'index']);
 Route::post('/room-fee-bills/generate', [RoomFeeBillController::class, 'generate']);
 Route::put('/room-fee-bills/{id}/confirm-payment', [RoomFeeBillController::class, 'confirmPayment']);
 Route::put('/room-fee-bills/{id}/status', [RoomFeeBillController::class, 'updateStatus']);
+Route::put('/room-fee-bills/{id}/exempt', [RoomFeeBillController::class, 'exempt']);
+Route::put('/room-fee-bills/{id}/apply-discount', [RoomFeeBillController::class, 'applyOneTimeDiscount']);
+
+Route::get('/admin/students/{studentId}/payment-plans', [StudentPaymentPlanController::class, 'index']);
+Route::post('/admin/students/{studentId}/payment-plans', [StudentPaymentPlanController::class, 'store']);
+Route::put('/admin/payment-plans/{id}/deactivate', [StudentPaymentPlanController::class, 'deactivate']);
 
 Route::get('/electricity-records', [ElectricityController::class, 'records']);
 Route::post('/electricity-records/generate', [ElectricityController::class, 'generate']);

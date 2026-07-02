@@ -13,6 +13,8 @@ use App\Models\ReservationPriority;
 use App\Models\StudentPriority;
 use App\Models\StudentPriorityEvidence;
 use App\Services\PriorityRankingService;
+use App\Services\StudentNotificationService;
+use App\Models\Student;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -251,7 +253,7 @@ class DormReservationController extends Controller
 
     public function approve(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::findOrFail($id);
+        $reservation = DormReservation::with('candidate')->findOrFail($id);
 
         if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
             return response()->json(['message' => 'Chỉ duyệt được hồ sơ ở trạng thái đã nộp hoặc đang chờ.'], 422);
@@ -263,12 +265,18 @@ class DormReservationController extends Controller
             'admin_note'  => $request->input('admin_note', $reservation->admin_note),
         ]);
 
+        $this->notifyCandidate(
+            $reservation->candidate,
+            'Hồ sơ giữ chỗ KTX đã được duyệt',
+            'Hồ sơ đăng ký giữ chỗ KTX của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.',
+        );
+
         return response()->json(['message' => 'Đã duyệt hồ sơ giữ chỗ.', 'reservation' => $reservation->load('candidate', 'period')]);
     }
 
     public function reject(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::findOrFail($id);
+        $reservation = DormReservation::with('candidate')->findOrFail($id);
 
         if (!in_array($reservation->status, ['submitted', 'waitlisted', 'approved'], true)) {
             return response()->json(['message' => 'Không thể từ chối hồ sơ ở trạng thái hiện tại.'], 422);
@@ -284,12 +292,18 @@ class DormReservationController extends Controller
             'admin_note'       => $request->input('admin_note', $reservation->admin_note),
         ]);
 
+        $this->notifyCandidate(
+            $reservation->candidate,
+            'Hồ sơ giữ chỗ KTX bị từ chối',
+            'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị từ chối. Lý do: ' . $data['rejection_reason'],
+        );
+
         return response()->json(['message' => 'Đã từ chối hồ sơ giữ chỗ.', 'reservation' => $reservation->load('candidate', 'period')]);
     }
 
     public function waitlist(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::findOrFail($id);
+        $reservation = DormReservation::with('candidate')->findOrFail($id);
 
         if ($reservation->status !== 'submitted') {
             return response()->json(['message' => 'Chỉ chuyển được hồ sơ đã nộp vào danh sách chờ.'], 422);
@@ -300,12 +314,18 @@ class DormReservationController extends Controller
             'admin_note' => $request->input('admin_note', $reservation->admin_note),
         ]);
 
+        $this->notifyCandidate(
+            $reservation->candidate,
+            'Hồ sơ giữ chỗ KTX đang chờ xét duyệt',
+            'Hồ sơ đăng ký giữ chỗ KTX của bạn hiện đang ở danh sách chờ do số lượng chỗ có hạn. Vui lòng theo dõi thông báo tiếp theo.',
+        );
+
         return response()->json(['message' => 'Đã chuyển vào danh sách chờ.', 'reservation' => $reservation->load('candidate', 'period')]);
     }
 
     public function cancel(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::findOrFail($id);
+        $reservation = DormReservation::with('candidate')->findOrFail($id);
 
         if (in_array($reservation->status, ['converted', 'cancelled'], true)) {
             return response()->json(['message' => 'Hồ sơ đã được chuyển đổi hoặc đã huỷ, không thể huỷ lại.'], 422);
@@ -315,6 +335,12 @@ class DormReservationController extends Controller
             'status'     => 'cancelled',
             'admin_note' => $request->input('admin_note', $reservation->admin_note),
         ]);
+
+        $this->notifyCandidate(
+            $reservation->candidate,
+            'Hồ sơ giữ chỗ KTX đã bị huỷ',
+            'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị huỷ.',
+        );
 
         return response()->json(['message' => 'Đã huỷ hồ sơ giữ chỗ.', 'reservation' => $reservation->load('candidate', 'period')]);
     }
@@ -420,6 +446,21 @@ class DormReservationController extends Controller
                 'converted_registration_id' => $registration->id,
             ]);
 
+            // Hồ sơ giữ chỗ đã duyệt sẵn -> đơn nội trú tạo ra cũng approved luôn,
+            // sinh viên (đã có tài khoản) cần được báo để chờ phân phòng.
+            if ($regStatus === 'approved') {
+                $student = Student::find($studentId);
+                if ($student) {
+                    app(StudentNotificationService::class)->notifyStudent(
+                        $student,
+                        'Đơn đăng ký nội trú đã được duyệt',
+                        'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                        'registration_approved',
+                        $registration->id,
+                    );
+                }
+            }
+
             return response()->json([
                 'message'         => 'Đã chuyển đổi thành đơn KTX chính thức thành công.',
                 'registration_id' => $registration->id,
@@ -445,31 +486,47 @@ class DormReservationController extends Controller
 
         $periodId = $data['registration_period_id'];
 
-        $totalAvailable = Bed::where('status', 'active')->count();
-        $occupiedCount  = Occupancy::occupiedBedsQuery()->pluck('bed_id')->unique()->count();
-        $freeBeds       = max(0, $totalAvailable - $occupiedCount);
-
         $pendingCount = ReservationPriority::whereHas(
             'dormReservation',
             fn ($q) => $q->where('registration_period_id', $periodId)
         )->where('status', 'pending')->count();
+
+        if ($pendingCount > 0) {
+            return response()->json([
+                'message'                => "Còn {$pendingCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh tất cả minh chứng trước khi xếp hạng.",
+                'pending_priority_count' => $pendingCount,
+            ], 422);
+        }
+
+        $totalAvailable = Bed::where('status', 'active')->count();
+        $occupiedCount  = Occupancy::occupiedBedsQuery()->pluck('bed_id')->unique()->count();
+        $freeBeds       = max(0, $totalAvailable - $occupiedCount);
 
         $ranker = new PriorityRankingService();
         $result = $ranker->rankReservationPeriod($periodId, $freeBeds);
 
         foreach ($result['approved'] as $reservation) {
             $reservation->update(['status' => 'approved', 'approved_at' => now()]);
+            $this->notifyCandidate(
+                $reservation->candidate,
+                'Hồ sơ giữ chỗ KTX đã được duyệt',
+                'Hồ sơ đăng ký giữ chỗ KTX của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.',
+            );
         }
         foreach ($result['waitlist'] as $reservation) {
             $reservation->update(['status' => 'waitlisted']);
+            $this->notifyCandidate(
+                $reservation->candidate,
+                'Hồ sơ giữ chỗ KTX đang chờ xét duyệt',
+                'Hồ sơ đăng ký giữ chỗ KTX của bạn hiện đang ở danh sách chờ do số lượng chỗ có hạn. Vui lòng theo dõi thông báo tiếp theo.',
+            );
         }
 
         return response()->json([
-            'message'               => 'Đã xếp hạng xong.',
-            'free_beds'             => $freeBeds,
-            'approved'              => $result['approved']->count(),
-            'waitlist'              => $result['waitlist']->count(),
-            'pending_priority_count' => $pendingCount,
+            'message'   => 'Đã xếp hạng xong.',
+            'free_beds' => $freeBeds,
+            'approved'  => $result['approved']->count(),
+            'waitlist'  => $result['waitlist']->count(),
         ]);
     }
 
@@ -552,6 +609,17 @@ class DormReservationController extends Controller
                         'converted_registration_id' => $registration->id,
                     ]);
 
+                    $student = Student::find($studentId);
+                    if ($student) {
+                        app(StudentNotificationService::class)->notifyStudent(
+                            $student,
+                            'Đơn đăng ký nội trú đã được duyệt',
+                            'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                            'registration_approved',
+                            $registration->id,
+                        );
+                    }
+
                     $converted++;
                 });
             } catch (\Throwable $e) {
@@ -574,6 +642,15 @@ class DormReservationController extends Controller
     // =========================================================
     // Helpers
     // =========================================================
+
+    private function notifyCandidate(?AdmissionCandidate $candidate, string $title, string $content): void
+    {
+        if (!$candidate) {
+            return;
+        }
+
+        app(StudentNotificationService::class)->notifyEmailOnly($candidate->email, $candidate->full_name, $title, $content);
+    }
 
     private function generateReservationCode(): string
     {

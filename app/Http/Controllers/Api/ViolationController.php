@@ -8,6 +8,7 @@ use App\Models\ActivityType;
 use App\Models\Blacklist;
 use App\Models\CheckoutRequest;
 use App\Models\Occupancy;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -84,6 +85,8 @@ class ViolationController extends Controller
 
         if ($actionTaken === 'force_evicted') {
             $this->applyForcedEviction($activity->load(['type', 'occupancy.bed', 'occupancy.student']), trim((string) ($data['note'] ?? '')));
+        } else {
+            $this->notifyActivity($activity->fresh(['type', 'student', 'occupancy.student']));
         }
 
         return response()->json($this->formatViolation(
@@ -130,6 +133,8 @@ class ViolationController extends Controller
 
         if ($actionTaken === 'force_evicted') {
             $this->applyForcedEviction($activity->load(['type', 'occupancy.bed', 'occupancy.student']), $note);
+        } else {
+            $this->notifyActivity($activity->fresh(['type', 'student', 'occupancy.student']));
         }
 
         return response()->json($this->formatViolation(
@@ -203,6 +208,48 @@ class ViolationController extends Controller
                 );
             }
         });
+
+        if ($activity->occupancy?->student) {
+            app(StudentNotificationService::class)->notifyStudent(
+                $activity->occupancy->student,
+                'Buộc thôi ở do vi phạm nghiêm trọng',
+                'Bạn đã bị buộc thôi ở tại KTX do vi phạm nghiêm trọng nội quy.' . ($note !== '' ? " Lý do: {$note}" : ''),
+                'force_checkout',
+                $activity->id,
+            );
+        }
+    }
+
+    private function notifyActivity(Activity $activity): void
+    {
+        $student = $activity->student ?? $activity->occupancy?->student;
+
+        if (! $student) {
+            return;
+        }
+
+        $isPositive = ($activity->type?->category ?? 'negative') === 'positive';
+        $typeName = $activity->type?->name ?? ($isPositive ? 'Hoạt động tích cực' : 'Vi phạm nội quy');
+        $noteText = $activity->note ? " Ghi chú: {$activity->note}" : '';
+        $actionText = match ($activity->action_taken) {
+            'reminded' => ' Bạn đã được nhắc nhở.',
+            'warned' => ' Bạn đã bị cảnh cáo.',
+            default => '',
+        };
+
+        $title = $isPositive ? 'Ghi nhận hoạt động tích cực' : 'Ghi nhận vi phạm nội quy';
+        $content = ($isPositive
+            ? "Bạn được ghi nhận hoạt động tích cực: {$typeName}."
+            : "Bạn bị ghi nhận vi phạm: {$typeName}."
+        ) . $actionText . $noteText;
+
+        app(StudentNotificationService::class)->notifyStudent(
+            $student,
+            $title,
+            $content,
+            $isPositive ? 'reward_recorded' : 'violation_recorded',
+            $activity->id,
+        );
     }
 
     private function formatViolation(Activity $activity): array

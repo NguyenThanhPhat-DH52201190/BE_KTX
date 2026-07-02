@@ -150,6 +150,9 @@ class StudentPaymentController extends Controller
             'source' => 'room_fee',
             'title' => 'Tiền phòng tháng ' . $bill->month . '/' . $bill->year,
             'period' => 'Tháng ' . $bill->month . '/' . $bill->year,
+            // true nếu bill này gộp cả quý (3 tháng, xem RoomFeeBillingService::isMonthCoveredByQuarterlyBill),
+            // false nếu là bill riêng 1 tháng (bill thường hoặc bill đã tách qua splitQuarterlyBillToMonthly).
+            'is_quarterly' => $bill->total_days === null,
             'amount' => (float) $bill->amount,
             'original_amount' => $bill->original_amount !== null ? (float) $bill->original_amount : null,
             'discount_percent' => $bill->discount_percent !== null ? (float) $bill->discount_percent : null,
