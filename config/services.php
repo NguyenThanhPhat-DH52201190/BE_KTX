@@ -28,6 +28,17 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    // Dữ liệu khuôn mặt sinh viên là dữ liệu sinh trắc học — khi thu thập avatar
+    // cho mục đích nhận diện cần có cơ chế xin sự đồng ý của sinh viên (chưa
+    // triển khai UI consent trong lần này, chỉ lưu ý ở đây).
+    'aws' => [
+        'key' => env('AWS_ACCESS_KEY_ID'),
+        'secret' => env('AWS_SECRET_ACCESS_KEY'),
+        'region' => env('AWS_DEFAULT_REGION', 'ap-southeast-1'),
+        'rekognition_collection_id' => env('AWS_REKOGNITION_COLLECTION_ID', 'stu-ktx-students'),
+        'rekognition_match_threshold' => (float) env('AWS_REKOGNITION_MATCH_THRESHOLD', 65),
+    ],
+
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),

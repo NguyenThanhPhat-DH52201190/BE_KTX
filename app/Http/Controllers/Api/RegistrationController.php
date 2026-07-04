@@ -1437,7 +1437,12 @@ class RegistrationController extends Controller
         ]);
     }
 
-    private function mapOccupancyStatus(?Occupancy $occupancy): ?string
+    /**
+     * Nguồn chân lý cho "trạng thái lưu trú" của 1 registration — dùng bởi index()
+     * (trang Quản lý lưu trú) và tái sử dụng ở nơi khác (vd. StudentFaceSearchController)
+     * để tránh lệch logic khi xác định ai đang được tính là "có lưu trú".
+     */
+    public function mapOccupancyStatus(?Occupancy $occupancy): ?string
     {
         if (! $occupancy) {
             return null;

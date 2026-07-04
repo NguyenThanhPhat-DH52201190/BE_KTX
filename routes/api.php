@@ -27,6 +27,7 @@ use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\OccupancyController;
 use App\Http\Controllers\Api\StudentSearchController;
+use App\Http\Controllers\Api\StudentFaceSearchController;
 use App\Http\Controllers\Api\OccupancyExtensionController;
 use App\Http\Controllers\Api\OccupancyPeriodController;
 use App\Http\Controllers\Api\DashboardController;
@@ -192,6 +193,9 @@ Route::get('/admin/occupancies/{id}/detail', [OccupancyController::class, 'detai
 
 // Tìm kiếm sinh viên (autocomplete)
 Route::get('/admin/students/search', [StudentSearchController::class, 'search']);
+
+// Tìm kiếm sinh viên bằng khuôn mặt (AWS Rekognition)
+Route::post('/admin/students/face-search', [StudentFaceSearchController::class, 'search']);
 
 // Đợt gia hạn lưu trú
 Route::get('/occupancy-periods', [OccupancyPeriodController::class, 'index']);
