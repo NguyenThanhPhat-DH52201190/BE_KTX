@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Blacklist;
 use App\Models\ElectricityBill;
 use App\Models\Notification;
@@ -234,11 +235,7 @@ class ProcessOverdueBillsCommand extends Command
         [$subject, $body] = $this->emailTexts($level, $daysOverdue, $totalOwed, $student, $bills, $elecBills);
 
         try {
-            Mail::send([], [], function ($message) use ($student, $subject, $body) {
-                $message->to($student->email, $student->full_name)
-                    ->subject($subject)
-                    ->html($body);
-            });
+            Mail::to($student->email, $student->full_name)->queue(new GenericNotificationMail($subject, $body));
         } catch (\Throwable $e) {
             Log::error("[ProcessOverdue] Gửi email thất bại cho student #{$student->id}: " . $e->getMessage());
         }
@@ -253,7 +250,7 @@ class ProcessOverdueBillsCommand extends Command
         $totalOwed = $overdueBills->sum('amount') + $overdueElecBills->sum('amount');
 
         if (! $this->isDry) {
-            DB::transaction(function () use ($occupancy, $student, $totalOwed, $overdueBills) {
+            DB::transaction(function () use ($occupancy, $student, $totalOwed, $overdueBills, $overdueElecBills) {
                 // 1. Kết thúc lưu trú (reason dùng để phân biệt với checkout tự nguyện)
                 $occupancy->update([
                     'status'         => 'COMPLETED',
@@ -339,11 +336,8 @@ class ProcessOverdueBillsCommand extends Command
 HTML;
 
         try {
-            Mail::send([], [], function ($message) use ($student, $body) {
-                $message->to($student->email, $student->full_name)
-                    ->subject('KTX STU — Thông báo buộc thôi ở')
-                    ->html($body);
-            });
+            Mail::to($student->email, $student->full_name)
+                ->queue(new GenericNotificationMail('KTX STU — Thông báo buộc thôi ở', $body));
         } catch (\Throwable $e) {
             Log::error("[ProcessOverdue] Gửi email eviction thất bại cho student #{$student->id}: " . $e->getMessage());
         }

@@ -103,6 +103,7 @@ class ExpireBedSelectionCommand extends Command
                     . 'Nếu vẫn có nhu cầu ở KTX, vui lòng đăng ký lại trong đợt đăng ký gần nhất.',
                 'bed_selection_expired',
                 $registration?->id,
+                queue: true,
             );
         }
 

@@ -26,6 +26,7 @@ use App\Http\Controllers\Api\StudentSupportRequestController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\OccupancyController;
+use App\Http\Controllers\Api\StudentRoomChangeHistoryController;
 use App\Http\Controllers\Api\StudentSearchController;
 use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\StudentFaceSearchController;
@@ -78,6 +79,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/student/extensions/eligibility', [OccupancyExtensionController::class, 'eligibility']);
         Route::get('/student/extensions', [OccupancyExtensionController::class, 'studentIndex']);
         Route::post('/student/extensions', [OccupancyExtensionController::class, 'store']);
+        Route::get('/student/room-change-history', [StudentRoomChangeHistoryController::class, 'index']);
 
         // VNPay: khởi tạo & xác minh thanh toán do sinh viên tự thực hiện cho hóa đơn của mình.
         Route::post('/payments/vnpay/create', [VnpayPaymentController::class, 'create']);
@@ -87,7 +89,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/registration/eligibility', [RegistrationController::class, 'eligibility']);
         Route::post('/registration', [RegistrationController::class, 'store']);
         Route::get('/registration/me', [RegistrationController::class, 'getMyRegistration']);
-        Route::get('/registration/history/{email}/{semester}', [RegistrationController::class, 'getRegistrationHistory']);
+        Route::get('/registration/history/{email}/{semester?}', [RegistrationController::class, 'getRegistrationHistory']);
         Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
         Route::put('/registration/request-checkout', [RegistrationController::class, 'requestCheckout']);
     });

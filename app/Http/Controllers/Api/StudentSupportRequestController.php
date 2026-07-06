@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\ProcessStudentSupportRequest;
 use App\Http\Requests\StoreStudentSupportRequest;
 use App\Http\Resources\StudentSupportRequestResource;
+use App\Mail\GenericNotificationMail;
 use App\Models\Account;
 use App\Models\AdminNotification;
 use App\Models\Bed;
@@ -727,13 +728,10 @@ class StudentSupportRequestController extends Controller
                 </div>
             ";
 
+            // Queue để không chặn request chờ gửi lần lượt tới toàn bộ admin.
             foreach ($adminEmails as $email) {
                 try {
-                    Mail::send([], [], function ($message) use ($email, $subject, $body) {
-                        $message->to($email)
-                            ->subject($subject)
-                            ->html($body);
-                    });
+                    Mail::to($email)->queue(new GenericNotificationMail($subject, $body));
                 } catch (\Exception $e) {
                     Log::error('Gửi email thông báo thất bại', [
                         'type'                => 'support_request_new',

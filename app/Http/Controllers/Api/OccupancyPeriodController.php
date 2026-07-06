@@ -205,7 +205,9 @@ class OccupancyPeriodController extends Controller
                     }
 
                     try {
-                        Mail::to($student->email)->send(new ExtensionPeriodOpenedMail($period, $student));
+                        // Đưa vào hàng đợi (ShouldQueue) thay vì gửi ngay — tránh chặn request
+                        // "Mở đợt" trong lúc gửi email lần lượt tới toàn bộ sinh viên đang ở active.
+                        Mail::to($student->email)->queue(new ExtensionPeriodOpenedMail($period, $student));
                     } catch (\Exception $e) {
                         Log::error('Gửi email thông báo thất bại', [
                             'type'       => 'extension_opened',

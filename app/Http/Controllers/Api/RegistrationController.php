@@ -97,6 +97,7 @@ class RegistrationController extends Controller
             'email' => $registration->student?->email ?? $emailFallback ?? '',
             'formData' => $formData,
             'status' => $registration->status,
+            'registration_type' => $registration->registration_type,
             'semester' => $registration->semester,
             'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
             'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
@@ -255,7 +256,11 @@ class RegistrationController extends Controller
         return app(StudentNotificationService::class);
     }
 
-    private function notifyRegistrationDecision(Registration $registration): void
+    /**
+     * @param bool $queue Bật khi gọi trong vòng lặp duyệt hàng loạt (confirmBatch), tránh
+     *                    chặn request chờ gửi email lần lượt từng đơn trong đợt.
+     */
+    private function notifyRegistrationDecision(Registration $registration, bool $queue = false): void
     {
         if ($registration->status === 'approved') {
             $this->notifier()->notifyStudent(
@@ -264,6 +269,7 @@ class RegistrationController extends Controller
                 'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
                 'registration_approved',
                 $registration->id,
+                queue: $queue,
             );
         } elseif ($registration->status === 'rejected') {
             $reason = $registration->rejection_reason ? " Lý do: {$registration->rejection_reason}" : '';
@@ -273,6 +279,7 @@ class RegistrationController extends Controller
                 "Đơn đăng ký nội trú KTX của bạn đã bị từ chối.{$reason}",
                 'registration_rejected',
                 $registration->id,
+                queue: $queue,
             );
         }
     }
@@ -336,7 +343,7 @@ class RegistrationController extends Controller
                 'eligible'       => false,
                 'reason_code'    => 'already_residing',
                 'reason_message' => "Bạn đang ở phòng {$roomName}, muốn ở tiếp dùng chức năng Gia hạn",
-                'redirect'       => '/student/renewal',
+                'redirect'       => '/student/extension',
             ]);
         }
 
@@ -1321,7 +1328,7 @@ class RegistrationController extends Controller
         return response()->json($this->formatRegistration($registration));
     }
 
-    public function getRegistrationHistory(Request $request, $email, $semester)
+    public function getRegistrationHistory(Request $request, $email, $semester = null)
     {
         // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
         // không nhận email từ URL — {email} giữ nguyên trên route để không đổi URL, nhưng
@@ -1333,10 +1340,12 @@ class RegistrationController extends Controller
             return response()->json([]);
         }
 
+        // Không truyền {semester} → trả toàn bộ lịch sử đăng ký (mọi kỳ) của sinh viên, mới nhất trước.
         $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])
             ->where('student_id', $account->student_id)
-            ->where('semester', $semester)
-            ->orderBy('id', 'asc')
+            ->when($semester !== null, fn ($q) => $q->where('semester', $semester))
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->get();
 
         Log::info("RegistrationController.getRegistrationHistory - found registrations", [
@@ -1428,7 +1437,7 @@ class RegistrationController extends Controller
                 $reg->approved_at = now();
                 $reg->save();
                 if ($reg->student) {
-                    $this->notifyRegistrationDecision($reg);
+                    $this->notifyRegistrationDecision($reg, queue: true);
                 }
                 $confirmed++;
             } elseif ($reg->auto_decision === 'reject') {
@@ -1438,7 +1447,7 @@ class RegistrationController extends Controller
                 }
                 $reg->save();
                 if ($reg->student) {
-                    $this->notifyRegistrationDecision($reg);
+                    $this->notifyRegistrationDecision($reg, queue: true);
                 }
                 $confirmed++;
             } elseif ($reg->auto_decision === 'review') {

@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Account;
 use App\Models\AdminNotification;
 use App\Models\Bed;
@@ -145,7 +146,7 @@ class AutoStartMaintenanceCommand extends Command
                         'change_type'            => 'TEMPORARY_MAINTENANCE',
                         'maintenance_request_id' => $mr->id,
                         'status'                 => 'ACTIVE',
-                        'change_source'          => 'system',
+                        'change_source'          => 'admin',
                         'is_temporary'           => true,
                         'expected_return_date'   => $mr->getRawOriginal('expected_end_at'),
                         'transferred_at'         => now(),
@@ -276,13 +277,11 @@ class AutoStartMaintenanceCommand extends Command
 
     private function sendEmail(array $payload): void
     {
-        // Admin bulk payload
+        // Admin bulk payload — queue để không dồn cục thời gian chạy lệnh cron.
         if (isset($payload['admin_emails'])) {
             foreach ($payload['admin_emails'] as $email) {
                 try {
-                    Mail::send([], [], function ($message) use ($email, $payload) {
-                        $message->to($email)->subject($payload['subject'])->html($payload['body']);
-                    });
+                    Mail::to($email)->queue(new GenericNotificationMail($payload['subject'], $payload['body']));
                 } catch (\Exception $e) {
                     Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
                         'type'  => $payload['type'] ?? null,
@@ -298,11 +297,7 @@ class AutoStartMaintenanceCommand extends Command
             return;
         }
         try {
-            Mail::send([], [], function ($message) use ($payload) {
-                $message->to($payload['email'], $payload['name'])
-                    ->subject($payload['subject'])
-                    ->html($payload['body']);
-            });
+            Mail::to($payload['email'], $payload['name'])->queue(new GenericNotificationMail($payload['subject'], $payload['body']));
         } catch (\Exception $e) {
             Log::error('Gửi email thông báo bảo trì thất bại', [
                 'type'       => $payload['type'] ?? null,

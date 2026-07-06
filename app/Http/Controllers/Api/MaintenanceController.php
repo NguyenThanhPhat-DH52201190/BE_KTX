@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Mail\GenericNotificationMail;
 use App\Models\Account;
 use App\Models\AdminNotification;
 use App\Models\Bed;
@@ -376,8 +377,9 @@ class MaintenanceController extends Controller
             $pendingEmails[] = $this->buildAdminEmailPayload($adminTitle, $adminContent);
         });
 
+        // Có thể là toàn bộ người ở phòng + admin — queue để không chặn request.
         foreach ($pendingEmails as $emailData) {
-            $this->sendNotificationEmail($emailData);
+            $this->sendNotificationEmail($emailData, queue: true);
         }
 
         return response()->json($this->formatRoom($room->fresh(['floor', 'beds'])));
@@ -504,8 +506,9 @@ class MaintenanceController extends Controller
             return $room->fresh(['floor', 'beds']);
         });
 
+        // Toàn bộ người ở phòng đang bị chuyển tạm — queue để không chặn request.
         foreach ($pendingEmails as $emailData) {
-            $this->sendNotificationEmail($emailData);
+            $this->sendNotificationEmail($emailData, queue: true);
         }
 
         return response()->json($this->formatRoom($updatedRoom));
@@ -554,8 +557,9 @@ class MaintenanceController extends Controller
             return $room->fresh(['floor', 'beds']);
         });
 
+        // Toàn bộ log chuyển phòng liên quan (nhiều sinh viên) — queue để không chặn request.
         foreach ($pendingEmails as $emailData) {
-            $this->sendNotificationEmail($emailData);
+            $this->sendNotificationEmail($emailData, queue: true);
         }
 
         return response()->json($this->formatRoom($updatedRoom));
@@ -849,15 +853,23 @@ class MaintenanceController extends Controller
         ];
     }
 
-    private function sendNotificationEmail(array $data): void
+    /**
+     * @param bool $queue Đưa vào hàng đợi thay vì gửi ngay — bật khi gọi trong vòng lặp
+     *                    nhiều người nhận cùng lúc (cả phòng), tránh chặn request.
+     */
+    private function sendNotificationEmail(array $data, bool $queue = false): void
     {
         // Admin bulk email payload
         if (isset($data['admin_emails'])) {
             foreach ($data['admin_emails'] as $email) {
                 try {
-                    Mail::send([], [], function ($message) use ($email, $data) {
-                        $message->to($email)->subject($data['subject'])->html($data['body']);
-                    });
+                    if ($queue) {
+                        Mail::to($email)->queue(new GenericNotificationMail($data['subject'], $data['body']));
+                    } else {
+                        Mail::send([], [], function ($message) use ($email, $data) {
+                            $message->to($email)->subject($data['subject'])->html($data['body']);
+                        });
+                    }
                 } catch (\Exception $e) {
                     Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
                         'email'   => $email,
@@ -873,11 +885,15 @@ class MaintenanceController extends Controller
             return;
         }
         try {
-            Mail::send([], [], function ($message) use ($data) {
-                $message->to($data['email'], $data['name'])
-                    ->subject($data['subject'])
-                    ->html($data['body']);
-            });
+            if ($queue) {
+                Mail::to($data['email'], $data['name'])->queue(new GenericNotificationMail($data['subject'], $data['body']));
+            } else {
+                Mail::send([], [], function ($message) use ($data) {
+                    $message->to($data['email'], $data['name'])
+                        ->subject($data['subject'])
+                        ->html($data['body']);
+                });
+            }
         } catch (\Exception $e) {
             Log::error('Gửi email thông báo bảo trì thất bại', [
                 'email'   => $data['email'],

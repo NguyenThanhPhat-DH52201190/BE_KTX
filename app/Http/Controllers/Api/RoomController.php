@@ -11,6 +11,7 @@ use App\Models\Occupancy;
 use App\Models\Room;
 use App\Models\Student;
 use App\Models\StudentSupportRequest;
+use App\Services\RoomChangeLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -256,19 +257,26 @@ class RoomController extends Controller
             $studentHistoryLogs = $currentOccupancyId
                 ? $historyLogs->filter(fn ($log) => (int) $log->occupancy_id === $currentOccupancyId)->values()
                 : collect();
+            $roomCodeFor = function ($roomId) use ($historyRooms) {
+                $room = $historyRooms->get($roomId);
+                return $room ? (($room->floor?->building_code ?? '') . $room->room_number) : null;
+            };
+
             $formatHistory = function ($log) use ($historyOccupancies, $historySupportRequests, $historyBeds, $historyRooms) {
                 $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
                 $oldRoom = $historyRooms->get($log->old_room_id);
                 $newRoom = $historyRooms->get($log->new_room_id);
                 $oldBed = $historyBeds->get($log->old_bed_id);
                 $newBed = $historyBeds->get($log->new_bed_id);
+                // resolveHistoryReason()/buildLabel() cần old_room_code cho câu "Chuyển tạm do bảo trì phòng X".
+                $log->old_room_code = $oldRoom ? (($oldRoom->floor?->building_code ?? '') . $oldRoom->room_number) : null;
                 $reason = $this->resolveHistoryReason($log, $historyOccupancy, $historySupportRequests);
 
                 return [
                     'id' => $log->id,
                     'student_name' => $historyOccupancy?->student?->full_name,
                     'student_code' => $historyOccupancy?->student?->student_code,
-                    'old_room_code' => $oldRoom ? (($oldRoom->floor?->building_code ?? '') . $oldRoom->room_number) : null,
+                    'old_room_code' => $log->old_room_code,
                     'old_bed_number' => $oldBed?->bed_number ? (string) $oldBed->bed_number : null,
                     'new_room_code' => $newRoom ? (($newRoom->floor?->building_code ?? '') . $newRoom->room_number) : null,
                     'new_bed_number' => $newBed?->bed_number ? (string) $newBed->bed_number : null,
@@ -276,12 +284,52 @@ class RoomController extends Controller
                     'change_type' => $log->change_type,
                     'status' => $log->status,
                     'is_temporary' => (bool) $log->is_temporary,
+                    'is_initial_assignment' => false,
                     'transferred_at' => $log->transferred_at,
                     'completed_at' => $log->completed_at,
                     'expected_return_date' => $log->expected_return_date,
                     'maintenance_request_id' => $log->maintenance_request_id,
                 ];
             };
+
+            // Tách các dòng "xếp chỗ ban đầu" (assign_room/select_bed, không phải chuyển thật
+            // sự — không có phòng/giường cũ) ra khỏi lịch sử chuyển thật, gộp thành 1 mốc duy
+            // nhất (giống StudentRoomChangeHistoryController) thay vì hiện như 2-3 lần "chuyển".
+            $initialAssignmentLogs = $studentHistoryLogs
+                ->filter(fn ($log) => RoomChangeLogService::isInitialAssignment($log))
+                ->sortBy('transferred_at')
+                ->values();
+            $realTransferLogs = $studentHistoryLogs
+                ->reject(fn ($log) => RoomChangeLogService::isInitialAssignment($log))
+                ->values();
+
+            $transferHistory = $realTransferLogs->map($formatHistory)->all();
+
+            if ($initialAssignmentLogs->isNotEmpty()) {
+                $firstInitial = $initialAssignmentLogs->first();
+                $lastInitial = $initialAssignmentLogs->last();
+                $initialOccupancy = $historyOccupancies->get($firstInitial->occupancy_id);
+                $lastNewBed = $historyBeds->get($lastInitial->new_bed_id);
+
+                $transferHistory[] = [
+                    'id' => $firstInitial->id,
+                    'student_name' => $initialOccupancy?->student?->full_name,
+                    'student_code' => $initialOccupancy?->student?->student_code,
+                    'old_room_code' => null,
+                    'old_bed_number' => null,
+                    'new_room_code' => $roomCodeFor($lastInitial->new_room_id),
+                    'new_bed_number' => $lastNewBed?->bed_number ? (string) $lastNewBed->bed_number : null,
+                    'reason' => RoomChangeLogService::INITIAL_ASSIGNMENT_LABEL,
+                    'change_type' => $lastInitial->change_type,
+                    'status' => null,
+                    'is_temporary' => false,
+                    'is_initial_assignment' => true,
+                    'transferred_at' => $firstInitial->transferred_at,
+                    'completed_at' => null,
+                    'expected_return_date' => null,
+                    'maintenance_request_id' => null,
+                ];
+            }
 
             return [
                 'id' => $bed->id,
@@ -290,7 +338,7 @@ class RoomController extends Controller
                 'status' => strtoupper((string) $bed->status) === 'MAINTENANCE' ? 'maintenance' : 'active',
                 'display_status' => $displayStatus,
                 'occupied' => (bool) $student,
-                'transfer_history' => $studentHistoryLogs->map($formatHistory)->all(),
+                'transfer_history' => $transferHistory,
                 'maintenance_history' => $bedHistoryLogs
                     ->filter(fn ($log) => $log->maintenance_request_id || in_array($log->transfer_reason, ['BED_MAINTENANCE', 'ROOM_MAINTENANCE'], true))
                     ->map($formatHistory)
@@ -389,7 +437,7 @@ class RoomController extends Controller
         ];
 
         if (! array_key_exists((string) $reason, $studentRequestReasons)) {
-            return $reason;
+            return RoomChangeLogService::buildLabel($log);
         }
 
         $studentId = $historyOccupancy?->student_id;

@@ -544,16 +544,18 @@ class AdmissionCandidateController extends Controller
                                     'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
                                     'registration_approved',
                                     $reg->id,
+                                    queue: true,
                                 );
                             }
                         }
                     }
                 }
 
-                // Gửi email thông báo
+                // Gửi email thông báo — queue vì đang chạy trong vòng lặp import hàng loạt,
+                // tránh chặn request chờ gửi email lần lượt từng dòng trong file.
                 if ($student->email) {
                     try {
-                        Mail::to($student->email)->send(new StudentEnrolledMail($student));
+                        Mail::to($student->email)->queue(new StudentEnrolledMail($student));
                     } catch (\Throwable $e) {
                         Log::error('Gửi email thông báo thất bại', [
                             'type'       => 'student_enrolled',

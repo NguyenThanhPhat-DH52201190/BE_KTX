@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Notification;
 use App\Models\Student;
 use Illuminate\Support\Facades\DB;
@@ -16,15 +17,20 @@ use Illuminate\Support\Facades\Mail;
  */
 class StudentNotificationService
 {
-    public function notifyStudent(Student $student, string $title, string $content, string $type, ?int $relatedId = null): void
+    /**
+     * @param bool $queue Đưa vào hàng đợi thay vì gửi ngay — bật khi gọi hàm này trong vòng
+     *                    lặp nhiều sinh viên cùng lúc (VD duyệt hàng loạt theo đợt), để không
+     *                    chặn request chờ gửi email lần lượt từng người.
+     */
+    public function notifyStudent(Student $student, string $title, string $content, string $type, ?int $relatedId = null, bool $queue = false): void
     {
         $this->createBellNotification($student->id, $title, $content, $type, $relatedId);
-        $this->sendEmail($student->email, $student->full_name, $title, $content, $type, $student->id);
+        $this->sendEmail($student->email, $student->full_name, $title, $content, $type, $student->id, $queue);
     }
 
-    public function notifyEmailOnly(?string $email, ?string $name, string $title, string $content): void
+    public function notifyEmailOnly(?string $email, ?string $name, string $title, string $content, bool $queue = false): void
     {
-        $this->sendEmail($email, $name, $title, $content);
+        $this->sendEmail($email, $name, $title, $content, null, null, $queue);
     }
 
     private function createBellNotification(int $studentId, string $title, string $content, string $type, ?int $relatedId): void
@@ -51,7 +57,7 @@ class StudentNotificationService
         }
     }
 
-    private function sendEmail(?string $email, ?string $name, string $title, string $content, ?string $type = null, ?int $studentId = null): void
+    private function sendEmail(?string $email, ?string $name, string $title, string $content, ?string $type = null, ?int $studentId = null, bool $queue = false): void
     {
         if (empty($email)) {
             return;
@@ -69,12 +75,17 @@ class StudentNotificationService
                     <p style='color:#6b7280;font-size:12px;margin-top:32px;'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
                 </div>
             ";
+            $subject = "KTX — {$title}";
 
-            Mail::send([], [], function ($message) use ($email, $name, $title, $body) {
-                $message->to($email, $name ?? '')
-                    ->subject("KTX — {$title}")
-                    ->html($body);
-            });
+            if ($queue) {
+                Mail::to($email, $name ?? '')->queue(new GenericNotificationMail($subject, $body));
+            } else {
+                Mail::send([], [], function ($message) use ($email, $name, $subject, $body) {
+                    $message->to($email, $name ?? '')
+                        ->subject($subject)
+                        ->html($body);
+                });
+            }
         } catch (\Throwable $e) {
             Log::error('Gửi email thông báo thất bại', [
                 'type'       => $type,

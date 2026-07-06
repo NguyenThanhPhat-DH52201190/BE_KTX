@@ -611,12 +611,15 @@ class DormReservationController extends Controller
 
                     $student = Student::find($studentId);
                     if ($student) {
+                        // Đang chạy trong vòng lặp duyệt hàng loạt đặt chỗ theo đợt — queue
+                        // để không chặn request chờ gửi email lần lượt.
                         app(StudentNotificationService::class)->notifyStudent(
                             $student,
                             'Đơn đăng ký nội trú đã được duyệt',
                             'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
                             'registration_approved',
                             $registration->id,
+                            queue: true,
                         );
                     }
 

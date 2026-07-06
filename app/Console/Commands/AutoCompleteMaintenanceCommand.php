@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Account;
 use App\Models\AdminNotification;
 use App\Models\Bed;
@@ -193,7 +194,7 @@ class AutoCompleteMaintenanceCommand extends Command
                     'change_type'            => 'TEMPORARY_MAINTENANCE',
                     'maintenance_request_id' => $mr->id,
                     'status'                 => 'RETURNED',
-                    'change_source'          => 'system',
+                    'change_source'          => 'admin',
                     'is_temporary'           => false,
                     'expected_return_date'   => null,
                     'transferred_at'         => now(),
@@ -273,7 +274,7 @@ class AutoCompleteMaintenanceCommand extends Command
             'change_type'            => 'TEMPORARY_MAINTENANCE',
             'maintenance_request_id' => $log->maintenance_request_id ? (int) $log->maintenance_request_id : null,
             'status'                 => 'RETURNED',
-            'change_source'          => 'system',
+            'change_source'          => 'admin',
             'is_temporary'           => false,
             'expected_return_date'   => null,
             'transferred_at'         => now(),
@@ -378,13 +379,11 @@ class AutoCompleteMaintenanceCommand extends Command
 
     private function sendEmail(array $payload): void
     {
-        // Admin bulk payload
+        // Admin bulk payload — queue để không dồn cục thời gian chạy lệnh cron.
         if (isset($payload['admin_emails'])) {
             foreach ($payload['admin_emails'] as $email) {
                 try {
-                    Mail::send([], [], function ($message) use ($email, $payload) {
-                        $message->to($email)->subject($payload['subject'])->html($payload['body']);
-                    });
+                    Mail::to($email)->queue(new GenericNotificationMail($payload['subject'], $payload['body']));
                 } catch (\Exception $e) {
                     Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
                         'type'  => $payload['type'] ?? null,
@@ -400,11 +399,7 @@ class AutoCompleteMaintenanceCommand extends Command
             return;
         }
         try {
-            Mail::send([], [], function ($message) use ($payload) {
-                $message->to($payload['email'], $payload['name'])
-                    ->subject($payload['subject'])
-                    ->html($payload['body']);
-            });
+            Mail::to($payload['email'], $payload['name'])->queue(new GenericNotificationMail($payload['subject'], $payload['body']));
         } catch (\Exception $e) {
             Log::error('Gửi email thông báo bảo trì thất bại', [
                 'type'       => $payload['type'] ?? null,

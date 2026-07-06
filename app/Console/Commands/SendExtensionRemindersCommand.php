@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\OccupancyPeriod;
@@ -150,11 +151,7 @@ HTML;
             : 'KTX — Nhắc nhở gia hạn lưu trú (còn 30 ngày)';
 
         try {
-            Mail::send([], [], function ($message) use ($student, $body, $subject) {
-                $message->to($student->email, $student->full_name)
-                    ->subject($subject)
-                    ->html($body);
-            });
+            Mail::to($student->email, $student->full_name)->queue(new GenericNotificationMail($subject, $body));
         } catch (\Throwable $e) {
             Log::error("[ExtensionReminders] Gửi email thất bại student #{$student->id}: " . $e->getMessage());
         }

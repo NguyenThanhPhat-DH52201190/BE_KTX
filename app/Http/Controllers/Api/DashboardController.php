@@ -16,6 +16,7 @@ use App\Models\StudentSupportRequest;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class DashboardController extends Controller
 {
@@ -64,6 +65,30 @@ class DashboardController extends Controller
         // ── 2. Alerts ─────────────────────────────────────────────────────
         $pendingRegistrations = Registration::where('status', 'submitted')->count();
 
+        // Breakdown theo kênh (main/rolling) + loại (pending chờ xử lý theo lô / review cần
+        // duyệt tay) để FE điều hướng đúng tab khi bấm vào cảnh báo "Đơn chờ duyệt tay" —
+        // không đổi ý nghĩa của $pendingRegistrations (tổng số), chỉ bổ sung thông tin định vị.
+        $submittedRegs = Registration::where('status', 'submitted')
+            ->with('period:id,channel')
+            ->get(['id', 'registration_period_id', 'auto_decision']);
+
+        $pendingPriorityRegIds = DB::table('student_priority')
+            ->where('status', 'pending')
+            ->distinct()
+            ->pluck('registration_id')
+            ->flip();
+
+        $pendingRegistrationsBreakdown = [
+            'main'    => ['pending' => 0, 'review' => 0],
+            'rolling' => ['pending' => 0, 'review' => 0],
+        ];
+
+        foreach ($submittedRegs as $reg) {
+            $channel = $reg->period?->channel === 'rolling' ? 'rolling' : 'main';
+            $isReview = $reg->auto_decision === 'review' || $pendingPriorityRegIds->has($reg->id);
+            $pendingRegistrationsBreakdown[$channel][$isReview ? 'review' : 'pending']++;
+        }
+
         $expiringOccupancies = Occupancy::where('status', 'ACTIVE')
             ->whereNotNull('check_out_date')
             ->whereBetween('check_out_date', [
@@ -89,6 +114,11 @@ class DashboardController extends Controller
         $pendingCheckouts = CheckoutRequest::where('status', 'pending')->count();
 
         $pendingSupportRequests = StudentSupportRequest::whereIn('status', ['pending', 'processing'])->count();
+
+        // Theo dõi hàng đợi email (queue) — để phát hiện sớm nếu queue worker (Windows Service)
+        // bị dừng mà không ai để ý, tránh email "biến mất" âm thầm.
+        $queuePendingJobs = Schema::hasTable('jobs') ? DB::table('jobs')->count() : 0;
+        $queueFailedJobs  = Schema::hasTable('failed_jobs') ? DB::table('failed_jobs')->count() : 0;
 
         // ── 3. Current period ─────────────────────────────────────────────
         $period = RegistrationPeriod::whereIn('status', ['active', 'processing', 'pending'])
@@ -226,12 +256,17 @@ class DashboardController extends Controller
             'alerts' => [
                 'overdue_invoices'         => $overdueInvoices,
                 'pending_registrations'    => $pendingRegistrations,
+                'pending_registrations_breakdown' => $pendingRegistrationsBreakdown,
                 'expiring_occupancies_30d' => $expiringOccupancies,
                 'pending_bed_selection'    => $pendingBedSelection,
                 'pending_room_changes'      => $pendingRoomChanges,
                 'pending_bed_changes'       => $pendingBedChanges,
                 'pending_checkouts'         => $pendingCheckouts,
                 'pending_support_requests'  => $pendingSupportRequests,
+            ],
+            'queue' => [
+                'pending_jobs' => $queuePendingJobs,
+                'failed_jobs'  => $queueFailedJobs,
             ],
             'current_period' => $periodData,
             'charts' => [

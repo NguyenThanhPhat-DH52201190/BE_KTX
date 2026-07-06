@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Notification;
 use App\Models\Occupancy;
 use Carbon\Carbon;
@@ -130,11 +131,8 @@ class SendBedSelectionRemindersCommand extends Command
 HTML;
 
         try {
-            Mail::send([], [], function ($message) use ($student, $body) {
-                $message->to($student->email, $student->full_name)
-                    ->subject('KTX — [QUAN TRỌNG] Hạn chọn giường còn 1 ngày')
-                    ->html($body);
-            });
+            Mail::to($student->email, $student->full_name)
+                ->queue(new GenericNotificationMail('KTX — [QUAN TRỌNG] Hạn chọn giường còn 1 ngày', $body));
         } catch (\Throwable $e) {
             Log::error("[BedSelectionReminders] Gửi email thất bại student #{$student->id}: " . $e->getMessage());
         }

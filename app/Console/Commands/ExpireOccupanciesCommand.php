@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\GenericNotificationMail;
 use App\Models\Bed;
 use App\Models\Notification;
 use App\Models\Occupancy;
@@ -50,7 +51,7 @@ class ExpireOccupanciesCommand extends Command
                 $occupancy->update(['status' => 'COMPLETED']);
 
                 if ($occupancy->bed_id) {
-                    Bed::where('id', $occupancy->bed_id)->update(['status' => 'EMPTY']);
+                    Bed::where('id', $occupancy->bed_id)->update(['status' => 'active']);
                 }
             });
 
@@ -96,11 +97,8 @@ class ExpireOccupanciesCommand extends Command
   <p style="color:#6b7280;font-size:12px">Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
 </div>
 HTML;
-                Mail::send([], [], function ($message) use ($student, $body) {
-                    $message->to($student->email, $student->full_name)
-                        ->subject('KTX — Lưu trú của bạn đã hết hạn')
-                        ->html($body);
-                });
+                Mail::to($student->email, $student->full_name)
+                    ->queue(new GenericNotificationMail('KTX — Lưu trú của bạn đã hết hạn', $body));
             }
         } catch (\Throwable $e) {
             Log::error("[ExpireOccupancies] Gửi thông báo thất bại student #{$student->id}: " . $e->getMessage());
