@@ -15,8 +15,8 @@ class StoreStudentSupportRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'email'             => ['required_without:student_id', 'nullable', 'email', 'exists:students,email'],
-            'student_id'        => ['required_without:email', 'nullable', 'integer', 'exists:students,id'],
+            // Danh tính sinh viên lấy từ $request->user() (route đã bảo vệ auth:sanctum +
+            // role:student), không nhận email/student_id từ client nữa.
             'request_type'      => ['required', 'string', Rule::in([
                 'room_change',
                 'bed_change',

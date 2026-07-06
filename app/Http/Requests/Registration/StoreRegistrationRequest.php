@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests\Registration;
 
-use App\Models\Student;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -207,20 +206,12 @@ class StoreRegistrationRequest extends FormRequest
         ];
     }
 
+    // Dùng student_id của tài khoản đang đăng nhập (route đã bảo vệ auth:sanctum +
+    // role:student) để loại trừ khỏi các rule unique — không dùng email client gửi,
+    // tránh trường hợp submit email của sinh viên khác làm sai lệch kiểm tra trùng lặp.
     private function currentStudentId(): ?int
     {
-        $email = $this->input('email');
-
-        if (!$email) {
-            return null;
-        }
-
-        $student = Student::query()
-            ->select('id')
-            ->where('email', $email)
-            ->first();
-
-        return $student?->id;
+        return $this->user()?->student_id;
     }
 
     private function normalizeDate(mixed $value): ?string

@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 class StudentSupportRequestController extends Controller
@@ -611,11 +612,13 @@ class StudentSupportRequestController extends Controller
         } catch (\Exception) {}
 
         return [
-            'email'   => $student->email,
-            'name'    => $student->full_name ?? '',
-            'subject' => "KTX — {$title}",
-            'title'   => $title,
-            'content' => $content,
+            'email'      => $student->email,
+            'name'       => $student->full_name ?? '',
+            'subject'    => "KTX — {$title}",
+            'title'      => $title,
+            'content'    => $content,
+            'type'       => $type,
+            'student_id' => $student->id,
         ];
     }
 
@@ -642,7 +645,14 @@ class StudentSupportRequestController extends Controller
                     ->subject($data['subject'])
                     ->html($body);
             });
-        } catch (\Exception) {}
+        } catch (\Exception $e) {
+            Log::error('Gửi email thông báo thất bại', [
+                'type'       => $data['type'] ?? null,
+                'student_id' => $data['student_id'] ?? null,
+                'email'      => $data['email'],
+                'error'      => $e->getMessage(),
+            ]);
+        }
     }
 
     // ── Shared helpers ─────────────────────────────────────────────────────────
@@ -724,7 +734,14 @@ class StudentSupportRequestController extends Controller
                             ->subject($subject)
                             ->html($body);
                     });
-                } catch (\Exception) {}
+                } catch (\Exception $e) {
+                    Log::error('Gửi email thông báo thất bại', [
+                        'type'                => 'support_request_new',
+                        'support_request_id'  => $req->id,
+                        'email'               => $email,
+                        'error'               => $e->getMessage(),
+                    ]);
+                }
             }
         } catch (\Exception) {}
     }
@@ -741,18 +758,12 @@ class StudentSupportRequestController extends Controller
         };
     }
 
+    // Lấy sinh viên từ tài khoản đang đăng nhập (route đã bảo vệ auth:sanctum + role:student),
+    // không nhận student_id/email từ client — tránh 1 sinh viên xem/gửi yêu cầu thay sinh viên khác.
     private function resolveStudent(Request $request): ?Student
     {
-        if ($request->filled('student_id')) {
-            return Student::query()->find((int) $request->input('student_id'));
-        }
+        $account = $request->user();
 
-        $email = trim((string) ($request->input('email') ?: $request->query('email', '')));
-
-        if ($email === '') {
-            return null;
-        }
-
-        return Student::query()->where('email', $email)->first();
+        return $account?->student_id ? Student::query()->find($account->student_id) : null;
     }
 }

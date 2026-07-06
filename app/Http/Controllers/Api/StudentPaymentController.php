@@ -17,13 +17,8 @@ class StudentPaymentController extends Controller
 {
     public function myBills(Request $request): JsonResponse
     {
-        $email = trim((string) $request->query('email', ''));
-
-        if ($email === '') {
-            return response()->json(['message' => 'Thiếu email sinh viên.'], 422);
-        }
-
-        $student = Student::query()->where('email', $email)->first();
+        $account = $request->user();
+        $student = Student::query()->find($account->student_id);
 
         if (!$student) {
             return response()->json([
@@ -74,11 +69,7 @@ class StudentPaymentController extends Controller
 
     public function confirmFree(Request $request, int $id): JsonResponse
     {
-        $email = trim((string) $request->input('email', ''));
-
-        if ($email === '') {
-            return response()->json(['message' => 'Thiếu email sinh viên.'], 422);
-        }
+        $account = $request->user();
 
         $bill = RoomFeeBill::query()->with(['student', 'occupancy.room.floor'])->find($id);
 
@@ -86,8 +77,7 @@ class StudentPaymentController extends Controller
             return response()->json(['message' => 'Không tìm thấy hóa đơn.'], 404);
         }
 
-        $studentEmail = trim((string) ($bill->student?->email ?? ''));
-        if (strcasecmp($studentEmail, $email) !== 0) {
+        if ((int) $bill->student_id !== (int) $account->student_id) {
             return response()->json(['message' => 'Hóa đơn không thuộc sinh viên này.'], 403);
         }
 

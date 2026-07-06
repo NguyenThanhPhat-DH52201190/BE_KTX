@@ -59,6 +59,10 @@ class Registration extends Model
 
     public function occupancy(): HasOne
     {
-        return $this->hasOne(Occupancy::class);
+        // Gia hạn lưu trú tạo occupancy MỚI nhưng giữ cùng registration_id (xem
+        // OccupancyExtensionController::store()/approve()) — 1 registration có thể có nhiều
+        // occupancy theo thời gian. latestOfMany() đảm bảo luôn lấy đúng occupancy mới nhất
+        // (id lớn nhất), không phải bản ghi đầu tiên theo thứ tự mặc định của DB.
+        return $this->hasOne(Occupancy::class)->latestOfMany();
     }
 }

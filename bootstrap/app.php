@@ -4,6 +4,7 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Middleware\HandleCors;
+use App\Http\Middleware\EnsureAccountRole;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -21,6 +22,19 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->api(append: [
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
         ]);
+
+        // Đăng ký alias 'role' để dùng ở các route sẽ được bảo vệ sau, ví dụ:
+        // ->middleware(['auth:sanctum', 'role:student']). Chưa gắn vào route nào.
+        $middleware->alias([
+            'role' => EnsureAccountRole::class,
+        ]);
+
+        // App này là pure JSON API, không có route tên 'login' (không có trang login
+        // render bằng Blade). Mặc định, middleware auth sẽ cố gắng route('login') khi
+        // request không có Accept: application/json, gây lỗi 500 RouteNotFoundException
+        // thay vì trả 401 sạch. redirectGuestsTo(null) tắt hẳn hành vi redirect này cho
+        // cả Authenticate, AuthenticateSession và AuthenticationException.
+        $middleware->redirectGuestsTo(fn () => null);
     })
 
     ->withExceptions(function (Exceptions $exceptions): void {

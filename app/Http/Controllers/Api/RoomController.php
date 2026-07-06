@@ -14,6 +14,7 @@ use App\Models\StudentSupportRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 class RoomController extends Controller
@@ -116,8 +117,13 @@ class RoomController extends Controller
      * Danh sách giường của một phòng kèm thông tin sinh viên đang ở (occupancy ACTIVE).
      * GET /api/rooms/{roomId}/beds
      */
-    public function beds(int $roomId): JsonResponse
+    public function beds(Request $request, int $roomId): JsonResponse
     {
+        // Route dùng chung cho admin + sinh viên (chọn giường). Sinh viên không cần và
+        // không nên thấy PII nhạy cảm (SĐT, email, ngày sinh, địa chỉ) của người ở phòng —
+        // chỉ admin mới thấy đầy đủ.
+        $isAdmin = $request->user()?->role === 'admin';
+
         $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
         $beds = $room->beds->sortBy('bed_number')->values();
 
@@ -221,7 +227,8 @@ class RoomController extends Controller
             $historySupportRequests,
             $historyBeds,
             $historyRooms,
-            $roomInMaintenance
+            $roomInMaintenance,
+            $isAdmin
         ) {
             $occupancy = $occupancies->get($bed->id);
             $student = $occupancy?->student;
@@ -301,7 +308,7 @@ class RoomController extends Controller
                     'maintenance_request_id' => $maintenanceLog->maintenance_request_id,
                     'can_return' => true,
                 ] : null,
-                'student' => $student ? [
+                'student' => $student ? array_merge([
                     'id' => $student->id,
                     'student_code' => $student->student_code,
                     'full_name' => $student->full_name,
@@ -310,11 +317,13 @@ class RoomController extends Controller
                     'faculty' => $student->faculty,
                     'academic_status' => $student->academic_status,
                     'gender' => $student->gender,
+                    'course_year' => $student->course_year,
+                ], $isAdmin ? [
                     'phone' => $student->phone,
                     'email' => $student->email,
                     'date_of_birth' => $student->date_of_birth,
-                    'course_year' => $student->course_year,
                     'permanent_address' => $student->permanent_address,
+                ] : [], [
                     'check_in_date' => $occupancy?->check_in_date,
                     'check_out_date' => $occupancy?->check_out_date,
                     'occupancy' => $occupancy ? [
@@ -337,7 +346,7 @@ class RoomController extends Controller
                         'change_type' => $temporaryLog->change_type,
                         'maintenance_request_id' => $temporaryLog->maintenance_request_id,
                     ] : null,
-                ] : null,
+                ]) : null,
             ];
         });
 
@@ -622,11 +631,13 @@ class RoomController extends Controller
         } catch (\Exception) {}
 
         return [
-            'email'   => $student->email,
-            'name'    => $student->full_name ?? '',
-            'subject' => 'KTX — ' . $title,
-            'title'   => $title,
-            'content' => $content,
+            'email'      => $student->email,
+            'name'       => $student->full_name ?? '',
+            'subject'    => 'KTX — ' . $title,
+            'title'      => $title,
+            'content'    => $content,
+            'type'       => $type,
+            'student_id' => $student->id,
         ];
     }
 
@@ -650,7 +661,14 @@ class RoomController extends Controller
                     ->subject($data['subject'])
                     ->html($body);
             });
-        } catch (\Exception) {}
+        } catch (\Exception $e) {
+            Log::error('Gửi email thông báo thất bại', [
+                'type'       => $data['type'] ?? null,
+                'student_id' => $data['student_id'] ?? null,
+                'email'      => $data['email'],
+                'error'      => $e->getMessage(),
+            ]);
+        }
     }
 
     private function assertUniqueRoomNumber(int $floorId, string $roomNumber, ?int $ignoreRoomId = null): void

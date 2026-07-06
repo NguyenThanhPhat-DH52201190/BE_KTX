@@ -23,21 +23,31 @@ class ViolationController extends Controller
             ->orderByDesc('activity_date')
             ->orderByDesc('id');
 
-        if ($request->filled('occupancy_id')) {
-            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
-        }
+        $account = $request->user();
 
-        if ($request->filled('student_id')) {
-            $query->where('student_id', (int) $request->query('student_id'));
-        }
+        if ($account && $account->role === 'student') {
+            // Route dùng chung role:admin,student (sinh viên xem hoạt động/vi phạm của
+            // chính mình ở "Hoạt động của tôi" / "Phòng của tôi"). Không tin tưởng
+            // occupancy_id/student_id/student_email do client gửi — luôn ép về đúng
+            // student_id của tài khoản đang đăng nhập, bỏ qua mọi filter client truyền vào.
+            $query->where('student_id', $account->student_id);
+        } else {
+            if ($request->filled('occupancy_id')) {
+                $query->where('occupancy_id', (int) $request->query('occupancy_id'));
+            }
 
-        if ($request->filled('student_email')) {
-            $email = (string) $request->query('student_email');
-            $query->where(function ($studentScope) use ($email) {
-                $studentScope
-                    ->whereHas('student', fn ($studentQuery) => $studentQuery->where('email', $email))
-                    ->orWhereHas('occupancy.student', fn ($studentQuery) => $studentQuery->where('email', $email));
-            });
+            if ($request->filled('student_id')) {
+                $query->where('student_id', (int) $request->query('student_id'));
+            }
+
+            if ($request->filled('student_email')) {
+                $email = (string) $request->query('student_email');
+                $query->where(function ($studentScope) use ($email) {
+                    $studentScope
+                        ->whereHas('student', fn ($studentQuery) => $studentQuery->where('email', $email))
+                        ->orWhereHas('occupancy.student', fn ($studentQuery) => $studentQuery->where('email', $email));
+                });
+            }
         }
 
         return response()->json(

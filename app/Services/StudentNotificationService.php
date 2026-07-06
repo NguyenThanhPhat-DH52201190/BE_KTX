@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Notification;
 use App\Models\Student;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 /**
@@ -18,7 +19,7 @@ class StudentNotificationService
     public function notifyStudent(Student $student, string $title, string $content, string $type, ?int $relatedId = null): void
     {
         $this->createBellNotification($student->id, $title, $content, $type, $relatedId);
-        $this->sendEmail($student->email, $student->full_name, $title, $content);
+        $this->sendEmail($student->email, $student->full_name, $title, $content, $type, $student->id);
     }
 
     public function notifyEmailOnly(?string $email, ?string $name, string $title, string $content): void
@@ -50,7 +51,7 @@ class StudentNotificationService
         }
     }
 
-    private function sendEmail(?string $email, ?string $name, string $title, string $content): void
+    private function sendEmail(?string $email, ?string $name, string $title, string $content, ?string $type = null, ?int $studentId = null): void
     {
         if (empty($email)) {
             return;
@@ -74,8 +75,14 @@ class StudentNotificationService
                     ->subject("KTX — {$title}")
                     ->html($body);
             });
-        } catch (\Throwable) {
-            // Không chặn luồng chính nếu gửi mail lỗi.
+        } catch (\Throwable $e) {
+            Log::error('Gửi email thông báo thất bại', [
+                'type'       => $type,
+                'student_id' => $studentId,
+                'email'      => $email,
+                'title'      => $title,
+                'error'      => $e->getMessage(),
+            ]);
         }
     }
 }

@@ -19,13 +19,8 @@ class StudentDashboardController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $email = trim((string) $request->query('email', ''));
-
-        if (!$email) {
-            return response()->json(['message' => 'Email is required.'], 422);
-        }
-
-        $student = Student::where('email', $email)->first();
+        $account = $request->user();
+        $student = Student::find($account->student_id);
 
         if (!$student) {
             return response()->json(['message' => 'Không tìm thấy sinh viên.'], 422);

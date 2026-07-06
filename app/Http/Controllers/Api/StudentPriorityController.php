@@ -67,7 +67,9 @@ class StudentPriorityController extends Controller
         $priority = StudentPriority::findOrFail($id);
 
         $priority->status      = $request->status;
-        $priority->verified_by = auth()->id() ?? null;
+        // Route đã bảo vệ auth:sanctum + role:admin — lấy id từ $request->user() thay vì
+        // auth()->id() (guard mặc định 'web', luôn null với request Sanctum bearer-token).
+        $priority->verified_by = $request->user()?->id;
         $priority->verified_at = now();
         $priority->save();
 

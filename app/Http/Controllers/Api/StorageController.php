@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Helpers\StorageHelper;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 
@@ -122,68 +121,5 @@ class StorageController extends Controller
         // Combine them and pass to serveImage
         $path = $directory . '/' . $filename;
         return $this->serveImage($path);
-    }
-    
-    /**
-     * Debug endpoint to check storage configuration
-     */
-    public function debug()
-    {
-        $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
-        
-        $debugData = [
-            'environment' => app()->environment(),
-            'railway_environment' => env('RAILWAY_ENVIRONMENT'),
-            'is_railway_with_volume' => StorageHelper::isRailwayWithVolume(),
-            'volume_path' => $volumePath,
-            'volume_exists' => file_exists($volumePath),
-            'volume_writable' => is_writable($volumePath),
-            'disk_config' => [
-                'default' => config('filesystems.default'),
-                'railway_volume_root' => config('filesystems.disks.railway_volume.root'),
-            ],
-            'test_write' => $this->testWriteToVolume($volumePath),
-        ];
-        
-        // List files in volume if it exists
-        if (file_exists($volumePath) && StorageHelper::isRailwayWithVolume()) {
-            try {
-                $disk = Storage::disk('railway_volume');
-                $debugData['files'] = [
-                    'students/avatar' => $disk->exists('students/avatar') ? $disk->files('students/avatar') : [],
-                    'registrations/cccd' => $disk->exists('registrations/cccd') ? $disk->files('registrations/cccd') : [],
-                ];
-            } catch (\Exception $e) {
-                $debugData['files_error'] = $e->getMessage();
-            }
-        }
-        
-        return response()->json($debugData);
-    }
-    
-    private function testWriteToVolume($volumePath)
-    {
-        if (!file_exists($volumePath)) {
-            return 'Volume path does not exist';
-        }
-        
-        $testFile = $volumePath . '/test_' . time() . '.txt';
-        try {
-            file_put_contents($testFile, 'Test at ' . date('Y-m-d H:i:s'));
-            $exists = file_exists($testFile);
-            $content = file_get_contents($testFile);
-            unlink($testFile);
-            return [
-                'success' => true,
-                'writable' => true,
-                'message' => 'Successfully wrote and deleted test file',
-                'content' => $content
-            ];
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
-        }
     }
 }

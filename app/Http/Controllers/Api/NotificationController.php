@@ -10,13 +10,12 @@ use Illuminate\Support\Facades\DB;
 
 class NotificationController extends Controller
 {
+    // Lấy sinh viên từ tài khoản đang đăng nhập (route đã bảo vệ auth:sanctum + role:student).
     private function resolveStudent(Request $request): ?Student
     {
-        $email = $request->query('email');
-        if (! $email) {
-            return null;
-        }
-        return Student::where('email', $email)->first();
+        $account = $request->user();
+
+        return $account?->student_id ? Student::find($account->student_id) : null;
     }
 
     public function index(Request $request): JsonResponse

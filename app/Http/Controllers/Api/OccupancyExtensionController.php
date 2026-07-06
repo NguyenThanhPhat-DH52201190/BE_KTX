@@ -173,6 +173,15 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Hiện không có đợt gia hạn nào đang mở.'], 422);
         }
 
+        // Chặn sớm nếu cấu hình đợt gia hạn vô lý (ngày kết thúc gia hạn phải sau ngày kết
+        // thúc lưu trú hiện tại) — tránh tạo occupancy mới có check_out_date < check_in_date.
+        if ($period->extension_until_date && $occupancy->check_out_date
+            && !$period->extension_until_date->gt(\Carbon\Carbon::parse($occupancy->check_out_date))) {
+            return response()->json([
+                'message' => 'Đợt gia hạn hiện tại có cấu hình ngày không hợp lệ (ngày kết thúc gia hạn phải sau ngày kết thúc lưu trú hiện tại). Vui lòng liên hệ quản trị viên để kiểm tra lại đợt gia hạn.',
+            ], 422);
+        }
+
         $exists = OccupancyExtension::where('occupancy_id', $occupancy->id)
             ->where('occupancy_period_id', $period->id)
             ->exists();
@@ -206,6 +215,7 @@ class OccupancyExtensionController extends Controller
 
                 return Occupancy::create([
                     'student_id'            => $occupancy->student_id,
+                    'registration_id'       => $occupancy->registration_id,
                     'room_id'               => $occupancy->room_id,
                     'bed_id'                => $occupancy->bed_id,
                     'check_in_date'         => $occupancy->check_out_date,
@@ -274,6 +284,19 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Chỉ có thể duyệt yêu cầu đang chờ xét duyệt.'], 422);
         }
 
+        $occupancyForValidation = $extension->occupancy;
+        $periodForValidation    = $extension->occupancyPeriod;
+
+        // Chặn sớm nếu cấu hình đợt gia hạn vô lý — không được duyệt, tránh tạo occupancy
+        // mới có check_out_date < check_in_date. Kiểm tra trước transaction để không mutate
+        // gì nếu dữ liệu không hợp lệ.
+        if ($occupancyForValidation && $periodForValidation?->extension_until_date && $occupancyForValidation->check_out_date
+            && !$periodForValidation->extension_until_date->gt(\Carbon\Carbon::parse($occupancyForValidation->check_out_date))) {
+            return response()->json([
+                'message' => 'Đợt gia hạn hiện tại có cấu hình ngày không hợp lệ (ngày kết thúc gia hạn phải sau ngày kết thúc lưu trú hiện tại). Vui lòng liên hệ quản trị viên để kiểm tra lại đợt gia hạn.',
+            ], 422);
+        }
+
         $newOccupancy = null;
         $student      = null;
 
@@ -296,6 +319,7 @@ class OccupancyExtensionController extends Controller
 
                 $newOccupancy = Occupancy::create([
                     'student_id'            => $occupancy->student_id,
+                    'registration_id'       => $occupancy->registration_id,
                     'room_id'               => $occupancy->room_id,
                     'bed_id'                => $occupancy->bed_id,
                     'check_in_date'         => $occupancy->check_out_date,
@@ -526,18 +550,12 @@ HTML;
         }
     }
 
+    // Lấy sinh viên từ tài khoản đang đăng nhập (route đã bảo vệ auth:sanctum + role:student),
+    // không nhận student_id/email từ client — tránh 1 sinh viên xem/gửi yêu cầu thay sinh viên khác.
     private function resolveStudent(Request $request): ?Student
     {
-        if ($request->filled('student_id')) {
-            return Student::query()->find((int) $request->input('student_id'));
-        }
+        $account = $request->user();
 
-        $email = trim((string) ($request->input('email') ?: $request->query('email', '')));
-
-        if ($email === '') {
-            return null;
-        }
-
-        return Student::query()->where('email', $email)->first();
+        return $account?->student_id ? Student::query()->find($account->student_id) : null;
     }
 }

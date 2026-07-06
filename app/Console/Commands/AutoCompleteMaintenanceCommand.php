@@ -209,7 +209,7 @@ class AutoCompleteMaintenanceCommand extends Command
                     $title       = 'Bảo trì hoàn tất — Đã trả về giường cũ';
                     $content     = "Bảo trì giường đã hoàn tất. Bạn đã được chuyển về Giường {$sourceBed->bed_number} (Phòng {$oldRoomCode}).";
                     $this->saveNotification($student->id, $title, $content, 'bed_maintenance_return');
-                    $pendingEmails[] = $this->buildPayload($student, $title, $content);
+                    $pendingEmails[] = $this->buildPayload($student, $title, $content, 'bed_maintenance_return');
                 }
             });
 
@@ -287,14 +287,14 @@ class AutoCompleteMaintenanceCommand extends Command
             $title       = 'Bảo trì hoàn tất — Đã trả về phòng cũ';
             $content     = "Bảo trì phòng đã hoàn tất. Bạn đã được chuyển về Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}).";
             $this->saveNotification($student->id, $title, $content, 'room_maintenance_return');
-            $pendingEmails[] = $this->buildPayload($student, $title, $content);
+            $pendingEmails[] = $this->buildPayload($student, $title, $content, 'room_maintenance_return');
 
             // Thông báo admin
             $adminTitle   = "Bảo trì hoàn tất — Sinh viên trả về phòng {$oldRoomCode}";
             $adminContent = "Sinh viên {$student->full_name} ({$student->student_code}) đã được hệ thống tự động "
                           . "chuyển về Giường {$oldBed->bed_number} (Phòng {$oldRoomCode}) sau khi bảo trì hoàn tất.";
             $this->saveAdminNotification($adminTitle, $adminContent, 'room_maintenance_return', $log->maintenance_request_id ?? null);
-            $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent);
+            $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent, 'room_maintenance_return');
         }
     }
 
@@ -311,7 +311,7 @@ class AutoCompleteMaintenanceCommand extends Command
         } catch (\Exception) {}
     }
 
-    private function buildAdminPayload(string $title, string $content): array
+    private function buildAdminPayload(string $title, string $content, ?string $type = null): array
     {
         $adminEmails = Account::where('role', 'admin')
             ->with('student')
@@ -331,6 +331,7 @@ class AutoCompleteMaintenanceCommand extends Command
                 <p>" . nl2br(htmlspecialchars($content)) . "</p>
                 <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
             </div>",
+            'type'         => $type,
         ];
     }
 
@@ -354,22 +355,24 @@ class AutoCompleteMaintenanceCommand extends Command
         } catch (\Exception) {}
     }
 
-    private function buildPayload(object $student, string $title, string $content): array
+    private function buildPayload(object $student, string $title, string $content, ?string $type = null): array
     {
         $name   = htmlspecialchars($student->full_name ?? '');
         $eTitle = htmlspecialchars($title);
         $eBody  = nl2br(htmlspecialchars($content));
 
         return [
-            'email'   => $student->email ?? '',
-            'name'    => $student->full_name ?? '',
-            'subject' => 'KTX — ' . $title,
-            'body'    => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
+            'email'      => $student->email ?? '',
+            'name'       => $student->full_name ?? '',
+            'subject'    => 'KTX — ' . $title,
+            'body'       => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
                 <h2 style='color:#244cb8;margin-top:0'>{$eTitle}</h2>
                 <p>Xin chào <strong>{$name}</strong>,</p>
                 <p>{$eBody}</p>
                 <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
             </div>",
+            'type'       => $type,
+            'student_id' => $student->id,
         ];
     }
 
@@ -382,7 +385,13 @@ class AutoCompleteMaintenanceCommand extends Command
                     Mail::send([], [], function ($message) use ($email, $payload) {
                         $message->to($email)->subject($payload['subject'])->html($payload['body']);
                     });
-                } catch (\Exception) {}
+                } catch (\Exception $e) {
+                    Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
+                        'type'  => $payload['type'] ?? null,
+                        'email' => $email,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
             }
             return;
         }
@@ -396,6 +405,13 @@ class AutoCompleteMaintenanceCommand extends Command
                     ->subject($payload['subject'])
                     ->html($payload['body']);
             });
-        } catch (\Exception) {}
+        } catch (\Exception $e) {
+            Log::error('Gửi email thông báo bảo trì thất bại', [
+                'type'       => $payload['type'] ?? null,
+                'student_id' => $payload['student_id'] ?? null,
+                'email'      => $payload['email'],
+                'error'      => $e->getMessage(),
+            ]);
+        }
     }
 }

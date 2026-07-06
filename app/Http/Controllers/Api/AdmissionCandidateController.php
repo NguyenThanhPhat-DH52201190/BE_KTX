@@ -18,6 +18,7 @@ use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use App\Mail\StudentEnrolledMail;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -271,8 +272,13 @@ class AdmissionCandidateController extends Controller
             if ($student->email) {
                 try {
                     Mail::to($student->email)->send(new StudentEnrolledMail($student));
-                } catch (\Throwable) {
-                    // Không block nếu gửi mail thất bại
+                } catch (\Throwable $e) {
+                    Log::error('Gửi email thông báo thất bại', [
+                        'type'       => 'student_enrolled',
+                        'student_id' => $student->id,
+                        'email'      => $student->email,
+                        'error'      => $e->getMessage(),
+                    ]);
                 }
             }
 
@@ -548,8 +554,13 @@ class AdmissionCandidateController extends Controller
                 if ($student->email) {
                     try {
                         Mail::to($student->email)->send(new StudentEnrolledMail($student));
-                    } catch (\Throwable) {
-                        // Không block nếu gửi mail thất bại
+                    } catch (\Throwable $e) {
+                        Log::error('Gửi email thông báo thất bại', [
+                            'type'       => 'student_enrolled',
+                            'student_id' => $student->id,
+                            'email'      => $student->email,
+                            'error'      => $e->getMessage(),
+                        ]);
                     }
                 }
 

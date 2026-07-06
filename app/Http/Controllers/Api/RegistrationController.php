@@ -280,13 +280,10 @@ class RegistrationController extends Controller
 
     public function eligibility(Request $request): \Illuminate\Http\JsonResponse
     {
-        $email = $request->query('email');
-
-        if (!$email) {
-            return response()->json(['message' => 'Email là bắt buộc'], 422);
-        }
-
-        $student = Student::where('email', $email)->first();
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh xem tình trạng đủ điều kiện của sinh viên khác.
+        $account = $request->user();
+        $student = Student::find($account->student_id);
 
         if (!$student) {
             return response()->json(['message' => 'Không tìm thấy sinh viên'], 404);
@@ -452,7 +449,34 @@ class RegistrationController extends Controller
 
     public function index()
     {
-        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest', 'period'])->get();
+        // Dùng request() thay vì injectRequest qua tham số method — index() cũng được gọi
+        // nội bộ (không qua HTTP) từ StudentFaceSearchController::getStudentIdsListedInOccupancyManagement()
+        // dưới dạng app(RegistrationController::class)->index(), request() vẫn resolve đúng
+        // Request/Account của route hiện tại (khi đó luôn là admin) nên không ảnh hưởng.
+        $account = request()->user();
+
+        $query = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest', 'period']);
+
+        // Route dùng chung role:admin,student. Sinh viên chỉ được xem danh sách đăng ký
+        // trong CÙNG PHÒNG với mình (để hiển thị bạn cùng phòng ở "Phòng của tôi"),
+        // không được xem toàn bộ danh sách đăng ký như admin.
+        if ($account && $account->role === 'student') {
+            $myRegistration = Registration::with('occupancy')
+                ->where('student_id', $account->student_id)
+                ->whereHas('occupancy', fn ($q) => $q->whereNotNull('room_id'))
+                ->latest('id')
+                ->first();
+
+            $roomId = $myRegistration?->occupancy?->room_id;
+
+            if (!$roomId) {
+                return collect();
+            }
+
+            $query->whereHas('occupancy', fn ($q) => $q->where('room_id', $roomId));
+        }
+
+        $registrations = $query->get();
 
         return $registrations->map(function ($registration) {
             return $this->formatRegistration($registration);
@@ -461,16 +485,13 @@ class RegistrationController extends Controller
 
     public function store(StoreRegistrationRequest $request)
     {
-        $student = Student::where('email', $request->email)->first();
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh nộp/ghi đè đơn đăng ký thay sinh viên khác.
+        $account = $request->user();
+        $student = Student::find($account->student_id);
 
         if (!$student) {
             return response()->json(['message' => 'Không tìm thấy user'], 404);
-        }
-
-        $account = $student->account;
-
-        if (!$account) {
-            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
         }
 
         // Re-check điều kiện sinh viên để tránh race condition sau khi eligibility GET đã trả eligible=true
@@ -743,24 +764,17 @@ class RegistrationController extends Controller
 
     public function getMyRegistration(Request $request)
     {
-        $email = $request->query('email');
         $semester = $request->query('semester');
 
-        $student = Student::where('email', $email)->first();
-
-        if (!$student) {
-            return response()->json(['message' => 'Không tìm thấy user'], 404);
-        }
-
-        $account = $student->account;
-
-        if (!$account) {
-            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
-        }
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh xem đơn đăng ký của sinh viên khác.
+        $account = $request->user();
 
         if (!$account->student_id) {
             return response()->json(null);
         }
+
+        $student = Student::find($account->student_id);
 
         // Chỉ lọc theo semester khi FE truyền vào; mặc định lấy đơn mới nhất
         // của sinh viên ở bất kỳ học kỳ nào để trạng thái (submitted/approved/
@@ -775,7 +789,7 @@ class RegistrationController extends Controller
             return response()->json(null);
         }
 
-        return response()->json($this->formatRegistration($registration, $email));
+        return response()->json($this->formatRegistration($registration, $student?->email));
     }
 
     public function approve($id, Request $request)
@@ -894,14 +908,14 @@ class RegistrationController extends Controller
     public function selectBed(Request $request)
     {
         $request->validate([
-            'email' => 'required|email',
             'bed_id' => 'required|integer|exists:beds,id',
         ]);
 
-        $student = Student::where('email', $request->email)->first();
-        $account = $student?->account;
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh chọn giường thay sinh viên khác.
+        $account = $request->user();
 
-        if (!$account || !$account->student_id) {
+        if (!$account->student_id) {
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
@@ -1093,15 +1107,15 @@ class RegistrationController extends Controller
     public function requestCheckout(Request $request)
     {
         $request->validate([
-            'email' => 'required|email',
             'reason' => 'required|string|max:1000',
             'expected_leave_date' => 'nullable|date',
         ]);
 
-        $student = Student::where('email', $request->email)->first();
-        $account = $student?->account;
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh gửi yêu cầu thôi ở thay sinh viên khác.
+        $account = $request->user();
 
-        if (!$student || !$account?->student_id) {
+        if (!$account->student_id) {
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
@@ -1284,9 +1298,9 @@ class RegistrationController extends Controller
     public function show($id)
     {
         Log::info("RegistrationController.show($id) - fetching registration with id: $id");
-        
+
         $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
-        
+
         Log::info("RegistrationController.show($id) - found registration", [
             'id' => $registration?->id,
             'status' => $registration?->status,
@@ -1297,17 +1311,24 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy'], 404);
         }
 
+        // Route dùng chung role:admin,student. Admin xem được mọi đơn; sinh viên chỉ được
+        // xem đúng đơn của chính mình — tránh xem đơn đăng ký của sinh viên khác qua ID.
+        $account = request()->user();
+        if ($account && $account->role === 'student' && (int) $registration->student_id !== (int) $account->student_id) {
+            return response()->json(['message' => 'Bạn không có quyền xem đơn đăng ký này.'], 403);
+        }
+
         return response()->json($this->formatRegistration($registration));
     }
 
-    public function getRegistrationHistory($email, $semester)
+    public function getRegistrationHistory(Request $request, $email, $semester)
     {
-        Log::info("RegistrationController.getRegistrationHistory - email: $email, semester: $semester");
-        
-        $student = Student::where('email', $email)->first();
-        $account = $student?->account;
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ URL — {email} giữ nguyên trên route để không đổi URL, nhưng
+        // không còn dùng để tra cứu, tránh xem lịch sử đăng ký của sinh viên khác.
+        $account = $request->user();
 
-        if (!$account || !$account->student_id) {
+        if (!$account->student_id) {
             Log::info("RegistrationController.getRegistrationHistory - student not found");
             return response()->json([]);
         }

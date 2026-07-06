@@ -10,6 +10,7 @@ use App\Models\OccupancyPeriod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 class OccupancyPeriodController extends Controller
@@ -205,8 +206,13 @@ class OccupancyPeriodController extends Controller
 
                     try {
                         Mail::to($student->email)->send(new ExtensionPeriodOpenedMail($period, $student));
-                    } catch (\Exception) {
-                        // Individual failure should not block others
+                    } catch (\Exception $e) {
+                        Log::error('Gửi email thông báo thất bại', [
+                            'type'       => 'extension_opened',
+                            'student_id' => $student->id,
+                            'email'      => $student->email,
+                            'error'      => $e->getMessage(),
+                        ]);
                     }
                 });
         } catch (\Exception) {

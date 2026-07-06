@@ -14,9 +14,9 @@ class StoreOccupancyExtensionRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'email'      => ['nullable', 'string', 'email'],
-            'student_id' => ['nullable', 'integer'],
-            'reason'     => ['required', 'string', 'min:10', 'max:1000'],
+            // Danh tính sinh viên lấy từ $request->user() (route đã bảo vệ auth:sanctum +
+            // role:student), không nhận email/student_id từ client nữa.
+            'reason' => ['required', 'string', 'min:10', 'max:1000'],
         ];
     }
 

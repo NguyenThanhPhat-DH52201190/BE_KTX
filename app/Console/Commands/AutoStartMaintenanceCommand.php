@@ -161,7 +161,7 @@ class AutoStartMaintenanceCommand extends Command
                                  . "Bạn đã được chuyển tạm từ Giường {$oldBedNum} (Phòng {$oldRoomCode}) "
                                  . "sang Giường {$targetBed->bed_number} (Phòng {$newRoomCode}).";
                         $this->saveNotification($student->id, $title, $content, 'room_maintenance_start');
-                        $pendingEmails[] = $this->buildStudentPayload($student, $title, $content);
+                        $pendingEmails[] = $this->buildStudentPayload($student, $title, $content, 'room_maintenance_start');
                     }
                 }
 
@@ -181,7 +181,7 @@ class AutoStartMaintenanceCommand extends Command
                 $adminContent = "Hệ thống đã tự động bắt đầu bảo trì Phòng {$roomCode} hôm nay. "
                               . "Dự kiến hoàn thành: {$expectedEnd}. Sinh viên đã được di dời sang phòng tạm.";
                 $this->saveAdminNotification($adminTitle, $adminContent, 'room_maintenance_start', $mr->id);
-                $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent);
+                $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent, 'room_maintenance_start');
             });
 
             foreach ($pendingEmails as $payload) {
@@ -229,26 +229,28 @@ class AutoStartMaintenanceCommand extends Command
         } catch (\Exception) {}
     }
 
-    private function buildStudentPayload(object $student, string $title, string $content): array
+    private function buildStudentPayload(object $student, string $title, string $content, ?string $type = null): array
     {
         $name   = htmlspecialchars($student->full_name ?? '');
         $eTitle = htmlspecialchars($title);
         $eBody  = nl2br(htmlspecialchars($content));
 
         return [
-            'email'   => $student->email ?? '',
-            'name'    => $student->full_name ?? '',
-            'subject' => 'KTX — ' . $title,
-            'body'    => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
+            'email'      => $student->email ?? '',
+            'name'       => $student->full_name ?? '',
+            'subject'    => 'KTX — ' . $title,
+            'body'       => "<div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1f3152'>
                 <h2 style='color:#244cb8;margin-top:0'>{$eTitle}</h2>
                 <p>Xin chào <strong>{$name}</strong>,</p>
                 <p>{$eBody}</p>
                 <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
             </div>",
+            'type'       => $type,
+            'student_id' => $student->id,
         ];
     }
 
-    private function buildAdminPayload(string $title, string $content): array
+    private function buildAdminPayload(string $title, string $content, ?string $type = null): array
     {
         $adminEmails = Account::where('role', 'admin')
             ->with('student')
@@ -268,6 +270,7 @@ class AutoStartMaintenanceCommand extends Command
                 <p>" . nl2br(htmlspecialchars($content)) . "</p>
                 <p style='color:#6b7280;font-size:12px;margin-top:32px'>Email này được gửi tự động bởi hệ thống quản lý KTX.</p>
             </div>",
+            'type'         => $type,
         ];
     }
 
@@ -280,7 +283,13 @@ class AutoStartMaintenanceCommand extends Command
                     Mail::send([], [], function ($message) use ($email, $payload) {
                         $message->to($email)->subject($payload['subject'])->html($payload['body']);
                     });
-                } catch (\Exception) {}
+                } catch (\Exception $e) {
+                    Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
+                        'type'  => $payload['type'] ?? null,
+                        'email' => $email,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
             }
             return;
         }
@@ -294,6 +303,13 @@ class AutoStartMaintenanceCommand extends Command
                     ->subject($payload['subject'])
                     ->html($payload['body']);
             });
-        } catch (\Exception) {}
+        } catch (\Exception $e) {
+            Log::error('Gửi email thông báo bảo trì thất bại', [
+                'type'       => $payload['type'] ?? null,
+                'student_id' => $payload['student_id'] ?? null,
+                'email'      => $payload['email'],
+                'error'      => $e->getMessage(),
+            ]);
+        }
     }
 }

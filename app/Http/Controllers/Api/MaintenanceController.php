@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 class MaintenanceController extends Controller
@@ -263,6 +264,17 @@ class MaintenanceController extends Controller
             'affected' => $assignments->all(),
             'options' => $options->all(),
             'can_start' => $occupancies->count() <= $options->count(),
+        ]);
+    }
+
+    public function getRequestRoom(int $requestId): JsonResponse
+    {
+        $maintenanceRequest = MaintenanceRequest::query()->findOrFail($requestId);
+        $room = Room::query()->with('floor')->findOrFail($maintenanceRequest->room_id);
+
+        return response()->json([
+            'room_id'   => $room->id,
+            'room_code' => $this->roomCode($room),
         ]);
     }
 
@@ -846,7 +858,13 @@ class MaintenanceController extends Controller
                     Mail::send([], [], function ($message) use ($email, $data) {
                         $message->to($email)->subject($data['subject'])->html($data['body']);
                     });
-                } catch (\Exception) {}
+                } catch (\Exception $e) {
+                    Log::error('Gửi email thông báo bảo trì (admin) thất bại', [
+                        'email'   => $email,
+                        'subject' => $data['subject'] ?? null,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
             }
             return;
         }
@@ -860,7 +878,13 @@ class MaintenanceController extends Controller
                     ->subject($data['subject'])
                     ->html($data['body']);
             });
-        } catch (\Exception) {}
+        } catch (\Exception $e) {
+            Log::error('Gửi email thông báo bảo trì thất bại', [
+                'email'   => $data['email'],
+                'subject' => $data['subject'] ?? null,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     private function insertRoomChangeLog(

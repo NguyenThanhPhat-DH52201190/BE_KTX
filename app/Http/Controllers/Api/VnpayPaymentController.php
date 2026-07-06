@@ -20,7 +20,6 @@ class VnpayPaymentController extends Controller
         $validator = Validator::make($request->all(), [
             'source' => ['required', 'string', 'in:room_fee,electricity'],
             'bill_id' => ['required', 'integer'],
-            'email' => ['required', 'email'],
         ]);
 
         if ($validator->fails()) {
@@ -33,8 +32,10 @@ class VnpayPaymentController extends Controller
             return response()->json(['message' => 'Khong tim thay hoa don.'], 404);
         }
 
-        $studentEmail = trim((string) ($bill->student?->email ?? ''));
-        if (strcasecmp($studentEmail, trim((string) $request->input('email'))) !== 0) {
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh 1 sinh viên tạo link thanh toán thay người khác.
+        $account = $request->user();
+        if ((int) $bill->student_id !== (int) $account->student_id) {
             return response()->json(['message' => 'Hoa don khong thuoc sinh vien nay.'], 403);
         }
 
