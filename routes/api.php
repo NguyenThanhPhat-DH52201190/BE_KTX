@@ -92,6 +92,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/registration/history/{email}/{semester?}', [RegistrationController::class, 'getRegistrationHistory']);
         Route::put('/registration/select-bed', [RegistrationController::class, 'selectBed']);
         Route::put('/registration/request-checkout', [RegistrationController::class, 'requestCheckout']);
+        Route::put('/registration/cancel-checkout', [RegistrationController::class, 'cancelCheckout']);
     });
 
     Route::middleware('role:admin')->group(function () {

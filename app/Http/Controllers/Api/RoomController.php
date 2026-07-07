@@ -381,6 +381,10 @@ class RoomController extends Controller
                         'check_in_date' => $occupancy->check_in_date,
                         'check_out_date' => $occupancy->check_out_date,
                         'status' => $occupancy->status,
+                        'checkout_request' => $occupancy->pendingCheckoutRequest ? [
+                            'expected_leave_date' => $occupancy->pendingCheckoutRequest->expected_leave_date?->toDateString(),
+                            'reason' => $occupancy->pendingCheckoutRequest->reason,
+                        ] : null,
                     ] : null,
                     'temporary_assignment' => $temporaryLog ? [
                         'is_temporary' => true,

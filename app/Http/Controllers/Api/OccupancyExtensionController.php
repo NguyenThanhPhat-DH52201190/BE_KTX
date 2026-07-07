@@ -167,6 +167,10 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Bạn không có lưu trú đang hoạt động.'], 422);
         }
 
+        if ($occupancy->pendingCheckoutRequest) {
+            return response()->json(['message' => 'Bạn đang có yêu cầu thôi ở đang chờ duyệt, vui lòng xử lý xong yêu cầu đó trước.'], 422);
+        }
+
         $period = OccupancyPeriod::where('status', 'open')->first();
 
         if (!$period) {

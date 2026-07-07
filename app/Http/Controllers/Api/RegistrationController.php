@@ -9,6 +9,8 @@ use App\Models\Registration;
 use App\Models\RegistrationPeriod;
 use App\Models\Occupancy;
 use App\Models\CheckoutRequest;
+use App\Models\OccupancyExtension;
+use App\Models\AdminNotification;
 use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
@@ -127,6 +129,12 @@ class RegistrationController extends Controller
             'bed_approval_status' => $registration->occupancy?->bed_approval_status,
             'occupancy_status' => $this->mapOccupancyStatus($registration->occupancy),
             'checkout_requested' => (bool) ($registration->occupancy?->pendingCheckoutRequest),
+            'checkout_request' => $registration->occupancy?->pendingCheckoutRequest ? [
+                'id' => $registration->occupancy->pendingCheckoutRequest->id,
+                'reason' => $registration->occupancy->pendingCheckoutRequest->reason,
+                'expected_leave_date' => $registration->occupancy->pendingCheckoutRequest->expected_leave_date?->toDateString(),
+                'created_at' => $registration->occupancy->pendingCheckoutRequest->created_at,
+            ] : null,
             'occupancy_reason' => $registration->occupancy?->reason,
             'check_in_date' => $registration->occupancy?->check_in_date,
             'check_out_date' => $registration->occupancy?->check_out_date,
@@ -1115,7 +1123,7 @@ class RegistrationController extends Controller
     {
         $request->validate([
             'reason' => 'required|string|max:1000',
-            'expected_leave_date' => 'nullable|date',
+            'expected_leave_date' => 'required|date|after_or_equal:today',
         ]);
 
         // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
@@ -1138,6 +1146,14 @@ class RegistrationController extends Controller
 
         $occupancy = $registration->occupancy;
 
+        // Ngày dự kiến rời phải trước ngày kết thúc lưu trú hiện tại (hạn hợp đồng gốc).
+        if ($occupancy->check_out_date
+            && !Carbon::parse($request->expected_leave_date)->lt(Carbon::parse($occupancy->check_out_date))) {
+            return response()->json([
+                'message' => 'Ngày rời phải trước ngày kết thúc lưu trú dự kiến (' . Carbon::parse($occupancy->check_out_date)->format('d/m/Y') . ').',
+            ], 422);
+        }
+
         // Mỗi occupancy chỉ có 1 yêu cầu thôi ở đang chờ duyệt.
         $hasPending = CheckoutRequest::where('occupancy_id', $occupancy->id)
             ->where('status', 'pending')
@@ -1146,19 +1162,73 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Đã có yêu cầu thôi ở đang chờ duyệt.'], 422);
         }
 
-        // Student requested checkout; stays ACTIVE until admin confirms.
+        // Không cho gửi yêu cầu thôi ở khi đang có yêu cầu gia hạn lưu trú chờ duyệt.
+        $hasPendingExtension = OccupancyExtension::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->exists();
+        if ($hasPendingExtension) {
+            return response()->json(['message' => 'Bạn đang có yêu cầu gia hạn lưu trú đang chờ duyệt, vui lòng xử lý xong yêu cầu đó trước.'], 422);
+        }
+
+        // Student requested checkout; occupancy stays ACTIVE (kể cả check_out_date) cho tới khi admin confirm.
         CheckoutRequest::create([
             'occupancy_id' => $occupancy->id,
             'student_id' => $occupancy->student_id ?? $account->student_id,
             'reason' => $request->reason,
-            'expected_leave_date' => $request->expected_leave_date ?? now()->toDateString(),
+            'expected_leave_date' => $request->expected_leave_date,
             'status' => 'pending',
         ]);
 
-        // Giữ hiển thị hiện có: lưu lý do/ngày dự kiến lên occupancy (vẫn ACTIVE).
-        $occupancy->reason = $request->reason;
-        $occupancy->check_out_date = $request->expected_leave_date;
-        $occupancy->save();
+        if ($registration->student) {
+            AdminNotification::create([
+                'title' => 'Yêu cầu thôi ở mới',
+                'content' => "Sinh viên {$registration->student->full_name} ({$registration->student->student_code}) vừa gửi yêu cầu thôi ở.",
+                'type' => 'checkout_requested',
+                'related_id' => $occupancy->id,
+                'created_at' => now(),
+            ]);
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])));
+    }
+
+    public function cancelCheckout(Request $request)
+    {
+        $account = $request->user();
+
+        if (!$account->student_id) {
+            return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
+        }
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])
+            ->where('student_id', $account->student_id)
+            ->where('status', 'approved')
+            ->latest('id')
+            ->first();
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Sinh viên chưa có thông tin lưu trú.'], 404);
+        }
+
+        $checkoutRequest = CheckoutRequest::where('occupancy_id', $registration->occupancy->id)
+            ->where('status', 'pending')
+            ->first();
+
+        if (!$checkoutRequest) {
+            return response()->json(['message' => 'Không có yêu cầu thôi ở nào đang chờ duyệt.'], 404);
+        }
+
+        $checkoutRequest->update(['status' => 'cancelled', 'processed_at' => now()]);
+
+        if ($registration->student) {
+            AdminNotification::create([
+                'title' => 'Sinh viên đã hủy yêu cầu thôi ở',
+                'content' => "Sinh viên {$registration->student->full_name} ({$registration->student->student_code}) đã hủy yêu cầu thôi ở trước đó.",
+                'type' => 'checkout_requested',
+                'related_id' => $registration->occupancy->id,
+                'created_at' => now(),
+            ]);
+        }
 
         return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])));
     }
@@ -1191,14 +1261,20 @@ class RegistrationController extends Controller
                 })
                 ->delete();
 
+            // Ngày rời thực tế = ngày sinh viên đã đề nghị trong yêu cầu thôi ở (nếu có),
+            // vì check_out_date của occupancy không còn bị ghi đè lúc gửi yêu cầu nữa.
+            $pendingCheckout = CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->first();
+
             $occupancy->status         = 'COMPLETED';
-            $occupancy->check_out_date = $occupancy->check_out_date ?? now()->toDateString();
+            $occupancy->check_out_date = $pendingCheckout?->expected_leave_date?->toDateString() ?? now()->toDateString();
             $occupancy->save();
 
             // Chốt yêu cầu thôi ở đang chờ (nếu có).
-            CheckoutRequest::where('occupancy_id', $occupancy->id)
-                ->where('status', 'pending')
-                ->update(['status' => 'approved', 'processed_at' => now()]);
+            if ($pendingCheckout) {
+                $pendingCheckout->update(['status' => 'approved', 'processed_at' => now()]);
+            }
 
             $bed = Bed::find($occupancy->bed_id);
             if ($bed && strtolower((string) $bed->status) !== 'maintenance') {

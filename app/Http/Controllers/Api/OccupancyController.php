@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Activity;
+use App\Models\CheckoutRequest;
+use App\Models\ElectricityBill;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
 use App\Models\StudentSupportRequest;
@@ -112,6 +114,28 @@ class OccupancyController extends Controller
             ->where('status', '!=', 'paid')
             ->sum('amount');
 
+        // Nợ UNPAID/OVERDUE (tiền phòng + tiền điện) — chỉ để hiển thị thông tin cho admin
+        // trước khi duyệt thôi ở, KHÔNG dùng để chặn duyệt.
+        $unpaidDebt = (int) RoomFeeBill::query()
+                ->where('occupancy_id', $occupancy->id)
+                ->whereIn('status', ['unpaid', 'overdue'])
+                ->sum('amount')
+            + (int) ElectricityBill::query()
+                ->where('occupancy_id', $occupancy->id)
+                ->whereIn('status', ['unpaid', 'overdue'])
+                ->sum('amount');
+
+        $checkoutRequest = $occupancy->pendingCheckoutRequest;
+
+        // Nếu KHÔNG có yêu cầu pending, kiểm tra xem có yêu cầu nào vừa bị sinh viên tự hủy không —
+        // để admin (vào từ thông báo cũ) hiểu rõ lý do không còn thấy khung yêu cầu, tránh tưởng nhầm lỗi.
+        $cancelledCheckoutRequest = $checkoutRequest
+            ? null
+            : CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'cancelled')
+                ->latest('id')
+                ->first();
+
         // Support requests for this student
         $supportRequests = StudentSupportRequest::query()
             ->where('student_id', $occupancy->student_id)
@@ -172,6 +196,17 @@ class OccupancyController extends Controller
             'recent_violations'   => $recentViolations,
             'current_invoice'     => $currentInvoice,
             'total_debt'          => $totalDebt,
+            'unpaid_debt'         => $unpaidDebt,
+            'checkout_request'    => $checkoutRequest ? [
+                'id' => $checkoutRequest->id,
+                'reason' => $checkoutRequest->reason,
+                'expected_leave_date' => $checkoutRequest->expected_leave_date?->toDateString(),
+                'created_at' => $checkoutRequest->created_at,
+            ] : null,
+            'cancelled_checkout_request' => $cancelledCheckoutRequest ? [
+                'id' => $cancelledCheckoutRequest->id,
+                'cancelled_at' => $cancelledCheckoutRequest->processed_at ?? $cancelledCheckoutRequest->updated_at,
+            ] : null,
             'support_requests'    => $supportRequests,
             'room_change_history' => $roomChangeHistory,
         ]);
