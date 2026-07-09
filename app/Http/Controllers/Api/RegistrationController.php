@@ -445,6 +445,31 @@ class RegistrationController extends Controller
             ]);
         }
 
+        // Check 7b: đợt đăng ký giới hạn theo năm học, dựa trên tổ hợp 2 cờ cấu hình đợt:
+        // - Bật cả "Cho phép tân sinh viên chưa MSSV" + "Yêu cầu MSSV": đợt dành riêng cho lứa
+        //   tân sinh viên (dù đã có MSSV hay chưa) — chỉ sinh viên năm 1 được đăng ký qua kênh này.
+        // - Chỉ bật "Yêu cầu MSSV" (không cho phép tân sinh viên chưa MSSV): đợt dành cho sinh
+        //   viên cũ (không phải năm 1) đăng ký lại/tiếp tục.
+        if ($activePeriod->requires_student_code) {
+            $isFirstYear = (int) ($student->current_year ?? 0) === 1;
+
+            if ($activePeriod->allow_admission_candidates && !$isFirstYear) {
+                return response()->json([
+                    'eligible'       => false,
+                    'reason_code'    => 'not_first_year',
+                    'reason_message' => 'Đợt đăng ký này chỉ dành cho tân sinh viên năm nhất.',
+                ]);
+            }
+
+            if (!$activePeriod->allow_admission_candidates && $isFirstYear) {
+                return response()->json([
+                    'eligible'       => false,
+                    'reason_code'    => 'first_year_not_allowed',
+                    'reason_message' => 'Đợt đăng ký này không dành cho sinh viên năm nhất.',
+                ]);
+            }
+        }
+
         // Check 8: Đủ điều kiện (active hoặc pending)
         return response()->json([
             'eligible'     => true,
@@ -537,6 +562,19 @@ class RegistrationController extends Controller
         $activePeriod = RegistrationPeriod::where('status', 'active')->first();
         if (!$activePeriod) {
             return response()->json(['message' => 'Hiện không có đợt đăng ký nào đang mở', 'reason_code' => 'no_open_channel'], 422);
+        }
+
+        // Re-check giới hạn năm học theo cấu hình đợt — xem giải thích ở eligibility() Check 7b.
+        if ($activePeriod->requires_student_code) {
+            $isFirstYear = (int) ($student->current_year ?? 0) === 1;
+
+            if ($activePeriod->allow_admission_candidates && !$isFirstYear) {
+                return response()->json(['message' => 'Đợt đăng ký này chỉ dành cho tân sinh viên năm nhất.', 'reason_code' => 'not_first_year'], 422);
+            }
+
+            if (!$activePeriod->allow_admission_candidates && $isFirstYear) {
+                return response()->json(['message' => 'Đợt đăng ký này không dành cho sinh viên năm nhất.', 'reason_code' => 'first_year_not_allowed'], 422);
+            }
         }
 
         $currentStudent = $student;
