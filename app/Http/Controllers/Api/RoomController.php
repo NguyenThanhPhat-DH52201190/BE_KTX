@@ -10,7 +10,6 @@ use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
 use App\Models\Student;
-use App\Models\StudentSupportRequest;
 use App\Services\RoomChangeLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -183,14 +182,6 @@ class RoomController extends Controller
             ->whereIn('id', $historyLogs->pluck('occupancy_id')->filter()->unique()->all())
             ->get()
             ->keyBy('id');
-        $historySupportRequests = StudentSupportRequest::query()
-            ->whereIn('student_id', $historyOccupancies->pluck('student_id')->filter()->unique()->all())
-            ->whereIn('target_bed_id', $historyLogs->pluck('new_bed_id')->filter()->unique()->all())
-            ->whereIn('request_type', ['room_change', 'bed_change', 'roommate_request'])
-            ->where('status', 'completed')
-            ->orderByDesc('id')
-            ->get()
-            ->groupBy(fn (StudentSupportRequest $request) => ((int) $request->student_id) . ':' . ((int) $request->target_bed_id));
         $historyBedIds = $historyLogs
             ->flatMap(fn ($log) => [$log->old_bed_id, $log->new_bed_id])
             ->filter()
@@ -225,7 +216,6 @@ class RoomController extends Controller
             $temporaryBeds,
             $historyLogs,
             $historyOccupancies,
-            $historySupportRequests,
             $historyBeds,
             $historyRooms,
             $roomInMaintenance,
@@ -262,7 +252,7 @@ class RoomController extends Controller
                 return $room ? (($room->floor?->building_code ?? '') . $room->room_number) : null;
             };
 
-            $formatHistory = function ($log) use ($historyOccupancies, $historySupportRequests, $historyBeds, $historyRooms) {
+            $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms) {
                 $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
                 $oldRoom = $historyRooms->get($log->old_room_id);
                 $newRoom = $historyRooms->get($log->new_room_id);
@@ -270,7 +260,7 @@ class RoomController extends Controller
                 $newBed = $historyBeds->get($log->new_bed_id);
                 // resolveHistoryReason()/buildLabel() cần old_room_code cho câu "Chuyển tạm do bảo trì phòng X".
                 $log->old_room_code = $oldRoom ? (($oldRoom->floor?->building_code ?? '') . $oldRoom->room_number) : null;
-                $reason = $this->resolveHistoryReason($log, $historyOccupancy, $historySupportRequests);
+                $reason = $this->resolveHistoryReason($log);
 
                 return [
                     'id' => $log->id,
@@ -431,7 +421,7 @@ class RoomController extends Controller
             : url('/storage/' . $cleanPath);
     }
 
-    private function resolveHistoryReason(object $log, ?Occupancy $historyOccupancy, $historySupportRequests): ?string
+    private function resolveHistoryReason(object $log): ?string
     {
         $reason = $log->transfer_reason;
         $studentRequestReasons = [
@@ -444,32 +434,7 @@ class RoomController extends Controller
             return RoomChangeLogService::buildLabel($log);
         }
 
-        $studentId = $historyOccupancy?->student_id;
-        $targetBedId = $log->new_bed_id;
-        $supportRequest = ($studentId && $targetBedId)
-            ? $historySupportRequests->get(((int) $studentId) . ':' . ((int) $targetBedId))?->first()
-            : null;
-
-        return $this->extractSupportRequestReason($supportRequest?->content)
-            ?? $studentRequestReasons[(string) $reason];
-    }
-
-    private function extractSupportRequestReason(?string $content): ?string
-    {
-        foreach (preg_split('/\R/u', (string) $content) ?: [] as $line) {
-            $line = trim((string) $line);
-            if (
-                preg_match('/^Lý do\s*:\s*(.+)$/u', $line, $matches)
-                || preg_match('/^Ly do\s*:\s*(.+)$/iu', $line, $matches)
-            ) {
-                $reason = trim((string) ($matches[1] ?? ''));
-                if ($reason !== '' && $reason !== '-') {
-                    return $reason;
-                }
-            }
-        }
-
-        return null;
+        return $studentRequestReasons[(string) $reason];
     }
 
     public function updateBed(Request $request, int $roomId, int $bedId): JsonResponse

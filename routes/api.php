@@ -70,7 +70,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/student/payments', [StudentPaymentController::class, 'myBills']);
         Route::post('/student/payments/room-fee-bills/{id}/confirm-free', [StudentPaymentController::class, 'confirmFree']);
         Route::get('/student/support-requests', [StudentSupportRequestController::class, 'studentIndex']);
-        Route::get('/student/support-requests/roommate-target', [StudentSupportRequestController::class, 'roommateTarget']);
         Route::get('/student/support-requests/{id}', [StudentSupportRequestController::class, 'studentShow']);
         Route::post('/student/support-requests', [StudentSupportRequestController::class, 'store']);
         Route::get('/student/notifications/unread-count', [NotificationController::class, 'unreadCount']);

@@ -7,6 +7,7 @@ use App\Mail\ExtensionPeriodOpenedMail;
 use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\OccupancyPeriod;
+use App\Models\RegistrationPeriod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -49,9 +50,10 @@ class OccupancyPeriodController extends Controller
 
         if (! $targetDate) {
             return response()->json([
-                'target_check_out_date' => null,
-                'suggested_open_date'   => null,
-                'students_count'        => 0,
+                'target_check_out_date'   => null,
+                'suggested_open_date'     => null,
+                'students_count'          => 0,
+                'extension_until_date'    => $this->computeExtensionUntilDate(),
             ]);
         }
 
@@ -63,6 +65,7 @@ class OccupancyPeriodController extends Controller
             'target_check_out_date' => $targetDate,
             'suggested_open_date'   => $this->computeSuggestedOpenDate($targetDate),
             'students_count'        => $studentsCount,
+            'extension_until_date'  => $this->computeExtensionUntilDate(),
         ]);
     }
 
@@ -99,7 +102,7 @@ class OccupancyPeriodController extends Controller
             'name'                 => ['sometimes', 'string', 'max:191'],
             'start_date'           => ['sometimes', 'date'],
             'end_date'             => ['sometimes', 'date', 'after_or_equal:start_date'],
-            'extension_until_date' => ['nullable', 'date'],
+            'extension_until_date' => ['nullable', 'date', 'after_or_equal:end_date'],
             'description'          => ['nullable', 'string'],
         ]);
 
@@ -131,6 +134,21 @@ class OccupancyPeriodController extends Controller
         if (! $period->extension_until_date) {
             return response()->json([
                 'message' => 'Vui lòng điền ngày "Gia hạn lưu trú đến" trước khi mở đợt.',
+            ], 422);
+        }
+
+        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date) — xem
+        // OccupancyExtensionController::store() dòng chặn "check_out_date !== period->end_date".
+        // Nếu không có occupancy ACTIVE nào thực sự hết hạn đúng ngày này, mở đợt sẽ gửi thông
+        // báo/email sai tới toàn bộ sinh viên đang ở mà không ai nộp đơn thành công được.
+        $hasMatchingOccupancy = Occupancy::where('status', 'ACTIVE')
+            ->where('check_out_date', $period->end_date?->toDateString())
+            ->exists();
+
+        if (! $hasMatchingOccupancy) {
+            return response()->json([
+                'message' => 'Không có sinh viên nào đang lưu trú (ACTIVE) có ngày kết thúc khớp với "Ngày kết thúc nhận đơn" ('
+                    . $period->end_date?->format('d/m/Y') . ') của đợt này. Vui lòng kiểm tra lại cấu hình đợt trước khi mở.',
             ], 422);
         }
 
@@ -190,6 +208,24 @@ class OccupancyPeriodController extends Controller
     private function computeSuggestedOpenDate(string $targetCheckOutDate): string
     {
         return \Carbon\Carbon::parse($targetCheckOutDate)->startOfMonth()->subMonth()->toDateString();
+    }
+
+    /**
+     * Gia hạn lưu trú đến = stay_end_date của registration_period (mốc lưu trú chính thức,
+     * nguồn gốc thật của check_out_date mọi occupancy) + 1 năm. Tính tự động từ dữ liệu gốc,
+     * không suy ra từ end_date admin gõ tay ở form đợt gia hạn — tránh lệch mốc với thực tế
+     * (xem lịch sử bug: admin từng nhập tay 1 ngày không khớp check_out_date của occupancy nào).
+     * Lấy registration_period có stay_end_date mới nhất (đại diện cho lứa sinh viên hiện tại).
+     */
+    private function computeExtensionUntilDate(): ?string
+    {
+        $stayEndDate = RegistrationPeriod::orderByDesc('stay_end_date')->value('stay_end_date');
+
+        if (! $stayEndDate) {
+            return null;
+        }
+
+        return \Carbon\Carbon::parse($stayEndDate)->addYear()->toDateString();
     }
 
     private function appendSuggestedOpenDate(OccupancyPeriod $period): void

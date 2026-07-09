@@ -129,7 +129,7 @@ class StudentDashboardController extends Controller
         $pendingRequests = StudentSupportRequest::where('student_id', $student->id)
             ->whereIn('status', ['pending', 'processing'])
             ->orderByDesc('created_at')
-            ->get(['id', 'title', 'request_type', 'status', 'created_at']);
+            ->get(['id', 'title', 'status', 'created_at']);
 
         // 5. Recent activities (5)
         $recentActivities = collect();

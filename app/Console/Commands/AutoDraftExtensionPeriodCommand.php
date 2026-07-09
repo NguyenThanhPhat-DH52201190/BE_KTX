@@ -69,14 +69,14 @@ class AutoDraftExtensionPeriodCommand extends Command
             'name'                 => "Đợt gia hạn lưu trú {$label}",
             'start_date'           => $today->toDateString(),
             'end_date'             => $earliest,
-            'extension_until_date' => null,
+            'extension_until_date' => Carbon::parse($earliest)->addYear()->toDateString(),
             'status'               => 'draft',
             'description'          => "Tạo tự động — {$count} sinh viên có lưu trú hết hạn đúng ngày {$earliest}. "
-                . 'Vui lòng điền "Gia hạn lưu trú đến" rồi bấm Mở đợt.',
+                . 'Vui lòng kiểm tra rồi bấm Mở đợt.',
         ]);
 
         $this->info("Đã tạo bản nháp #{$period->id}: \"{$period->name}\".");
-        $this->warn('Admin cần điền ngày "Gia hạn lưu trú đến" và mở đợt tại trang Quản lý đợt gia hạn.');
+        $this->warn('Admin cần kiểm tra và mở đợt tại trang Quản lý đợt gia hạn.');
 
         Log::info("[AutoDraftExtensionPeriod] Tạo bản nháp #{$period->id} ({$count} sinh viên sắp hết hạn, sớm nhất {$earliest}).");
 

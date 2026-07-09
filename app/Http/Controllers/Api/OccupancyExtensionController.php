@@ -14,6 +14,7 @@ use App\Models\OccupancyExtension;
 use App\Models\OccupancyPeriod;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
+use App\Services\RoomFeeBillingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -228,7 +229,12 @@ class OccupancyExtensionController extends Controller
                 // Phải COMPLETED trước để tránh vi phạm unique(student_id)
                 $occupancy->update(['status' => 'COMPLETED']);
 
-                return Occupancy::create([
+                // withoutEvents: tạo thẳng với status=ACTIVE sẽ khiến OccupancyObserver::created()
+                // tự chạy createBillsOnActivation() — thuật toán pro-rate đơn giản, KHÔNG gộp quý
+                // khi vào giữa tháng. Tắt observer ở bước tạo để tự gọi đúng createInitialBill()
+                // ngay dưới đây (cùng logic hóa đơn tháng đầu + gộp quý như luồng đăng ký mới ở
+                // RegistrationController::selectBed()), tránh 2 luồng sinh 2 kiểu hóa đơn khác nhau.
+                $newOccupancy = Occupancy::withoutEvents(fn () => Occupancy::create([
                     'student_id'            => $occupancy->student_id,
                     'registration_id'       => $occupancy->registration_id,
                     'room_id'               => $occupancy->room_id,
@@ -239,7 +245,11 @@ class OccupancyExtensionController extends Controller
                     'bed_approval_status'   => 'approved',
                     'reason'                => 'Gia hạn lưu trú',
                     'previous_occupancy_id' => $occupancy->id,
-                ]);
+                ]));
+
+                app(RoomFeeBillingService::class)->createInitialBill($newOccupancy);
+
+                return $newOccupancy;
             });
 
             $newOccupancy->load(['room', 'bed']);
@@ -344,7 +354,10 @@ class OccupancyExtensionController extends Controller
                     $occupancy->update(['status' => 'COMPLETED']);
                 }
 
-                $newOccupancy = Occupancy::create([
+                // withoutEvents + createInitialBill(): xem giải thích ở store() — tránh
+                // OccupancyObserver tự sinh bill pro-rate đơn giản thay vì bill full tháng +
+                // gộp quý đúng chuẩn.
+                $newOccupancy = Occupancy::withoutEvents(fn () => Occupancy::create([
                     'student_id'            => $occupancy->student_id,
                     'registration_id'       => $occupancy->registration_id,
                     'room_id'               => $occupancy->room_id,
@@ -355,7 +368,9 @@ class OccupancyExtensionController extends Controller
                     'bed_approval_status'   => 'approved',
                     'reason'                => 'Gia hạn lưu trú',
                     'previous_occupancy_id' => $occupancy->id,
-                ]);
+                ]));
+
+                app(RoomFeeBillingService::class)->createInitialBill($newOccupancy);
             }
         });
 

@@ -143,7 +143,6 @@ class OccupancyController extends Controller
             ->get()
             ->map(fn (StudentSupportRequest $r) => [
                 'id'           => $r->id,
-                'request_type' => $r->request_type,
                 'title'        => $r->title,
                 'status'       => $r->status,
                 'created_at'   => $r->created_at?->toDateString(),
