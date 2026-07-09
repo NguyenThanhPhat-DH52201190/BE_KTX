@@ -65,10 +65,16 @@ class AutoDraftExtensionPeriodCommand extends Command
             return self::SUCCESS;
         }
 
+        // Ngày bắt đầu/kết thúc nhận đơn = 1 tháng trước ngày dọn ra thật, cửa sổ nhận đơn 1 tuần.
+        // Không đặt end_date = $earliest (ngày dọn ra thật) — end_date chỉ là hạn chót nhận đơn,
+        // xem RegistrationPeriod::currentStayEndDate() là nguồn thật cho việc khớp check_out_date.
+        $startDate = Carbon::parse($earliest)->subMonth();
+        $endDate   = $startDate->copy()->addDays(7);
+
         $period = OccupancyPeriod::create([
             'name'                 => "Đợt gia hạn lưu trú {$label}",
-            'start_date'           => $today->toDateString(),
-            'end_date'             => $earliest,
+            'start_date'           => $startDate->toDateString(),
+            'end_date'             => $endDate->toDateString(),
             'extension_until_date' => Carbon::parse($earliest)->addYear()->toDateString(),
             'status'               => 'draft',
             'description'          => "Tạo tự động — {$count} sinh viên có lưu trú hết hạn đúng ngày {$earliest}. "

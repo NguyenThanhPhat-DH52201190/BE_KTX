@@ -55,4 +55,14 @@ class RegistrationPeriod extends Model
     {
         return $this->hasMany(DormReservation::class);
     }
+
+    /**
+     * Ngày kết thúc lưu trú thật của lứa sinh viên hiện tại — nguồn duy nhất để xác định
+     * occupancy nào đủ điều kiện gia hạn (KHÔNG dùng OccupancyPeriod::end_date, vì field đó
+     * chỉ là hạn chót nhận đơn, không nhất thiết trùng ngày dọn ra thật).
+     */
+    public static function currentStayEndDate(): ?string
+    {
+        return static::orderByDesc('stay_end_date')->value('stay_end_date');
+    }
 }

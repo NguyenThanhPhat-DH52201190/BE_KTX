@@ -12,6 +12,7 @@ use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\OccupancyExtension;
 use App\Models\OccupancyPeriod;
+use App\Models\RegistrationPeriod;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
 use App\Services\RoomFeeBillingService;
@@ -178,14 +179,17 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Hiện không có đợt gia hạn nào đang mở.'], 422);
         }
 
-        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date). Nếu lưu
-        // trú của sinh viên có ngày kết thúc khác mốc này (VD do dữ liệu lệch từ trước, hoặc SV
-        // thuộc nhóm hết hạn ở một đợt khác), không cho nộp đơn vào nhầm đợt.
-        if ($occupancy->check_out_date !== $period->end_date?->toDateString()) {
+        // Đợt gia hạn chỉ phục vụ ĐÚNG lứa sinh viên có check_out_date = stay_end_date thật
+        // (RegistrationPeriod::currentStayEndDate()) — KHÔNG dùng period->end_date, vì field đó
+        // chỉ là hạn chót nhận đơn, không phải ngày dọn ra thật. Nếu lưu trú của sinh viên có
+        // ngày kết thúc khác mốc này (VD do dữ liệu lệch từ trước), không cho nộp đơn nhầm đợt.
+        $stayEndDate = RegistrationPeriod::currentStayEndDate();
+        if ($occupancy->check_out_date !== $stayEndDate) {
             return response()->json([
                 'message' => 'Lưu trú của bạn có ngày kết thúc (' . \Carbon\Carbon::parse($occupancy->check_out_date)->format('d/m/Y')
-                    . ') không khớp với mốc mà đợt gia hạn "' . $period->name . '" đang phục vụ ('
-                    . $period->end_date?->format('d/m/Y') . '). Vui lòng liên hệ quản trị viên để kiểm tra lại.',
+                    . ') không khớp với ngày kết thúc lưu trú hiện tại ('
+                    . ($stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->format('d/m/Y') : 'chưa xác định')
+                    . '). Vui lòng liên hệ quản trị viên để kiểm tra lại.',
             ], 422);
         }
 
@@ -312,15 +316,17 @@ class OccupancyExtensionController extends Controller
         $occupancyForValidation = $extension->occupancy;
         $periodForValidation    = $extension->occupancyPeriod;
 
-        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date). Nếu lưu
-        // trú không khớp mốc này (VD dữ liệu lệch phát sinh sau khi đơn đã được nộp), từ chối
-        // duyệt thay vì âm thầm gán sai ngày.
+        // Đợt gia hạn chỉ phục vụ ĐÚNG lứa sinh viên có check_out_date = stay_end_date thật.
+        // Nếu lưu trú không khớp mốc này (VD dữ liệu lệch phát sinh sau khi đơn đã được nộp),
+        // từ chối duyệt thay vì âm thầm gán sai ngày.
+        $stayEndDateForValidation = RegistrationPeriod::currentStayEndDate();
         if ($occupancyForValidation && $periodForValidation
-            && $occupancyForValidation->check_out_date !== $periodForValidation->end_date?->toDateString()) {
+            && $occupancyForValidation->check_out_date !== $stayEndDateForValidation) {
             return response()->json([
                 'message' => 'Lưu trú này có ngày kết thúc (' . \Carbon\Carbon::parse($occupancyForValidation->check_out_date)->format('d/m/Y')
-                    . ') không khớp với mốc mà đợt gia hạn "' . $periodForValidation->name . '" đang phục vụ ('
-                    . $periodForValidation->end_date?->format('d/m/Y') . '). Không thể duyệt.',
+                    . ') không khớp với ngày kết thúc lưu trú hiện tại ('
+                    . ($stayEndDateForValidation ? \Carbon\Carbon::parse($stayEndDateForValidation)->format('d/m/Y') : 'chưa xác định')
+                    . '). Không thể duyệt.',
             ], 422);
         }
 

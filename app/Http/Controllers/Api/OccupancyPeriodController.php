@@ -48,12 +48,16 @@ class OccupancyPeriodController extends Controller
             ->orderBy('check_out_date')
             ->value('check_out_date');
 
+        $window = $this->computeApplicationWindow();
+
         if (! $targetDate) {
             return response()->json([
                 'target_check_out_date'   => null,
                 'suggested_open_date'     => null,
                 'students_count'          => 0,
                 'extension_until_date'    => $this->computeExtensionUntilDate(),
+                'suggested_start_date'    => $window['start_date'] ?? null,
+                'suggested_end_date'      => $window['end_date'] ?? null,
             ]);
         }
 
@@ -66,6 +70,8 @@ class OccupancyPeriodController extends Controller
             'suggested_open_date'   => $this->computeSuggestedOpenDate($targetDate),
             'students_count'        => $studentsCount,
             'extension_until_date'  => $this->computeExtensionUntilDate(),
+            'suggested_start_date'  => $window['start_date'] ?? null,
+            'suggested_end_date'    => $window['end_date'] ?? null,
         ]);
     }
 
@@ -75,7 +81,7 @@ class OccupancyPeriodController extends Controller
             'name'                 => ['required', 'string', 'max:191'],
             'start_date'           => ['required', 'date'],
             'end_date'             => ['required', 'date', 'after_or_equal:start_date'],
-            'extension_until_date' => ['nullable', 'date', 'after_or_equal:end_date'],
+            'extension_until_date' => ['nullable', 'date'],
             'description'          => ['nullable', 'string'],
         ]);
 
@@ -87,6 +93,8 @@ class OccupancyPeriodController extends Controller
         }
 
         $this->checkOverlap($data['start_date'], $data['end_date']);
+        $this->checkApplicationWindow($data['start_date'], $data['end_date']);
+        $this->checkExtensionUntilDate($data['extension_until_date'] ?? null);
 
         $period = OccupancyPeriod::create(array_merge($data, ['status' => 'draft']));
         $this->appendSuggestedOpenDate($period);
@@ -102,7 +110,7 @@ class OccupancyPeriodController extends Controller
             'name'                 => ['sometimes', 'string', 'max:191'],
             'start_date'           => ['sometimes', 'date'],
             'end_date'             => ['sometimes', 'date', 'after_or_equal:start_date'],
-            'extension_until_date' => ['nullable', 'date', 'after_or_equal:end_date'],
+            'extension_until_date' => ['nullable', 'date'],
             'description'          => ['nullable', 'string'],
         ]);
 
@@ -111,6 +119,11 @@ class OccupancyPeriodController extends Controller
 
         if ($startDate && $endDate) {
             $this->checkOverlap($startDate, $endDate, $id);
+            $this->checkApplicationWindow($startDate, $endDate);
+        }
+
+        if (array_key_exists('extension_until_date', $data)) {
+            $this->checkExtensionUntilDate($data['extension_until_date']);
         }
 
         $period->update($data);
@@ -137,18 +150,21 @@ class OccupancyPeriodController extends Controller
             ], 422);
         }
 
-        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date) — xem
-        // OccupancyExtensionController::store() dòng chặn "check_out_date !== period->end_date".
-        // Nếu không có occupancy ACTIVE nào thực sự hết hạn đúng ngày này, mở đợt sẽ gửi thông
-        // báo/email sai tới toàn bộ sinh viên đang ở mà không ai nộp đơn thành công được.
-        $hasMatchingOccupancy = Occupancy::where('status', 'ACTIVE')
-            ->where('check_out_date', $period->end_date?->toDateString())
+        // Đợt gia hạn chỉ phục vụ ĐÚNG lứa sinh viên có check_out_date = stay_end_date thật
+        // (RegistrationPeriod::currentStayEndDate()) — KHÔNG dùng period->end_date, vì field đó
+        // chỉ là hạn chót nhận đơn, không nhất thiết trùng ngày dọn ra thật. Xem cùng nguồn tại
+        // OccupancyExtensionController::store()/approve().
+        $stayEndDate = RegistrationPeriod::currentStayEndDate();
+
+        $hasMatchingOccupancy = $stayEndDate && Occupancy::where('status', 'ACTIVE')
+            ->where('check_out_date', $stayEndDate)
             ->exists();
 
         if (! $hasMatchingOccupancy) {
             return response()->json([
-                'message' => 'Không có sinh viên nào đang lưu trú (ACTIVE) có ngày kết thúc khớp với "Ngày kết thúc nhận đơn" ('
-                    . $period->end_date?->format('d/m/Y') . ') của đợt này. Vui lòng kiểm tra lại cấu hình đợt trước khi mở.',
+                'message' => 'Không có sinh viên nào đang lưu trú (ACTIVE) có ngày kết thúc khớp với ngày kết thúc lưu trú hiện tại ('
+                    . ($stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->format('d/m/Y') : 'chưa xác định')
+                    . '). Vui lòng kiểm tra lại cấu hình đợt trước khi mở.',
             ], 422);
         }
 
@@ -211,15 +227,12 @@ class OccupancyPeriodController extends Controller
     }
 
     /**
-     * Gia hạn lưu trú đến = stay_end_date của registration_period (mốc lưu trú chính thức,
-     * nguồn gốc thật của check_out_date mọi occupancy) + 1 năm. Tính tự động từ dữ liệu gốc,
-     * không suy ra từ end_date admin gõ tay ở form đợt gia hạn — tránh lệch mốc với thực tế
-     * (xem lịch sử bug: admin từng nhập tay 1 ngày không khớp check_out_date của occupancy nào).
-     * Lấy registration_period có stay_end_date mới nhất (đại diện cho lứa sinh viên hiện tại).
+     * Gợi ý mặc định cho "Gia hạn lưu trú đến" = stay_end_date thật (RegistrationPeriod) + 1 năm.
+     * Admin vẫn nhập tay được, nhưng không được phép nhập ngắn hơn mốc này — xem checkExtensionUntilDate().
      */
     private function computeExtensionUntilDate(): ?string
     {
-        $stayEndDate = RegistrationPeriod::orderByDesc('stay_end_date')->value('stay_end_date');
+        $stayEndDate = RegistrationPeriod::currentStayEndDate();
 
         if (! $stayEndDate) {
             return null;
@@ -228,10 +241,73 @@ class OccupancyPeriodController extends Controller
         return \Carbon\Carbon::parse($stayEndDate)->addYear()->toDateString();
     }
 
+    /**
+     * Nghiệp vụ: mỗi đợt gia hạn luôn kéo dài đúng 1 năm kể từ ngày kết thúc lưu trú thật.
+     * Chặn cứng nếu admin nhập ngày ngắn hơn (vd nhỡ tay gõ chỉ cách vài ngày) — tránh sinh
+     * occupancy gia hạn có thời lượng bất thường.
+     */
+    private function checkExtensionUntilDate(?string $extensionUntilDate): void
+    {
+        if (! $extensionUntilDate) {
+            return;
+        }
+
+        $minDate = $this->computeExtensionUntilDate();
+
+        if ($minDate && $extensionUntilDate < $minDate) {
+            abort(422, 'Gia hạn lưu trú đến phải đủ 1 năm kể từ ngày kết thúc lưu trú hiện tại (tối thiểu '
+                . \Carbon\Carbon::parse($minDate)->format('d/m/Y') . ').');
+        }
+    }
+
+    /**
+     * Khung thời gian nhận đơn = 1 tháng trước ngày kết thúc lưu trú thật, kéo dài 7 ngày.
+     * Dùng chung cho form tạo/sửa đợt và lệnh cron AutoDraftExtensionPeriodCommand.
+     */
+    private function computeApplicationWindow(): ?array
+    {
+        $stayEndDate = RegistrationPeriod::currentStayEndDate();
+
+        if (! $stayEndDate) {
+            return null;
+        }
+
+        $startDate = \Carbon\Carbon::parse($stayEndDate)->subMonth();
+        $endDate   = $startDate->copy()->addDays(7);
+
+        return [
+            'start_date' => $startDate->toDateString(),
+            'end_date'   => $endDate->toDateString(),
+        ];
+    }
+
+    /**
+     * Nghiệp vụ: "Thời gian nhận đơn" phải đúng công thức cứng (1 tháng trước ngày kết thúc
+     * lưu trú thật, kéo dài 7 ngày) — không cho admin nhập lệch, tránh mở đơn quá sớm/quá trễ
+     * so với ngày sinh viên thực sự phải dọn ra.
+     */
+    private function checkApplicationWindow(string $startDate, string $endDate): void
+    {
+        $window = $this->computeApplicationWindow();
+
+        if (! $window) {
+            return;
+        }
+
+        if ($startDate !== $window['start_date'] || $endDate !== $window['end_date']) {
+            abort(422, 'Thời gian nhận đơn phải đúng '
+                . \Carbon\Carbon::parse($window['start_date'])->format('d/m/Y') . ' — '
+                . \Carbon\Carbon::parse($window['end_date'])->format('d/m/Y')
+                . ' (1 tháng trước ngày kết thúc lưu trú hiện tại, kéo dài 7 ngày). Vui lòng dùng đúng gợi ý được cung cấp.');
+        }
+    }
+
     private function appendSuggestedOpenDate(OccupancyPeriod $period): void
     {
-        $period->suggested_open_date = $period->end_date
-            ? $this->computeSuggestedOpenDate($period->end_date->toDateString())
+        $stayEndDate = RegistrationPeriod::currentStayEndDate();
+
+        $period->suggested_open_date = $stayEndDate
+            ? $this->computeSuggestedOpenDate($stayEndDate)
             : null;
     }
 
@@ -264,11 +340,16 @@ class OccupancyPeriodController extends Controller
     private function notifyStudents(OccupancyPeriod $period): void
     {
         try {
-            $deadline = $period->end_date?->format('d/m/Y') ?? 'xem hệ thống';
-            $until    = $period->extension_until_date?->format('d/m/Y');
+            $start = $period->start_date?->format('d/m/Y') ?? 'xem hệ thống';
+            $end   = $period->end_date?->format('d/m/Y') ?? 'xem hệ thống';
+            $until = $period->extension_until_date?->format('d/m/Y');
+
+            $stayEndDate  = RegistrationPeriod::currentStayEndDate();
+            $nextStayFrom = $stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->format('d/m/Y') : 'xem hệ thống';
+
             $content  = "Đợt gia hạn lưu trú \"{$period->name}\" hiện đã mở. "
-                      . "Hạn nộp yêu cầu: {$deadline}."
-                      . ($until ? " Ngày gia hạn đến: {$until}." : '')
+                      . "Thời gian nhận đơn: {$start} — {$end}."
+                      . ($until ? " Thời gian lưu trú tiếp theo (nếu được duyệt): {$nextStayFrom} — {$until}." : '')
                       . " Nếu muốn tiếp tục ở ký túc xá, vui lòng đăng nhập và gửi yêu cầu gia hạn trước thời hạn trên.";
 
             $studentIds = Occupancy::where('status', 'ACTIVE')->pluck('student_id')->unique();

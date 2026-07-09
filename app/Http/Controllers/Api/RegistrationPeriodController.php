@@ -122,6 +122,17 @@ class RegistrationPeriodController extends Controller
             ], 422);
         }
 
+        // Rule 4b: đợt chính (main) MỚI phải nối tiếp ngay sau khi lứa sinh viên trước đó kết
+        // thúc lưu trú — tránh khoảng trống/chồng lấn giữa 2 lứa. Ghi đè stay_start_date, không
+        // cho nhập tay (chỉ áp dụng khi đã có dữ liệu lưu trú trước đó để tham chiếu; đợt chính
+        // đầu tiên chưa có gì để nối tiếp thì admin vẫn tự chọn như cũ).
+        if ($data['channel'] === 'main') {
+            $previousStayEnd = RegistrationPeriod::currentStayEndDate();
+            if ($previousStayEnd) {
+                $data['stay_start_date'] = \Carbon\Carbon::parse($previousStayEnd)->addDay()->toDateString();
+            }
+        }
+
         // Rule 4: stay_start_date >= end_date + processing_days + bed_selection_days + initial_payment_due_days
         if (!empty($data['stay_start_date'])) {
             $stayStartError = $this->validateStayStartDate(

@@ -29,8 +29,13 @@
             <p>Đợt gia hạn lưu trú <strong>{{ $periodName }}</strong> hiện đã mở.</p>
 
             <div class="highlight">
-                <strong>Hạn nộp yêu cầu gia hạn:</strong>
-                {{ $periodEndDateLabel }}
+                <strong>Thời gian nhận đơn:</strong>
+                {{ $periodStartDateLabel }} — {{ $periodEndDateLabel }}
+            </div>
+
+            <div class="highlight">
+                <strong>Thời gian lưu trú tiếp theo (nếu được duyệt):</strong>
+                {{ $nextStayStartLabel }} — {{ $nextStayEndLabel }}
             </div>
 
             <p>
