@@ -49,11 +49,16 @@ class AutoDraftExtensionPeriodCommand extends Command
             return self::SUCCESS;
         }
 
-        $count    = $expiring->count();
+        // Gom ĐÚNG KHỚP theo từng giá trị check_out_date cụ thể — không trộn nhiều ngày khác
+        // nhau vào chung 1 đợt gia hạn (nếu có nhiều mốc lệch nhau trong cửa sổ $days ngày,
+        // chỉ tạo bản nháp cho mốc sớm nhất; các mốc còn lại sẽ được xử lý ở lần chạy cron kế
+        // tiếp sau khi đợt hiện tại đóng lại).
         $earliest = $expiring->first()->check_out_date; // string yyyy-mm-dd
+        $group    = $expiring->filter(fn (Occupancy $o) => $o->check_out_date === $earliest)->values();
+        $count    = $group->count();
         $label    = Carbon::parse($earliest)->locale('vi')->isoFormat('MM/YYYY');
 
-        $this->info("Tìm thấy {$count} lưu trú hết hạn (sớm nhất: {$earliest}).");
+        $this->info("Tìm thấy {$count} lưu trú hết hạn đúng ngày {$earliest} (trong tổng {$expiring->count()} lưu trú hết hạn trong vòng {$days} ngày).");
 
         if ($isDry) {
             $this->line("  [DRY RUN] Sẽ tạo bản nháp: \"Đợt gia hạn lưu trú {$label}\".");
@@ -66,7 +71,7 @@ class AutoDraftExtensionPeriodCommand extends Command
             'end_date'             => $earliest,
             'extension_until_date' => null,
             'status'               => 'draft',
-            'description'          => "Tạo tự động — {$count} sinh viên có lưu trú hết hạn trước ngày {$earliest}. "
+            'description'          => "Tạo tự động — {$count} sinh viên có lưu trú hết hạn đúng ngày {$earliest}. "
                 . 'Vui lòng điền "Gia hạn lưu trú đến" rồi bấm Mở đợt.',
         ]);
 

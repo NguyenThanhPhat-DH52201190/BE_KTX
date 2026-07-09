@@ -264,14 +264,28 @@ class RegistrationPeriodController extends Controller
             }
         }
 
-        $period->update($data);
+        $stayEndDateChanged = $channel === 'main' && array_key_exists('stay_end_date', $data);
 
-        // Nếu vừa đổi stay_end_date của đợt chính, đồng bộ lại cho mọi đợt quanh năm
-        // cùng năm học để không lệch mốc kết thúc lưu trú.
-        if ($channel === 'main' && array_key_exists('stay_end_date', $data)) {
-            RegistrationPeriod::where('channel', 'rolling')
-                ->where('school_year', $schoolYear)
-                ->update(['stay_end_date' => $data['stay_end_date']]);
+        if ($stayEndDateChanged) {
+            DB::transaction(function () use ($period, $data, $schoolYear) {
+                $period->update($data);
+
+                // Đồng bộ lại cho mọi đợt quanh năm cùng năm học để không lệch mốc kết thúc lưu trú.
+                RegistrationPeriod::where('channel', 'rolling')
+                    ->where('school_year', $schoolYear)
+                    ->update(['stay_end_date' => $data['stay_end_date']]);
+
+                // Đồng bộ luôn check_out_date của các occupancy ĐÃ TỒN TẠI (xếp phòng/đang ở) thuộc
+                // năm học này — nếu không, nhóm sinh viên xếp phòng TRƯỚC khi sửa vẫn giữ ngày cũ
+                // trong khi nhóm xếp phòng SAU nhận ngày mới, tạo ra 2 nhóm cùng năm học nhưng lệch
+                // ngày kết thúc lưu trú. Chỉ cập nhật occupancy chưa kết thúc (bỏ qua COMPLETED/
+                // TERMINATED/CANCELLED vì họ đã xong, không còn liên quan).
+                Occupancy::whereIn('status', Occupancy::OCCUPIED_BED_STATUSES)
+                    ->whereHas('registration.period', fn ($q) => $q->where('school_year', $schoolYear))
+                    ->update(['check_out_date' => $data['stay_end_date']]);
+            });
+        } else {
+            $period->update($data);
         }
 
         if (in_array($period->status, ['pending', 'active'], true)) {

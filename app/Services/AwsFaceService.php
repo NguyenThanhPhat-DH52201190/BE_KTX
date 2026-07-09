@@ -104,6 +104,61 @@ class AwsFaceService
         }
     }
 
+    /**
+     * Xóa nhiều face cùng lúc (batch, tối đa 4096 FaceId/lần theo giới hạn AWS).
+     *
+     * @param  array<int, string>  $faceIds
+     * @return array<int, string> danh sách FaceId đã xóa thành công
+     */
+    public function deleteFaces(array $faceIds): array
+    {
+        if (empty($faceIds)) {
+            return [];
+        }
+
+        $deleted = [];
+        foreach (array_chunk($faceIds, 4096) as $chunk) {
+            try {
+                $result = $this->client->deleteFaces([
+                    'CollectionId' => $this->collectionId,
+                    'FaceIds' => $chunk,
+                ]);
+                $deleted = array_merge($deleted, $result->get('DeletedFaces') ?? []);
+            } catch (RekognitionException $e) {
+                Log::error('AwsFaceService: deleteFaces (batch) failed', ['count' => count($chunk), 'error' => $e->getMessage()]);
+                throw $e;
+            }
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Liệt kê toàn bộ face hiện có trong Collection (tự phân trang qua NextToken).
+     *
+     * @return array<int, array{FaceId: string, ExternalImageId: ?string, Confidence: float}>
+     */
+    public function listFaces(): array
+    {
+        $faces = [];
+        $nextToken = null;
+
+        do {
+            $params = ['CollectionId' => $this->collectionId, 'MaxResults' => 4096];
+            if ($nextToken) {
+                $params['NextToken'] = $nextToken;
+            }
+
+            $result = $this->client->listFaces($params);
+            foreach ($result->get('Faces') ?? [] as $face) {
+                $faces[] = $face;
+            }
+            $nextToken = $result->get('NextToken');
+        } while ($nextToken);
+
+        return $faces;
+    }
+
     public function searchByImage(string $absoluteImagePath, int $maxFaces = 5, ?float $threshold = null): array
     {
         if (! file_exists($absoluteImagePath)) {

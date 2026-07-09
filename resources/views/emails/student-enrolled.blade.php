@@ -29,24 +29,24 @@
             <p>Ký túc xá — Trường Đại học Công nghệ TP.HCM (STU)</p>
         </div>
         <div class="body">
-            <p>Kính gửi <strong>{{ $student->full_name }}</strong>,</p>
+            <p>Kính gửi <strong>{{ $studentFullName }}</strong>,</p>
 
             <p>Chúc mừng! Bạn đã được <strong>xác nhận nhập học</strong> vào hệ thống của trường. Thông tin sinh viên của bạn:</p>
 
             <div class="card">
                 <div class="label">Mã số sinh viên (MSSV)</div>
-                <div class="value">{{ $student->student_code }}</div>
+                <div class="value">{{ $studentCode }}</div>
             </div>
 
-            @if($student->class_name)
-            <p>Lớp: <strong>{{ $student->class_name }}</strong>{{ $student->faculty ? ' — ' . $student->faculty : '' }}</p>
+            @if($studentClassName)
+            <p>Lớp: <strong>{{ $studentClassName }}</strong>{{ $studentFaculty ? ' — ' . $studentFaculty : '' }}</p>
             @endif
 
             <div class="steps">
                 <p style="font-weight: bold; margin: 0 0 4px; color: #1a2d52;">Để đăng ký lưu trú KTX, bạn thực hiện theo các bước sau:</p>
                 <ol>
                     <li>Truy cập trang web hệ thống KTX và chọn <strong>Đăng ký tài khoản</strong>.</li>
-                    <li>Nhập <strong>MSSV {{ $student->student_code }}</strong> để xác thực và tạo tài khoản.</li>
+                    <li>Nhập <strong>MSSV {{ $studentCode }}</strong> để xác thực và tạo tài khoản.</li>
                     <li>Đăng nhập bằng tài khoản vừa tạo.</li>
                     <li>Vào mục <strong>Đăng ký lưu trú</strong> và điền đầy đủ thông tin (bao gồm thông tin phụ huynh, địa chỉ...).</li>
                     <li>Nộp đơn và chờ kết quả xét duyệt.</li>

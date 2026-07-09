@@ -9,16 +9,21 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
-use Illuminate\Queue\SerializesModels;
 
 class ExtensionPeriodOpenedMail extends Mailable implements ShouldQueue
 {
-    use Queueable, SerializesModels;
+    use Queueable;
 
-    public function __construct(
-        public readonly OccupancyPeriod $period,
-        public readonly Student $student,
-    ) {}
+    public readonly string $periodName;
+    public readonly string $periodEndDateLabel;
+    public readonly string $studentName;
+
+    public function __construct(OccupancyPeriod $period, Student $student)
+    {
+        $this->periodName = (string) $period->name;
+        $this->periodEndDateLabel = $period->end_date ? $period->end_date->format('d/m/Y') : 'Xem trong hệ thống';
+        $this->studentName = (string) $student->full_name;
+    }
 
     public function envelope(): Envelope
     {
@@ -31,6 +36,11 @@ class ExtensionPeriodOpenedMail extends Mailable implements ShouldQueue
     {
         return new Content(
             view: 'emails.extension-period-opened',
+            with: [
+                'periodName'         => $this->periodName,
+                'periodEndDateLabel' => $this->periodEndDateLabel,
+                'studentName'        => $this->studentName,
+            ],
         );
     }
 }

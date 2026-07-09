@@ -122,7 +122,7 @@ class StudentDashboardController extends Controller
             ->where('nr.student_id', $student->id)
             ->orderByDesc('n.created_at')
             ->limit(4)
-            ->select(['nr.id as recipient_id', 'n.id', 'n.title', 'n.type', 'n.created_at', 'nr.is_read'])
+            ->select(['nr.id as recipient_id', 'n.id', 'n.title', 'n.content', 'n.type', 'n.related_id', 'n.target_type', 'n.created_at', 'nr.is_read'])
             ->get();
 
         // 4. Pending support requests

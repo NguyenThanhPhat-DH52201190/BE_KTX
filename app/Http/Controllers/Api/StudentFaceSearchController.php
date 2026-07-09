@@ -59,7 +59,7 @@ class StudentFaceSearchController extends Controller
             ->whereIn('id', $studentIds)
             ->with(['registrations' => function ($query) {
                 $query->whereHas('occupancy')
-                    ->with(['occupancy.room.floor', 'occupancy.bed'])
+                    ->with(['occupancy.room.floor', 'occupancy.bed', 'occupancy.pendingCheckoutRequest'])
                     ->latest('id');
             }])
             ->get()
@@ -98,6 +98,8 @@ class StudentFaceSearchController extends Controller
                         'current_year'     => $student->current_year,
                         'occupancy_status' => $this->normalizeOccupancyStatus($occupancy),
                         'occupancy_id'     => $occupancy?->id,
+                        'bed_number'       => $occupancy?->bed?->bed_number,
+                        'check_out_date'   => $occupancy?->check_out_date,
                         'registration_id'  => $latestReg?->id,
                     ],
                     'similarity' => round($similarityByStudentId[$studentId] ?? 0, 1),
@@ -149,9 +151,12 @@ class StudentFaceSearchController extends Controller
             return null;
         }
 
+        if ($occupancy->pendingCheckoutRequest) {
+            return 'CHECKOUT_REQUESTED';
+        }
+
         return match ($occupancy->status) {
             'ACTIVE', 'ROOM_CONFIRMED' => 'ACTIVE',
-            'CHECKOUT_REQUESTED'       => 'CHECKOUT_REQUESTED',
             'COMPLETED'                => 'CHECKED_OUT',
             'TERMINATED'               => 'FORCED_CHECKOUT',
             default                    => null,

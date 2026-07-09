@@ -24,13 +24,13 @@
             <p>Ký túc xá Trường Đại học</p>
         </div>
         <div class="body">
-            <p>Kính gửi <strong>{{ $student->full_name }}</strong>,</p>
+            <p>Kính gửi <strong>{{ $studentName }}</strong>,</p>
 
-            <p>Đợt gia hạn lưu trú <strong>{{ $period->name }}</strong> hiện đã mở.</p>
+            <p>Đợt gia hạn lưu trú <strong>{{ $periodName }}</strong> hiện đã mở.</p>
 
             <div class="highlight">
                 <strong>Hạn nộp yêu cầu gia hạn:</strong>
-                {{ $period->end_date ? $period->end_date->format('d/m/Y') : 'Xem trong hệ thống' }}
+                {{ $periodEndDateLabel }}
             </div>
 
             <p>

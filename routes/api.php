@@ -37,6 +37,7 @@ use App\Http\Controllers\Api\StudentDashboardController;
 use App\Http\Controllers\Api\AdmissionCandidateController;
 use App\Http\Controllers\Api\DormReservationController;
 use App\Http\Controllers\Api\ReservationPriorityController;
+use App\Http\Controllers\Api\SystemAnnouncementController;
 
 // Route công khai (không yêu cầu đăng nhập) — giới hạn tốc độ chung (60 req/phút/IP) để
 // chặn brute-force/abuse hàng loạt, vì các route này không có auth:sanctum bảo vệ.
@@ -73,6 +74,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/student/support-requests/{id}', [StudentSupportRequestController::class, 'studentShow']);
         Route::post('/student/support-requests', [StudentSupportRequestController::class, 'store']);
         Route::get('/student/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+        Route::get('/student/notifications/system-announcements/{id}', [NotificationController::class, 'systemAnnouncement'])->whereNumber('id');
         Route::get('/student/notifications', [NotificationController::class, 'index']);
         Route::put('/student/notifications/read-all', [NotificationController::class, 'markAllRead']);
         Route::put('/student/notifications/{id}/read', [NotificationController::class, 'markRead'])->whereNumber('id');
@@ -119,6 +121,16 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Nội dung tĩnh (Bước 2E)
         Route::post('/admin/pages/{slug}', [StaticPageController::class, 'update']);
+        Route::get('/admin/content/announcements/stats', [SystemAnnouncementController::class, 'stats']);
+        Route::get('/admin/content/announcements/target-options', [SystemAnnouncementController::class, 'targetOptions']);
+        Route::get('/admin/content/announcements', [SystemAnnouncementController::class, 'index']);
+        Route::post('/admin/content/announcements', [SystemAnnouncementController::class, 'store']);
+        Route::get('/admin/content/announcements/{id}', [SystemAnnouncementController::class, 'show'])->whereNumber('id');
+        Route::put('/admin/content/announcements/{id}', [SystemAnnouncementController::class, 'update'])->whereNumber('id');
+        Route::post('/admin/content/announcements/{id}/send', [SystemAnnouncementController::class, 'send'])->whereNumber('id');
+        Route::post('/admin/content/announcements/{id}/unschedule', [SystemAnnouncementController::class, 'unschedule'])->whereNumber('id');
+        Route::post('/admin/content/announcements/{id}/resend-email', [SystemAnnouncementController::class, 'resendEmail'])->whereNumber('id');
+        Route::delete('/admin/content/announcements/{id}', [SystemAnnouncementController::class, 'destroy'])->whereNumber('id');
 
         // Đăng ký — quyết định tự động / xác nhận hàng loạt
         Route::patch('/admin/registrations/{id}/auto-decision', [RegistrationController::class, 'patchAutoDecision']);
@@ -275,6 +287,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Đợt gia hạn lưu trú — ghi/chi tiết (Lượt C)
         Route::post('/occupancy-periods', [OccupancyPeriodController::class, 'store']);
+        // Đặt TRƯỚC route {id} — nếu không "suggestion" sẽ bị route động nuốt mất, hiểu nhầm thành id.
+        Route::get('/occupancy-periods/suggestion', [OccupancyPeriodController::class, 'suggestion']);
         Route::get('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'show']);
         Route::put('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'update']);
         Route::delete('/occupancy-periods/{id}', [OccupancyPeriodController::class, 'destroy']);
@@ -322,4 +336,3 @@ Route::middleware('throttle:60,1')->group(function () {
     Route::post('/reservation-priorities/{id}/evidences', [ReservationPriorityController::class, 'storeEvidence'])->whereNumber('id');
     Route::delete('/reservation-priority-evidences/{id}', [ReservationPriorityController::class, 'destroyEvidence'])->whereNumber('id');
 });
-

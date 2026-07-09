@@ -8,15 +8,23 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
-use Illuminate\Queue\SerializesModels;
 
 class StudentEnrolledMail extends Mailable implements ShouldQueue
 {
-    use Queueable, SerializesModels;
+    use Queueable;
 
-    public function __construct(
-        public readonly Student $student,
-    ) {}
+    public readonly string $studentFullName;
+    public readonly string $studentCode;
+    public readonly ?string $studentClassName;
+    public readonly ?string $studentFaculty;
+
+    public function __construct(Student $student)
+    {
+        $this->studentFullName = (string) $student->full_name;
+        $this->studentCode = (string) $student->student_code;
+        $this->studentClassName = $student->class_name;
+        $this->studentFaculty = $student->faculty;
+    }
 
     public function envelope(): Envelope
     {
@@ -29,6 +37,12 @@ class StudentEnrolledMail extends Mailable implements ShouldQueue
     {
         return new Content(
             view: 'emails.student-enrolled',
+            with: [
+                'studentFullName'  => $this->studentFullName,
+                'studentCode'      => $this->studentCode,
+                'studentClassName' => $this->studentClassName,
+                'studentFaculty'   => $this->studentFaculty,
+            ],
         );
     }
 }

@@ -24,8 +24,13 @@ class StudentNotificationService
      */
     public function notifyStudent(Student $student, string $title, string $content, string $type, ?int $relatedId = null, bool $queue = false): void
     {
-        $this->createBellNotification($student->id, $title, $content, $type, $relatedId);
+        $this->createBellNotification($student->id, $title, $content, $type, $relatedId, true);
         $this->sendEmail($student->email, $student->full_name, $title, $content, $type, $student->id, $queue);
+    }
+
+    public function notifyStudentWebOnly(Student $student, string $title, string $content, string $type, ?int $relatedId = null): void
+    {
+        $this->createBellNotification($student->id, $title, $content, $type, $relatedId, false);
     }
 
     public function notifyEmailOnly(?string $email, ?string $name, string $title, string $content, bool $queue = false): void
@@ -33,7 +38,7 @@ class StudentNotificationService
         $this->sendEmail($email, $name, $title, $content, null, null, $queue);
     }
 
-    private function createBellNotification(int $studentId, string $title, string $content, string $type, ?int $relatedId): void
+    private function createBellNotification(int $studentId, string $title, string $content, string $type, ?int $relatedId, bool $sendEmail): void
     {
         try {
             $notification = Notification::create([
@@ -43,7 +48,7 @@ class StudentNotificationService
                 'type'        => $type,
                 'related_id'  => $relatedId,
                 'target_type' => 'individual',
-                'send_email'  => true,
+                'send_email'  => $sendEmail,
             ]);
 
             DB::table('notification_recipient')->insert([

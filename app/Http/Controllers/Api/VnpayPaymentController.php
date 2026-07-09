@@ -4,9 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ElectricityBill;
-use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -170,12 +170,14 @@ class VnpayPaymentController extends Controller
                     $roomCode = ($floor?->building_code ?? '') . ($room?->room_number ?? '');
                     $bedNo    = $bed?->bed_number ?? '';
 
-                    Notification::create([
-                        'student_id' => $occupancy->student_id,
-                        'title'      => 'Thanh toán thành công!',
-                        'content'    => "Bạn đã chính thức lưu trú tại phòng {$roomCode}" . ($bedNo ? " giường #{$bedNo}" : '') . '. Chào mừng bạn đến với KTX!',
-                        'type'       => 'payment_success',
-                    ]);
+                    if ($occupancy->student) {
+                        app(StudentNotificationService::class)->notifyStudentWebOnly(
+                            $occupancy->student,
+                            'Thanh toán thành công!',
+                            "Bạn đã chính thức lưu trú tại phòng {$roomCode}" . ($bedNo ? " giường #{$bedNo}" : '') . '. Chào mừng bạn đến với KTX!',
+                            'payment_success',
+                        );
+                    }
                 }
             }
         }

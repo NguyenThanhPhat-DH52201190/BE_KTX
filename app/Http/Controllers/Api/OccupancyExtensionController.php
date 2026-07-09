@@ -177,6 +177,17 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Hiện không có đợt gia hạn nào đang mở.'], 422);
         }
 
+        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date). Nếu lưu
+        // trú của sinh viên có ngày kết thúc khác mốc này (VD do dữ liệu lệch từ trước, hoặc SV
+        // thuộc nhóm hết hạn ở một đợt khác), không cho nộp đơn vào nhầm đợt.
+        if ($occupancy->check_out_date !== $period->end_date?->toDateString()) {
+            return response()->json([
+                'message' => 'Lưu trú của bạn có ngày kết thúc (' . \Carbon\Carbon::parse($occupancy->check_out_date)->format('d/m/Y')
+                    . ') không khớp với mốc mà đợt gia hạn "' . $period->name . '" đang phục vụ ('
+                    . $period->end_date?->format('d/m/Y') . '). Vui lòng liên hệ quản trị viên để kiểm tra lại.',
+            ], 422);
+        }
+
         // Chặn sớm nếu cấu hình đợt gia hạn vô lý (ngày kết thúc gia hạn phải sau ngày kết
         // thúc lưu trú hiện tại) — tránh tạo occupancy mới có check_out_date < check_in_date.
         if ($period->extension_until_date && $occupancy->check_out_date
@@ -290,6 +301,18 @@ class OccupancyExtensionController extends Controller
 
         $occupancyForValidation = $extension->occupancy;
         $periodForValidation    = $extension->occupancyPeriod;
+
+        // Đợt gia hạn chỉ phục vụ ĐÚNG 1 mốc check_out_date cụ thể (period->end_date). Nếu lưu
+        // trú không khớp mốc này (VD dữ liệu lệch phát sinh sau khi đơn đã được nộp), từ chối
+        // duyệt thay vì âm thầm gán sai ngày.
+        if ($occupancyForValidation && $periodForValidation
+            && $occupancyForValidation->check_out_date !== $periodForValidation->end_date?->toDateString()) {
+            return response()->json([
+                'message' => 'Lưu trú này có ngày kết thúc (' . \Carbon\Carbon::parse($occupancyForValidation->check_out_date)->format('d/m/Y')
+                    . ') không khớp với mốc mà đợt gia hạn "' . $periodForValidation->name . '" đang phục vụ ('
+                    . $periodForValidation->end_date?->format('d/m/Y') . '). Không thể duyệt.',
+            ], 422);
+        }
 
         // Chặn sớm nếu cấu hình đợt gia hạn vô lý — không được duyệt, tránh tạo occupancy
         // mới có check_out_date < check_in_date. Kiểm tra trước transaction để không mutate

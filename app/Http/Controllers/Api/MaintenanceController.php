@@ -499,6 +499,25 @@ class MaintenanceController extends Controller
                 }
             }
 
+            // Đảm bảo assignments đã bao phủ hết mọi occupancy ACTIVE còn lại trong phòng —
+            // tránh set bed maintenance cho giường vẫn còn sinh viên ACTIVE chưa được chuyển tạm.
+            $assignedOccupancyIds = collect($data['assignments'])->pluck('occupancy_id')->map(fn ($id) => (int) $id);
+            $unhandledActiveOccupancy = $this->activeOccupancyQuery()
+                ->where('room_id', $room->id)
+                ->whereNotIn('id', $assignedOccupancyIds->all())
+                ->with('student')
+                ->lockForUpdate()
+                ->first();
+
+            if ($unhandledActiveOccupancy) {
+                $studentLabel = $unhandledActiveOccupancy->student
+                    ? "{$unhandledActiveOccupancy->student->full_name} ({$unhandledActiveOccupancy->student->student_code})"
+                    : "occupancy #{$unhandledActiveOccupancy->id}";
+                abort(response()->json([
+                    'message' => "Còn sinh viên {$studentLabel} chưa được chuyển tạm, vui lòng bổ sung đầy đủ trước khi bắt đầu bảo trì.",
+                ], 422));
+            }
+
             $room->status = 'maintenance';
             $room->save();
             $room->beds()->update(['status' => 'maintenance']);

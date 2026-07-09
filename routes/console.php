@@ -44,3 +44,10 @@ Schedule::command('maintenance:auto-start')->dailyAt('05:30')->withoutOverlappin
 
 // Tự động hoàn tất bảo trì đã đến ngày dự kiến kết thúc (chạy lúc 00:05)
 Schedule::command('maintenance:auto-complete')->dailyAt('00:05')->withoutOverlapping();
+
+// Gửi thông báo hệ thống đã hẹn giờ.
+Schedule::command('system-announcements:send-scheduled')->everyMinute()->withoutOverlapping();
+
+// Đồng bộ lại AWS Rekognition Collection: dọn face trôi dạt/mồ côi, index lại đúng
+// sinh viên có bản ghi lưu trú hợp lệ (chạy hàng tuần, giờ thấp điểm)
+Schedule::command('rekognition:resync --force')->weeklyOn(0, '03:00')->withoutOverlapping();

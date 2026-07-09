@@ -21,13 +21,49 @@ class OccupancyPeriodController extends Controller
             ->orderByDesc('created_at')
             ->get();
 
+        $periods->each(fn (OccupancyPeriod $period) => $this->appendSuggestedOpenDate($period));
+
         return response()->json($periods);
     }
 
     public function show(int $id): JsonResponse
     {
         $period = OccupancyPeriod::withCount('extensions')->findOrFail($id);
+        $this->appendSuggestedOpenDate($period);
+
         return response()->json($period);
+    }
+
+    /**
+     * Gợi ý (KHÔNG chặn cứng) mốc nên mở đợt gia hạn: dựa trên occupancy ACTIVE sắp hết hạn
+     * sớm nhất hiện có trong hệ thống (chưa gắn với đợt nào) — dùng cho form "Tạo đợt mới"
+     * trước khi có bản ghi occupancy_periods nào để tham chiếu.
+     */
+    public function suggestion(): JsonResponse
+    {
+        $targetDate = Occupancy::where('status', 'ACTIVE')
+            ->whereNotNull('check_out_date')
+            ->whereDate('check_out_date', '>=', now()->toDateString())
+            ->orderBy('check_out_date')
+            ->value('check_out_date');
+
+        if (! $targetDate) {
+            return response()->json([
+                'target_check_out_date' => null,
+                'suggested_open_date'   => null,
+                'students_count'        => 0,
+            ]);
+        }
+
+        $studentsCount = Occupancy::where('status', 'ACTIVE')
+            ->where('check_out_date', $targetDate)
+            ->count();
+
+        return response()->json([
+            'target_check_out_date' => $targetDate,
+            'suggested_open_date'   => $this->computeSuggestedOpenDate($targetDate),
+            'students_count'        => $studentsCount,
+        ]);
     }
 
     public function store(Request $request): JsonResponse
@@ -50,6 +86,7 @@ class OccupancyPeriodController extends Controller
         $this->checkOverlap($data['start_date'], $data['end_date']);
 
         $period = OccupancyPeriod::create(array_merge($data, ['status' => 'draft']));
+        $this->appendSuggestedOpenDate($period);
 
         return response()->json($period, 201);
     }
@@ -74,6 +111,7 @@ class OccupancyPeriodController extends Controller
         }
 
         $period->update($data);
+        $this->appendSuggestedOpenDate($period);
 
         return response()->json($period);
     }
@@ -105,6 +143,7 @@ class OccupancyPeriodController extends Controller
         }
 
         $period->update(['status' => 'open']);
+        $this->appendSuggestedOpenDate($period);
 
         $this->notifyStudents($period);
 
@@ -120,6 +159,7 @@ class OccupancyPeriodController extends Controller
         }
 
         $period->update(['status' => 'closed']);
+        $this->appendSuggestedOpenDate($period);
 
         return response()->json($period);
     }
@@ -142,6 +182,22 @@ class OccupancyPeriodController extends Controller
     }
 
     // ──────────────── HELPERS ────────────────
+
+    /**
+     * Gợi ý mốc nên mở đợt = đầu tháng liền trước tháng chứa ngày kết thúc lưu trú mục tiêu.
+     * VD: kỳ lưu trú kết thúc 31/08/2027 → gợi ý mở đợt sớm nhất 01/07/2027.
+     */
+    private function computeSuggestedOpenDate(string $targetCheckOutDate): string
+    {
+        return \Carbon\Carbon::parse($targetCheckOutDate)->startOfMonth()->subMonth()->toDateString();
+    }
+
+    private function appendSuggestedOpenDate(OccupancyPeriod $period): void
+    {
+        $period->suggested_open_date = $period->end_date
+            ? $this->computeSuggestedOpenDate($period->end_date->toDateString())
+            : null;
+    }
 
     private function statusLabel(string $status): string
     {
