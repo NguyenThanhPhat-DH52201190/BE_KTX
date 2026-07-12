@@ -63,6 +63,8 @@ class RegistrationPeriod extends Model
      */
     public static function currentStayEndDate(): ?string
     {
-        return static::orderByDesc('stay_end_date')->value('stay_end_date');
+        $stayEndDate = static::orderByDesc('stay_end_date')->value('stay_end_date');
+
+        return $stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->toDateString() : null;
     }
 }

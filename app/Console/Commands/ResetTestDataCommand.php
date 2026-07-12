@@ -9,9 +9,11 @@ use Illuminate\Support\Facades\Storage;
 class ResetTestDataCommand extends Command
 {
     protected $signature = 'db:reset-test-data
-                            {--force : Bỏ qua xác nhận, chạy thẳng}';
+                            {--force : Bỏ qua xác nhận, chạy thẳng}
+                            {--keep-admission-candidates : Giữ nguyên dữ liệu admission_candidates, không truncate bảng này}
+                            {--clear-demo-avatars : Xóa luôn avatar demo của TẤT CẢ sinh viên trong bảng students (null hóa cột + xóa file vật lý) — mặc định KHÔNG bật}';
 
-    protected $description = 'Xóa toàn bộ dữ liệu động trước go-live, giữ nguyên cấu trúc bảng và data nền (buildings, floors, rooms, beds, students, admin, settings, provinces, activity_types, priority_criteria, fee_discount_policies, static_pages)';
+    protected $description = 'Xóa toàn bộ dữ liệu động trước go-live, giữ nguyên cấu trúc bảng và data nền (buildings, floors, rooms, beds, students, admin, settings, provinces, activity_types, priority_criteria, fee_discount_policies, static_pages). Dùng --clear-demo-avatars để xóa luôn avatar demo của toàn bộ sinh viên (mặc định không xóa).';
 
     public function handle(): int
     {
@@ -41,6 +43,15 @@ class ResetTestDataCommand extends Command
             $this->collectFilePaths('student_support_requests', ['attachment_url']),
         ));
 
+        // Khi sinh viên nộp đơn, avatar được ghi CÙNG 1 file vào cả students.avatar lẫn
+        // registrations.avatar_url (xem RegistrationController::store()). Bảng students được
+        // giữ nguyên ở lệnh reset này, nên nếu không null hóa trước, sau khi file vật lý bị xóa
+        // theo registrations.avatar_url, students.avatar sẽ treo tham chiếu tới file không còn tồn tại.
+        $orphanedStudentAvatars = 0;
+        if (count($filePaths) > 0) {
+            $orphanedStudentAvatars = DB::table('students')->whereIn('avatar', $filePaths)->update(['avatar' => null]);
+        }
+
         if (count($filePaths) > 0) {
             $this->line('Danh sách file sẽ xóa (' . count($filePaths) . ' file):');
             foreach ($filePaths as $path) {
@@ -57,6 +68,7 @@ class ResetTestDataCommand extends Command
         } else {
             $fileDeleteSummary = ['table' => 'file vật lý (avatar/CCCD/minh chứng/đính kèm)', 'deleted' => 0, 'skipped' => false];
         }
+        $report[] = ['table' => 'students.avatar (null hóa do file dùng chung bị xóa)', 'deleted' => $orphanedStudentAvatars, 'skipped' => false];
         $this->newLine();
 
         DB::statement('SET FOREIGN_KEY_CHECKS=0');
@@ -78,103 +90,132 @@ class ResetTestDataCommand extends Command
             // 4. notification_recipient (con của notifications)
             $report[] = $this->truncateIfExists('notification_recipient');
 
-            // 5. electricity_bills (con của electricity_records + occupancy)
+            // 5. system_announcement_recipients (con của system_announcements + notifications)
+            $report[] = $this->truncateIfExists('system_announcement_recipients');
+
+            // 6. electricity_bills (con của electricity_records + occupancy)
             $report[] = $this->truncateIfExists('electricity_bills');
 
-            // 6. room_change_requests (con của occupancy — bảng legacy, thường rỗng nhưng vẫn dọn để an toàn)
+            // 7. room_change_requests (con của occupancy — bảng legacy, thường rỗng nhưng vẫn dọn để an toàn)
             $report[] = $this->truncateIfExists('room_change_requests');
 
-            // 7. room_change_log (con của maintenance_requests + occupancy)
+            // 8. room_change_log (con của maintenance_requests + occupancy)
             $report[] = $this->truncateIfExists('room_change_log');
 
-            // 8. checkout_requests (con của occupancy)
+            // 9. checkout_requests (con của occupancy)
             $report[] = $this->truncateIfExists('checkout_requests');
 
-            // 9. activities (con của occupancy)
+            // 10. activities (con của occupancy)
             $report[] = $this->truncateIfExists('activities');
 
-            // 10. room_fee_bills (con của occupancy)
+            // 11. room_fee_bills (con của occupancy)
             $report[] = $this->truncateTable('room_fee_bills');
 
-            // 11. occupancy_extensions (con của occupancy + occupancy_periods)
+            // 12. occupancy_extensions (con của occupancy + occupancy_periods)
             $report[] = $this->truncateIfExists('occupancy_extensions');
 
-            // 12. reservation_priorities (con của dorm_reservations)
+            // 13. reservation_priorities (con của dorm_reservations)
             $report[] = $this->truncateIfExists('reservation_priorities');
 
-            // 13. student_priority (con của registrations)
+            // 14. student_priority (con của registrations)
             $report[] = $this->truncateIfExists('student_priority');
 
-            // 14. waitlist (con của registrations + registration_periods)
+            // 15. waitlist (con của registrations + registration_periods)
             $report[] = $this->truncateIfExists('waitlist');
 
-            // 15. dorm_reservations (con của admission_candidates + registrations + registration_periods)
+            // 16. dorm_reservations (con của admission_candidates + registrations + registration_periods)
             $report[] = $this->truncateIfExists('dorm_reservations');
 
-            // 16. occupancy (con của registrations)
+            // 17. occupancy (con của registrations)
             $report[] = $this->truncateTable('occupancy');
 
-            // 17. registrations (con của registration_periods)
+            // 18. registrations (con của registration_periods)
             $report[] = $this->truncateTable('registrations');
 
-            // 18. student_support_requests (cha của student_payment_plans, đã xóa ở bước 3)
+            // 19. student_support_requests (cha của student_payment_plans, đã xóa ở bước 3)
             $report[] = $this->truncateIfExists('student_support_requests');
 
-            // 19. maintenance_requests (cha của room_change_log, đã xóa ở bước 7)
+            // 20. maintenance_requests (cha của room_change_log, đã xóa ở bước 8)
             $report[] = $this->truncateIfExists('maintenance_requests');
 
-            // 20. notifications (cha của notification_recipient, đã xóa ở bước 4)
+            // 21. notifications (cha của notification_recipient + system_announcement_recipients, đã xóa ở bước 4-5)
             $report[] = $this->truncateIfExists('notifications');
 
-            // 21. electricity_records (cha của electricity_bills, đã xóa ở bước 5)
+            // 22. system_announcements (cha của system_announcement_recipients, đã xóa ở bước 5)
+            $report[] = $this->truncateIfExists('system_announcements');
+
+            // 23. electricity_records (cha của electricity_bills, đã xóa ở bước 6)
             $report[] = $this->truncateIfExists('electricity_records');
 
-            // 22. admission_candidates (cha của dorm_reservations, đã xóa ở bước 15)
-            $report[] = $this->truncateIfExists('admission_candidates');
+            // 24. admission_candidates (cha của dorm_reservations, đã xóa ở bước 16)
+            // Có thể giữ nguyên qua --keep-admission-candidates (dorm_reservations con đã xóa ở bước 16,
+            // giữ lại bảng cha không vi phạm FK).
+            if ($this->option('keep-admission-candidates')) {
+                $report[] = ['table' => 'admission_candidates', 'deleted' => 0, 'skipped' => true];
+            } else {
+                $report[] = $this->truncateIfExists('admission_candidates');
+            }
 
-            // 23. registration_periods (cha của registrations/waitlist/dorm_reservations, đã xóa ở trên)
+            // 25. registration_periods (cha của registrations/waitlist/dorm_reservations, đã xóa ở trên)
             $report[] = $this->truncateTable('registration_periods');
 
-            // 24. occupancy_periods (cha của occupancy_extensions, đã xóa ở bước 11)
+            // 26. occupancy_periods (cha của occupancy_extensions, đã xóa ở bước 12)
             $report[] = $this->truncateIfExists('occupancy_periods');
 
-            // 25. blacklist (độc lập, chỉ tham chiếu students/accounts được giữ nguyên)
+            // 27. blacklist (độc lập, chỉ tham chiếu students/accounts được giữ nguyên)
             $report[] = $this->truncateIfExists('blacklist');
 
-            // 26. payment_reminders (độc lập, chỉ tham chiếu students được giữ nguyên)
+            // 28. payment_reminders (độc lập, chỉ tham chiếu students được giữ nguyên)
             $report[] = $this->truncateIfExists('payment_reminders');
 
-            // 27. admin_notifications (độc lập)
+            // 29. admin_notifications (độc lập)
             $report[] = $this->truncateIfExists('admin_notifications');
 
-            // 28. Xóa accounts có role = 'student' (giữ nguyên accounts role=admin)
+            // 30. Xóa accounts có role = 'student' (giữ nguyên accounts role=admin)
             $studentAccountCount = DB::table('accounts')->where('role', 'student')->count();
             DB::table('accounts')->where('role', 'student')->delete();
             DB::statement('ALTER TABLE accounts AUTO_INCREMENT = 1');
             $report[] = ['table' => 'accounts (role=student)', 'deleted' => $studentAccountCount, 'skipped' => false];
 
-            // 29. personal_access_tokens (token đăng nhập cũ — xóa hết để không còn phiên đăng nhập test)
+            // 31. personal_access_tokens (token đăng nhập cũ — xóa hết để không còn phiên đăng nhập test)
             $report[] = $this->truncateIfExists('personal_access_tokens');
 
-            // 30. sessions
+            // 32. sessions
             $report[] = $this->truncateIfExists('sessions');
 
-            // 31-34. jobs / failed_jobs / cache / cache_locks
+            // 33-36. jobs / failed_jobs / cache / cache_locks
             $report[] = $this->truncateIfExists('jobs');
             $report[] = $this->truncateIfExists('failed_jobs');
             $report[] = $this->truncateIfExists('cache');
             $report[] = $this->truncateIfExists('cache_locks');
 
-            // 35. Reset beds.status về 'active'
+            // 37. Reset beds.status về 'active'
             $bedsReset = DB::table('beds')->update(['status' => 'active']);
             if ($this->columnExists('beds', 'physical_status')) {
                 DB::table('beds')->update(['physical_status' => 'active']);
             }
             $report[] = ['table' => 'beds (reset status=active)', 'deleted' => $bedsReset, 'skipped' => false];
 
-            // 36. Reset rooms.status về 'active'
+            // 38. Reset rooms.status về 'active'
             $roomsReset = DB::table('rooms')->update(['status' => 'active']);
             $report[] = ['table' => 'rooms (reset status=active)', 'deleted' => $roomsReset, 'skipped' => false];
+
+            // 39. (Tùy chọn, mặc định KHÔNG bật) Xóa avatar demo của TẤT CẢ sinh viên — đặt sau
+            // cùng vì đây là dọn dẹp dữ liệu demo trên bảng students, khác phạm vi với các bước
+            // truncate dữ liệu động ở trên (students vốn được giữ nguyên ở toàn bộ lệnh này).
+            if ($this->option('clear-demo-avatars')) {
+                $studentsWithAvatar = DB::table('students')->whereNotNull('avatar')->where('avatar', '!=', '')->get(['id', 'avatar']);
+                $deletedFileCount = 0;
+                foreach ($studentsWithAvatar as $s) {
+                    if (Storage::disk('public')->exists($s->avatar)) {
+                        Storage::disk('public')->delete($s->avatar);
+                        $deletedFileCount++;
+                    }
+                }
+                $nulledCount = DB::table('students')->whereNotNull('avatar')->where('avatar', '!=', '')->update(['avatar' => null]);
+                $report[] = ['table' => 'students.avatar (--clear-demo-avatars: null hóa + xóa file)', 'deleted' => $nulledCount, 'skipped' => false];
+                $this->line("  → Đã null hóa avatar của {$nulledCount} sinh viên, xóa {$deletedFileCount} file vật lý tương ứng.");
+            }
 
         } finally {
             DB::statement('SET FOREIGN_KEY_CHECKS=1');

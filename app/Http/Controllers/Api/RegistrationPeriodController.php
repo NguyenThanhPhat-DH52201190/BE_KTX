@@ -14,6 +14,8 @@ use Illuminate\Validation\Rule;
 
 class RegistrationPeriodController extends Controller
 {
+    private const MODIFICATION_LOCKED_MESSAGE = 'Không thể sửa hoặc xóa đợt đã mở/đã đóng. Vui lòng tạo đợt mới nếu cần thay đổi.';
+
     private function withBreakdownCounts()
     {
         $pendingCriteriaSubquery = DB::table('student_priority')
@@ -61,24 +63,74 @@ class RegistrationPeriodController extends Controller
         return response()->json($period);
     }
 
-    public function store(Request $request): JsonResponse
+    private function validationRules(): array
     {
-        $data = $request->validate([
+        return [
             'name'               => ['required', 'string', 'max:191'],
             'channel'            => ['required', Rule::in(['main', 'rolling'])],
-            'school_year'        => ['required', 'string', 'max:20'],
-            'semester'           => ['required', 'string', 'max:20'],
+            'status'             => ['sometimes', Rule::in(['pending', 'active', 'closed', 'processing'])],
+            'school_year'        => ['required', 'string', 'max:20', 'regex:/^\d{4}-\d{4}$/'],
+            'semester'           => ['required', 'string', Rule::in(['1', '2', '3'])],
             'start_date'         => ['required', 'date'],
             'end_date'           => ['required', 'date', 'after_or_equal:start_date'],
-            'stay_start_date'    => ['nullable', 'date'],
-            'stay_end_date'      => ['nullable', 'date', 'after_or_equal:stay_start_date'],
-            'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
-            'processing_days'           => ['nullable', 'integer', 'min:1'],
+            'stay_start_date'    => ['required', 'date'],
+            'stay_end_date'      => ['required', 'date', 'after:stay_start_date'],
+            'bed_selection_days'        => ['required', 'integer', 'min:1'],
+            'processing_days'           => ['required', 'integer', 'min:1'],
             'initial_payment_due_days'  => ['required', 'integer', 'min:1'],
             'round_number'              => ['nullable', 'integer', 'min:1'],
-            'allow_admission_candidates' => ['sometimes', 'boolean'],
-            'requires_student_code'     => ['sometimes', 'boolean'],
-        ]);
+            'allow_admission_candidates' => ['required', 'boolean'],
+            'requires_student_code'     => ['required', 'boolean'],
+        ];
+    }
+
+    private function validationMessages(): array
+    {
+        return [
+            'name.required'              => 'Vui lòng nhập tên đợt.',
+            'channel.required'           => 'Vui lòng chọn kênh.',
+            'channel.in'                 => 'Kênh không hợp lệ.',
+            'school_year.required'       => 'Vui lòng nhập năm học.',
+            'school_year.regex'          => 'Năm học phải có định dạng YYYY-YYYY.',
+            'semester.required'          => 'Vui lòng chọn học kỳ.',
+            'semester.in'                => 'Học kỳ không hợp lệ.',
+            'start_date.required'        => 'Vui lòng chọn ngày bắt đầu.',
+            'start_date.date'            => 'Vui lòng nhập ngày theo định dạng dd/mm/yyyy.',
+            'end_date.required'          => 'Vui lòng chọn ngày kết thúc.',
+            'end_date.date'              => 'Vui lòng nhập ngày theo định dạng dd/mm/yyyy.',
+            'end_date.after_or_equal'    => 'Ngày kết thúc phải sau ngày bắt đầu.',
+            'stay_start_date.required'   => 'Vui lòng chọn ngày bắt đầu.',
+            'stay_start_date.date'       => 'Vui lòng nhập ngày theo định dạng dd/mm/yyyy.',
+            'stay_end_date.required'     => 'Vui lòng chọn ngày kết thúc.',
+            'stay_end_date.date'         => 'Vui lòng nhập ngày theo định dạng dd/mm/yyyy.',
+            'stay_end_date.after'        => 'Ngày kết thúc phải sau ngày bắt đầu.',
+            'processing_days.required'   => 'Vui lòng nhập số ngày xử lý.',
+            'processing_days.integer'    => 'Số ngày phải là số nguyên.',
+            'processing_days.min'        => 'Số ngày phải lớn hơn hoặc bằng 1.',
+            'bed_selection_days.required' => 'Vui lòng nhập số ngày chọn giường.',
+            'bed_selection_days.integer' => 'Số ngày phải là số nguyên.',
+            'bed_selection_days.min'     => 'Số ngày phải lớn hơn hoặc bằng 1.',
+            'initial_payment_due_days.required' => 'Vui lòng nhập số ngày thanh toán.',
+            'initial_payment_due_days.integer'  => 'Số ngày phải là số nguyên.',
+            'initial_payment_due_days.min'      => 'Số ngày phải lớn hơn hoặc bằng 1.',
+            'allow_admission_candidates.required' => 'Vui lòng chọn đối tượng đăng ký.',
+            'allow_admission_candidates.boolean'  => 'Đối tượng đăng ký không hợp lệ.',
+            'requires_student_code.required'      => 'Vui lòng chọn đối tượng đăng ký.',
+            'requires_student_code.boolean'       => 'Đối tượng đăng ký không hợp lệ.',
+        ];
+    }
+
+    public function store(Request $request): JsonResponse
+    {
+        $data = $request->validate($this->validationRules(), $this->validationMessages());
+
+        $semesterEndError = $this->validateSemesterIsNotEnded($data['school_year'], $data['semester']);
+        if ($semesterEndError) {
+            return response()->json([
+                'message' => $semesterEndError['message'],
+                'errors'  => [$semesterEndError['field'] => [$semesterEndError['message']]],
+            ], 422);
+        }
 
         // Rule 1: Mỗi năm học chỉ được có 1 đợt chính
         if ($data['channel'] === 'main') {
@@ -175,28 +227,25 @@ class RegistrationPeriodController extends Controller
     {
         $period = RegistrationPeriod::findOrFail($id);
 
-        $data = $request->validate([
-            'name'               => ['sometimes', 'string', 'max:191'],
-            'channel'            => ['sometimes', Rule::in(['main', 'rolling'])],
-            'status'             => ['sometimes', Rule::in(['pending', 'active', 'closed', 'processing'])],
-            'school_year'        => ['sometimes', 'string', 'max:20'],
-            'semester'           => ['sometimes', 'string', 'max:20'],
-            'start_date'         => ['sometimes', 'date'],
-            'end_date'           => ['sometimes', 'date', 'after_or_equal:start_date'],
-            'stay_start_date'    => ['nullable', 'date'],
-            'stay_end_date'      => ['nullable', 'date'],
-            'bed_selection_days'        => ['nullable', 'integer', 'min:0'],
-            'processing_days'           => ['nullable', 'integer', 'min:1'],
-            'initial_payment_due_days'  => ['sometimes', 'integer', 'min:1'],
-            'round_number'              => ['nullable', 'integer', 'min:1'],
-            'allow_admission_candidates' => ['sometimes', 'boolean'],
-            'requires_student_code'     => ['sometimes', 'boolean'],
-        ]);
+        if (! $this->canModifyPeriod($period)) {
+            return response()->json(['message' => self::MODIFICATION_LOCKED_MESSAGE], 422);
+        }
+
+        $data = $request->validate($this->validationRules(), $this->validationMessages());
 
         $channel    = $data['channel']     ?? $period->channel;
         $schoolYear = $data['school_year'] ?? $period->school_year;
+        $semester   = $data['semester']    ?? $period->semester;
         $startDate  = $data['start_date']  ?? $period->start_date?->toDateString();
         $endDate    = $data['end_date']    ?? $period->end_date?->toDateString();
+
+        $semesterEndError = $this->validateSemesterIsNotEnded($schoolYear, $semester);
+        if ($semesterEndError) {
+            return response()->json([
+                'message' => $semesterEndError['message'],
+                'errors'  => [$semesterEndError['field'] => [$semesterEndError['message']]],
+            ], 422);
+        }
 
         if ($channel === 'main') {
             $existing = RegistrationPeriod::where('channel', 'main')
@@ -319,9 +368,22 @@ class RegistrationPeriodController extends Controller
             ], 422);
         }
 
+        if (! $this->canModifyPeriod($period)) {
+            return response()->json(['message' => self::MODIFICATION_LOCKED_MESSAGE], 422);
+        }
+
         $period->delete();
 
         return response()->json(['message' => 'Đã xóa đợt đăng ký.']);
+    }
+
+    private function canModifyPeriod(RegistrationPeriod $period): bool
+    {
+        if ($period->status !== 'pending' || ! $period->start_date) {
+            return false;
+        }
+
+        return \Carbon\Carbon::parse($period->start_date)->startOfDay()->gt(\Carbon\Carbon::today());
     }
 
     public function process(int $id): JsonResponse
@@ -394,6 +456,78 @@ class RegistrationPeriodController extends Controller
         $data['stay_end_date'] = $mainPeriod->stay_end_date->toDateString();
 
         return null;
+    }
+
+    /**
+     * @return array{field: string, message: string}|null
+     */
+    private function validateSemesterIsNotEnded(?string $schoolYear, ?string $semester): ?array
+    {
+        $schoolYear = trim((string) $schoolYear);
+        if (! preg_match('/^(\d{4})-(\d{4})$/', $schoolYear, $matches)) {
+            return [
+                'field'   => 'school_year',
+                'message' => 'Năm học phải có định dạng YYYY-YYYY.',
+            ];
+        }
+
+        $startYear = (int) $matches[1];
+        $endYear   = (int) $matches[2];
+        if ($endYear !== $startYear + 1) {
+            return [
+                'field'   => 'school_year',
+                'message' => 'Năm học phải có định dạng YYYY-YYYY.',
+            ];
+        }
+
+        $today = \Carbon\Carbon::now()->startOfDay();
+        $schoolYearEndDate = \Carbon\Carbon::create($endYear, 8, 31)->startOfDay();
+        if ($schoolYearEndDate->lt($today)) {
+            return [
+                'field'   => 'school_year',
+                'message' => 'Không thể tạo hoặc sửa đợt đăng ký cho năm học đã kết thúc.',
+            ];
+        }
+
+        $semesterEndDate = $this->semesterEndDate($schoolYear, $semester);
+        if (! $semesterEndDate) {
+            return [
+                'field'   => $semesterEndDate === false ? 'semester' : 'school_year',
+                'message' => $semesterEndDate === false
+                    ? 'Học kỳ không hợp lệ.'
+                    : 'Năm học phải có định dạng YYYY-YYYY.',
+            ];
+        }
+
+        if ($semesterEndDate->lt($today)) {
+            return [
+                'field'   => 'semester',
+                'message' => 'Không thể tạo hoặc sửa đợt đăng ký cho học kỳ đã kết thúc.',
+            ];
+        }
+
+        return null;
+    }
+
+    private function semesterEndDate(?string $schoolYear, ?string $semester): \Carbon\Carbon|false|null
+    {
+        $schoolYear = trim((string) $schoolYear);
+        if (! preg_match('/^(\d{4})-(\d{4})$/', $schoolYear, $matches)) {
+            return null;
+        }
+
+        $startYear = (int) $matches[1];
+        $endYear   = (int) $matches[2];
+        if ($endYear !== $startYear + 1) {
+            return null;
+        }
+
+        return match (trim((string) $semester)) {
+            '1' => \Carbon\Carbon::create($startYear, 12, 31)->startOfDay(),
+            '2' => \Carbon\Carbon::create($endYear, 5, 31)->startOfDay(),
+            '3' => \Carbon\Carbon::create($endYear, 8, 31)->startOfDay(),
+            default => false,
+        };
     }
 
     private function validateStayStartDate(

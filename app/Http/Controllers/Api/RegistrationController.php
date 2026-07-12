@@ -21,6 +21,7 @@ use App\Models\Blacklist;
 use App\Models\ElectricityBill;
 use App\Models\RoomFeeBill;
 use App\Helpers\StorageHelper;
+use App\Jobs\ProcessPriorityEvidenceJob;
 use App\Services\AutoReviewService;
 use App\Services\RoomFeeBillingService;
 use App\Services\StudentNotificationService;
@@ -445,29 +446,13 @@ class RegistrationController extends Controller
             ]);
         }
 
-        // Check 7b: đợt đăng ký giới hạn theo năm học, dựa trên tổ hợp 2 cờ cấu hình đợt:
-        // - Bật cả "Cho phép tân sinh viên chưa MSSV" + "Yêu cầu MSSV": đợt dành riêng cho lứa
-        //   tân sinh viên (dù đã có MSSV hay chưa) — chỉ sinh viên năm 1 được đăng ký qua kênh này.
-        // - Chỉ bật "Yêu cầu MSSV" (không cho phép tân sinh viên chưa MSSV): đợt dành cho sinh
-        //   viên cũ (không phải năm 1) đăng ký lại/tiếp tục.
-        if ($activePeriod->requires_student_code) {
-            $isFirstYear = (int) ($student->current_year ?? 0) === 1;
-
-            if ($activePeriod->allow_admission_candidates && !$isFirstYear) {
-                return response()->json([
-                    'eligible'       => false,
-                    'reason_code'    => 'not_first_year',
-                    'reason_message' => 'Đợt đăng ký này chỉ dành cho tân sinh viên năm nhất.',
-                ]);
-            }
-
-            if (!$activePeriod->allow_admission_candidates && $isFirstYear) {
-                return response()->json([
-                    'eligible'       => false,
-                    'reason_code'    => 'first_year_not_allowed',
-                    'reason_message' => 'Đợt đăng ký này không dành cho sinh viên năm nhất.',
-                ]);
-            }
+        // Check 7b: giới hạn theo nhóm đối tượng cấu hình trên đợt đăng ký.
+        if ($targetError = $this->registrationPeriodTargetError($activePeriod, $student)) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => $targetError['reason_code'],
+                'reason_message' => $targetError['message'],
+            ]);
         }
 
         // Check 8: Đủ điều kiện (active hoặc pending)
@@ -565,16 +550,11 @@ class RegistrationController extends Controller
         }
 
         // Re-check giới hạn năm học theo cấu hình đợt — xem giải thích ở eligibility() Check 7b.
-        if ($activePeriod->requires_student_code) {
-            $isFirstYear = (int) ($student->current_year ?? 0) === 1;
-
-            if ($activePeriod->allow_admission_candidates && !$isFirstYear) {
-                return response()->json(['message' => 'Đợt đăng ký này chỉ dành cho tân sinh viên năm nhất.', 'reason_code' => 'not_first_year'], 422);
-            }
-
-            if (!$activePeriod->allow_admission_candidates && $isFirstYear) {
-                return response()->json(['message' => 'Đợt đăng ký này không dành cho sinh viên năm nhất.', 'reason_code' => 'first_year_not_allowed'], 422);
-            }
+        if ($targetError = $this->registrationPeriodTargetError($activePeriod, $student)) {
+            return response()->json([
+                'message'     => $targetError['message'],
+                'reason_code' => $targetError['reason_code'],
+            ], 422);
         }
 
         $currentStudent = $student;
@@ -763,7 +743,10 @@ class RegistrationController extends Controller
             throw $exception;
         }
 
-        // Xử lý file minh chứng sau transaction (tối đa 6 ảnh / tiêu chí)
+        // Minh chứng ưu tiên (tối đa 6 ảnh / tiêu chí): chỉ chuyển file vào disk 'local'
+        // (staging, luôn ghi nhanh vì không phải Railway volume) rồi đẩy việc lưu vào vị
+        // trí lưu trữ cuối + tạo bản ghi evidence ra queue, để sinh viên không phải chờ
+        // bước này mới thấy đơn "đã gửi thành công".
         if (!empty($criteriaIds)) {
             $registrationId = $result['registration']->id;
             foreach ($criteriaIds as $criteriaId) {
@@ -778,31 +761,15 @@ class RegistrationController extends Controller
                 }
                 $files = array_slice($files, 0, 6);
 
-                $priority = StudentPriority::where('registration_id', $registrationId)
-                    ->where('priority_criteria_id', $criteriaId)
-                    ->first();
-                if (!$priority) {
-                    continue;
-                }
-
-                $path = 'students/priority_evidence';
+                $stagingDir = 'temp_evidence/' . $registrationId . '_' . $criteriaId;
+                $stagedFilenames = [];
                 foreach ($files as $index => $file) {
-                    $filename = 'evidence_' . $criteriaId . '_' . time() . '_' . uniqid() . '_' . $index . '.' . $file->getClientOriginalExtension();
-
-                    if (StorageHelper::isRailwayWithVolume()) {
-                        $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
-                        $fullDir = $volumePath . '/' . $path;
-                        if (!file_exists($fullDir)) {
-                            mkdir($fullDir, 0755, true);
-                        }
-                        $file->move($fullDir, $filename);
-                        $fileUrl = $path . '/' . $filename;
-                    } else {
-                        $fileUrl = $file->store($path, 'public');
-                    }
-
-                    $priority->evidences()->create(['file_url' => $fileUrl]);
+                    $stagedName = 'evidence_' . $index . '.' . $file->getClientOriginalExtension();
+                    $file->storeAs($stagingDir, $stagedName, 'local');
+                    $stagedFilenames[] = $stagedName;
                 }
+
+                ProcessPriorityEvidenceJob::dispatch($registrationId, $criteriaId, $stagingDir, $stagedFilenames);
             }
         }
 
@@ -1579,6 +1546,41 @@ class RegistrationController extends Controller
             'skipped_review' => $skippedReview,
             'skipped_null'   => $skippedNull,
         ]);
+    }
+
+    /**
+     * Kiểm tra sinh viên đã có MSSV theo nhóm đối tượng của đợt đăng ký.
+     * allow_admission_candidates: tân sinh viên.
+     * requires_student_code: sinh viên đang học có MSSV, năm 1-4.
+     *
+     * @return array{reason_code: string, message: string}|null
+     */
+    private function registrationPeriodTargetError(RegistrationPeriod $period, Student $student): ?array
+    {
+        $allowFirstYear = (bool) $period->allow_admission_candidates;
+        $allowStudyingStudents = (bool) $period->requires_student_code;
+
+        if (! $allowFirstYear && ! $allowStudyingStudents) {
+            return null;
+        }
+
+        $currentYear = (int) ($student->current_year ?? 0);
+
+        if ($allowFirstYear && ! $allowStudyingStudents && $currentYear !== 1) {
+            return [
+                'reason_code' => 'not_first_year',
+                'message'     => 'Đợt đăng ký này chỉ dành cho tân sinh viên.',
+            ];
+        }
+
+        if ($allowStudyingStudents && ($currentYear < 1 || $currentYear > 4)) {
+            return [
+                'reason_code' => 'not_studying_year_1_4',
+                'message'     => 'Đợt đăng ký này chỉ dành cho sinh viên đang học từ năm 1 đến năm 4.',
+            ];
+        }
+
+        return null;
     }
 
     /**

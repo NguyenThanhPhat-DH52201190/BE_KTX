@@ -151,7 +151,7 @@ class DormReservationController extends Controller
         $period = RegistrationPeriod::findOrFail($data['registration_period_id']);
 
         if (!$period->allow_admission_candidates) {
-            return response()->json(['message' => 'Đợt đăng ký này không cho phép hồ sơ giữ chỗ tân sinh viên.'], 422);
+            return response()->json(['message' => 'Đợt đăng ký này không mở nhóm tân sinh viên.'], 422);
         }
 
         // Kiểm tra trùng hồ sơ active
