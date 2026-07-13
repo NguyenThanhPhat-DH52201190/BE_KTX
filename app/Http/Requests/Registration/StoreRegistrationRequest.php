@@ -27,7 +27,9 @@ class StoreRegistrationRequest extends FormRequest
             'cccd_issued_date'  => $this->normalizeDate($cccdIssuedDate),
             'cccd_issued_place' => $this->input('cccd_issued_place', $this->input('cccdIssuePlace')),
             'course_year'       => $this->input('course_year', $this->input('class')),
-            'parent_relationship' => $this->input('parent_relationship', $this->input('relationship')),
+            'emergency_contact_name'         => $this->input('emergency_contact_name', $this->input('parent_name')),
+            'emergency_contact_phone'        => $this->input('emergency_contact_phone', $this->input('parent_phone')),
+            'emergency_contact_relationship' => $this->input('emergency_contact_relationship', $this->input('parent_relationship', $this->input('relationship'))),
         ]);
 
         $this->merge([
@@ -94,11 +96,11 @@ class StoreRegistrationRequest extends FormRequest
             'mother_job'        => ['required', 'string', 'max:191'],
             'mother_phone'      => ['nullable', 'string', 'regex:/^(0[0-9]{9})$/'],
 
-            // ── Liên hệ khẩn / người giám hộ ─────────────────────────────
-            'parent_name'         => ['required', 'string', 'max:191'],
-            'parent_phone'        => ['required', 'string', 'regex:/^(0[0-9]{9})$/'],
-            'parent_relationship' => ['required', 'string', 'max:191'],
-            'parent_address'      => ['required', 'string', 'max:191'],
+            // ── Liên hệ khẩn cấp ───────────────────────────────────────────
+            'emergency_contact_name'         => ['required', 'string', 'max:191'],
+            'emergency_contact_phone'        => ['required', 'string', 'regex:/^(0[0-9]{9})$/'],
+            'emergency_contact_relationship' => ['required', 'string', 'max:191'],
+            'parent_address'                 => ['required', 'string', 'max:191'],
 
             // ── Thời gian lưu trú ──────────────────────────────────────────
             'stay_from_date' => ['nullable', 'date'],
@@ -156,12 +158,12 @@ class StoreRegistrationRequest extends FormRequest
             'cccd_issued_date.date'     => 'Ngày cấp CCCD không hợp lệ.',
             'cccd_issued_place.required' => 'Vui lòng nhập nơi cấp CCCD.',
 
-            // parent / emergency contact
-            'parent_name.required'         => 'Vui lòng nhập tên người liên hệ.',
-            'parent_phone.required'        => 'Vui lòng nhập số điện thoại liên hệ khẩn.',
-            'parent_phone.regex'           => 'Số điện thoại liên hệ phải là 10 chữ số bắt đầu bằng 0.',
-            'parent_relationship.required' => 'Vui lòng nhập quan hệ với người liên hệ.',
-            'parent_address.required'      => 'Vui lòng nhập địa chỉ người liên hệ.',
+            // emergency contact
+            'emergency_contact_name.required'         => 'Vui lòng nhập tên người liên hệ khẩn cấp.',
+            'emergency_contact_phone.required'        => 'Vui lòng nhập số điện thoại liên hệ khẩn cấp.',
+            'emergency_contact_phone.regex'           => 'Số điện thoại liên hệ khẩn cấp phải là 10 chữ số bắt đầu bằng 0.',
+            'emergency_contact_relationship.required' => 'Vui lòng nhập quan hệ với người liên hệ khẩn cấp.',
+            'parent_address.required'                 => 'Vui lòng nhập địa chỉ người liên hệ.',
 
             // father
             'father_name.min'   => 'Tên cha phải có ít nhất 2 ký tự.',

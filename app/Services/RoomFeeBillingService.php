@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
+use App\Models\StudentPaymentPlan;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -19,13 +20,14 @@ class RoomFeeBillingService
     // -------------------------------------------------------------------------
 
     /**
-     * Tạo hóa đơn khi occupancy chuyển sang ACTIVE.
+     * Tạo hóa đơn khi occupancy chuyển sang ACTIVE — dùng cho luồng admin gán
+     * giường trực tiếp (chưa có hóa đơn nào từ trước).
      *
-     * Quy trình:
-     * 1. Tạo hóa đơn prorated cho tháng check-in (nếu vào giữa tháng).
-     * 2. Nếu check_in_date nằm trong quá khứ, tạo thêm hóa đơn đầy đủ
-     *    cho các tháng bị bỏ lỡ từ tháng check-in đến tháng hiện tại.
-     * 3. Bỏ qua nếu hóa đơn đã tồn tại (student_id + month + year).
+     * Chỉ tạo ĐÚNG 1 hóa đơn, dùng chung công thức quý với createInitialBill()
+     * (xem createQuarterBundleBill()) — không tự bù cho các quý trước đó nếu
+     * kích hoạt bị trễ; nếu việc kích hoạt trễ qua tới quý sau, quý đó để
+     * generateQuarterlyBills() (cron đầu quý) tự lo như mọi occupancy ACTIVE
+     * khác, không cần xử lý đặc biệt ở đây.
      */
     public function createBillsOnActivation(Occupancy $occupancy): void
     {
@@ -34,42 +36,22 @@ class RoomFeeBillingService
             return;
         }
 
-        $pricePerMonth = $this->getRoomFeePerMonth();
-        $checkIn       = Carbon::parse($occupancy->check_in_date)->startOfDay();
-        $currentMonth  = Carbon::now()->startOfMonth();
-        $checkInMonth  = $checkIn->copy()->startOfMonth();
+        $checkIn = Carbon::parse($occupancy->check_in_date)->startOfDay();
+        $dueDate = Carbon::create($checkIn->year, $checkIn->month, 20)->toDateString();
 
-        // Duyệt từ tháng check-in đến tháng hiện tại.
-        // Nếu check_in_date nằm trong tương lai, ceiling là tháng check-in đó
-        // để đảm bảo hóa đơn tháng đầu luôn được tạo ngay khi ACTIVE.
-        $ceiling = $checkInMonth->gt($currentMonth) ? $checkInMonth : $currentMonth;
-        $cursor  = $checkInMonth->copy();
-
-        while ($cursor->lte($ceiling)) {
-            $month = $cursor->month;
-            $year  = $cursor->year;
-
-            if (! $this->billExists($occupancy->student_id, $month, $year)) {
-                if ($cursor->isSameMonth($checkIn)) {
-                    $this->createProratedBill($occupancy, $checkIn, $pricePerMonth);
-                } else {
-                    $this->createFullMonthBill($occupancy, $month, $year, $pricePerMonth);
-                }
-            }
-
-            $cursor->addMonthNoOverflow();
-        }
+        $this->createQuarterBundleBill($occupancy, $checkIn, $dueDate);
     }
 
     /**
      * Tạo hóa đơn ban đầu khi sinh viên chọn giường.
      *
-     * Quy tắc:
-     * - Luôn tạo hóa đơn FULL tháng đầu (không pro-rated).
-     * - Nếu vào giữa tháng (check_in_date.day > 1): tạo thêm hóa đơn quý kế tiếp
-     *   (= phí tháng × 3) để sinh viên biết nghĩa vụ thanh toán tiếp theo.
-     * - Idempotent: trả về bill cũ nếu đã tồn tại.
-     * due_date của tháng đầu = hôm nay + initial_payment_due_days.
+     * Quy tắc (thu theo quý cố định Q1=T1-T3, Q2=T4-T6, Q3=T7-T9, Q4=T10-T12):
+     * - Hóa đơn đầu = 1 hóa đơn GỘP đủ số tháng còn lại của quý hiện tại, tính
+     *   từ THÁNG check-in (không tính theo ngày lẻ — vào ngày nào trong tháng
+     *   cũng tính đủ nguyên tháng đó) tới hết quý. Không tạo hóa đơn quý kế
+     *   tiếp ngay — quý sau sẽ do generateQuarterlyBills() (cron đầu quý) đảm nhiệm.
+     * - Idempotent: trả về bill đã bao phủ tháng check-in nếu đã tồn tại.
+     * due_date của hóa đơn đầu = hôm nay + initial_payment_due_days.
      */
     public function createInitialBill(Occupancy $occupancy): ?RoomFeeBill
     {
@@ -82,120 +64,126 @@ class RoomFeeBillingService
             return null;
         }
 
-        $pricePerMonth  = $this->getRoomFeePerMonth();
-        $checkIn        = Carbon::parse($occupancy->check_in_date)->startOfDay();
-        $month          = $checkIn->month;
-        $year           = $checkIn->year;
-        $initialDueDate = Carbon::today('Asia/Ho_Chi_Minh')->addDays($dueDays)->toDateString();
-        $totalDays      = $checkIn->daysInMonth;
+        $checkIn = Carbon::parse($occupancy->check_in_date)->startOfDay();
+        $dueDate = Carbon::today('Asia/Ho_Chi_Minh')->addDays($dueDays)->toDateString();
 
-        // Hóa đơn tháng đầu (full tháng, không pro-rated) — idempotent
-        $firstBill = RoomFeeBill::where('student_id', $occupancy->student_id)
-            ->where('month', $month)
-            ->where('year', $year)
+        return $this->createQuarterBundleBill($occupancy, $checkIn, $dueDate);
+    }
+
+    /**
+     * Tạo (hoặc trả về nếu đã tồn tại) 1 hóa đơn gộp đủ số tháng còn lại của
+     * quý chứa $checkIn — dùng chung bởi createInitialBill() và
+     * createBillsOnActivation(), đảm bảo 2 đường luôn ra cùng 1 kết quả cho
+     * cùng 1 tháng check-in, chỉ khác thời điểm được gọi và due_date.
+     */
+    private function createQuarterBundleBill(Occupancy $occupancy, Carbon $checkIn, string $dueDate): ?RoomFeeBill
+    {
+        $month = $checkIn->month;
+        $year  = $checkIn->year;
+
+        $existing = RoomFeeBill::where('student_id', $occupancy->student_id)
+            ->coveringMonth($month, $year)
             ->first();
 
-        if (! $firstBill) {
-            $discount  = $this->discountService->calculate($occupancy, $pricePerMonth);
-            $firstBill = RoomFeeBill::create([
-                'student_id'       => $occupancy->student_id,
-                'occupancy_id'     => $occupancy->id,
-                'month'            => $month,
-                'year'             => $year,
-                'amount'           => $discount['final_amount'],
-                'original_amount'  => $discount['original_amount'],
-                'discount_percent' => $discount['discount_percent'],
-                'discount_amount'  => $discount['discount_amount'],
-                'discount_reason'  => $discount['discount_reason'],
-                'days_stayed'      => $totalDays,
-                'total_days'       => $totalDays,
-                'due_date'         => $initialDueDate,
-                'status'           => 'unpaid',
-            ]);
+        if ($existing) {
+            return $existing;
         }
 
-        // Nếu vào giữa tháng → tạo thêm hóa đơn quý kế tiếp
-        if ($checkIn->day > 1) {
-            [$nextQMonth, $nextQYear] = $this->nextQuarterFirstMonth($month, $year);
+        $monthsCount   = $this->monthsRemainingInQuarter($month);
+        $pricePerMonth = $this->getRoomFeePerMonth();
 
-            if (! $this->billExists($occupancy->student_id, $nextQMonth, $nextQYear)) {
-                $quarterlyBase = $pricePerMonth * 3;
-                $discount      = $this->discountService->calculate($occupancy, $quarterlyBase);
-
-                RoomFeeBill::create([
-                    'student_id'       => $occupancy->student_id,
-                    'occupancy_id'     => $occupancy->id,
-                    'month'            => $nextQMonth,
-                    'year'             => $nextQYear,
-                    'amount'           => $discount['final_amount'],
-                    'original_amount'  => $discount['original_amount'],
-                    'discount_percent' => $discount['discount_percent'],
-                    'discount_amount'  => $discount['discount_amount'],
-                    'discount_reason'  => $discount['discount_reason'],
-                    'days_stayed'      => null,
-                    'total_days'       => null,
-                    'due_date'         => Carbon::create($nextQYear, $nextQMonth, 20)->toDateString(),
-                    'status'           => 'unpaid',
-                ]);
-            }
-        }
-
-        return $firstBill;
+        return $this->createBundleBill($occupancy, $month, $year, $monthsCount, $pricePerMonth, $dueDate);
     }
 
     /**
-     * Trả về [month, year] của tháng đầu tiên trong quý kế tiếp.
-     * Ví dụ: tháng 6 (Q2) → trả về [7, $year] (Q3 bắt đầu tháng 7).
-     *         tháng 12 (Q4) → trả về [1, $year+1].
+     * Số tháng còn lại của quý (Q1=T1-T3, Q2=T4-T6, Q3=T7-T9, Q4=T10-T12) tính
+     * từ tháng truyền vào (bao gồm chính tháng đó) tới hết quý.
+     * VD: tháng 7 (đầu Q3) -> 3; tháng 2 (giữa Q1) -> 2; tháng 3 (cuối Q1) -> 1.
      */
-    private function nextQuarterFirstMonth(int $month, int $year): array
+    private function monthsRemainingInQuarter(int $month): int
     {
-        $nextQFirstMonth = (int) ceil($month / 3) * 3 + 1;
+        $positionInQuarter = ($month - 1) % 3; // 0, 1 hoặc 2
 
-        if ($nextQFirstMonth > 12) {
-            return [1, $year + 1];
-        }
+        return 3 - $positionInQuarter;
+    }
 
-        return [$nextQFirstMonth, $year];
+    /**
+     * Cộng thêm $count tháng vào [$month, $year], trả về [month, year] mới.
+     */
+    private function addMonths(int $month, int $year, int $count): array
+    {
+        $total = ($year * 12 + ($month - 1)) + $count;
+
+        return [$total % 12 + 1, intdiv($total, 12)];
     }
 
     // -------------------------------------------------------------------------
-    // Scheduler flow (gọi bởi GenerateMonthlyRoomFeeBillsCommand ngày 01)
+    // Scheduler flow (gọi bởi GenerateQuarterlyRoomFeeBillsCommand đầu mỗi quý)
     // -------------------------------------------------------------------------
 
     /**
-     * Tạo hóa đơn tháng chỉ định cho tất cả occupancy đang ACTIVE.
+     * Tạo hóa đơn quý (gộp đủ 3 tháng) cho tất cả occupancy đang ACTIVE, tại
+     * tháng đầu quý ($month phải là 1, 4, 7 hoặc 10 — do command gọi hàm này
+     * đảm nhiệm việc chặn tháng không hợp lệ).
      *
-     * Quy tắc:
-     * - Kiểm tra tồn tại trước khi insert — idempotent.
+     * Quy tắc: chỉ lọc occupancy status=ACTIVE — occupancy PENDING_PAYMENT quá
+     * hạn đã bị ExpireInitialPaymentCommand tự hủy từ trước, nên tới thời điểm
+     * cron quý chạy, occupancy còn tồn tại và ACTIVE nghĩa là đã từng kích hoạt
+     * hợp lệ. Occupancy đang nợ hóa đơn quý trước vẫn được tạo hóa đơn quý mới
+     * bình thường (không chờ trả hết nợ cũ) — nợ quá hạn do
+     * ProcessOverdueBillsCommand xử lý riêng.
      *
      * @return array{generated: int, skipped: int}
      */
-    public function generateMonthlyBills(int $month, int $year): array
+    public function generateQuarterlyBills(int $month, int $year): array
     {
         $generated     = 0;
         $skipped       = 0;
         $pricePerMonth = $this->getRoomFeePerMonth();
         $billingStart  = Carbon::create($year, $month, 1)->startOfDay();
+        $dueDate       = Carbon::create($year, $month, 20)->toDateString();
+
+        // Sinh viên đang bật "đóng theo tháng" (installment) phải tiếp tục được
+        // bill riêng từng tháng — không gộp quý, nếu không sẽ phá vỡ đúng chế
+        // độ họ đã được admin duyệt.
+        $installmentStudentIds = StudentPaymentPlan::query()
+            ->where('type', 'installment')
+            ->where('is_active', true)
+            ->pluck('student_id')
+            ->flip();
 
         Occupancy::where('status', 'ACTIVE')
             ->whereNotNull('check_in_date')
-            ->each(function (Occupancy $occupancy) use ($month, $year, $billingStart, $pricePerMonth, &$generated, &$skipped) {
+            ->each(function (Occupancy $occupancy) use ($month, $year, $billingStart, $pricePerMonth, $dueDate, $installmentStudentIds, &$generated, &$skipped) {
                 $checkIn = Carbon::parse($occupancy->check_in_date)->startOfDay();
 
-                // Bỏ qua nếu sinh viên chưa đến tháng này
+                // Bỏ qua nếu sinh viên chưa đến quý này (sẽ được createInitialBill/
+                // createBillsOnActivation lo hóa đơn quý cụt khi họ thực sự vào ở).
                 if ($checkIn->copy()->startOfMonth()->gt($billingStart)) {
                     $skipped++;
                     return;
                 }
 
-                // billExists() chống trùng (observer đã tạo hóa đơn tháng check-in prorated)
+                if ($installmentStudentIds->has($occupancy->student_id)) {
+                    $createdAny = false;
+                    [$m, $y] = [$month, $year];
+                    for ($i = 0; $i < 3; $i++) {
+                        if (! $this->billExists($occupancy->student_id, $m, $y)) {
+                            $this->createBundleBill($occupancy, $m, $y, 1, $pricePerMonth, Carbon::create($y, $m, 20)->toDateString());
+                            $createdAny = true;
+                        }
+                        [$m, $y] = $this->addMonths($m, $y, 1);
+                    }
+                    $createdAny ? $generated++ : $skipped++;
+                    return;
+                }
+
                 if ($this->billExists($occupancy->student_id, $month, $year)) {
                     $skipped++;
                     return;
                 }
 
-                $this->createFullMonthBill($occupancy, $month, $year, $pricePerMonth);
+                $this->createBundleBill($occupancy, $month, $year, 3, $pricePerMonth, $dueDate);
                 $generated++;
             });
 
@@ -207,16 +195,18 @@ class RoomFeeBillingService
     // -------------------------------------------------------------------------
 
     /**
-     * Tách bill gộp quý (total_days = null) đang unpaid/overdue của sinh viên
-     * thành 3 bill tháng riêng. Không lỗi nếu không có bill quý nào đang chờ —
-     * bật installment vẫn hợp lệ, chỉ ảnh hưởng các lần sinh bill sau này.
+     * Tách bill gộp nhiều tháng (months_count > 1) đang unpaid/overdue của sinh
+     * viên thành từng bill 1 tháng riêng — số bill tách ra = đúng months_count
+     * của bill gộp đó (có thể là 2 hoặc 3, không cố định 3). Không lỗi nếu
+     * không có bill gộp nào đang chờ — bật installment vẫn hợp lệ, chỉ ảnh
+     * hưởng các lần sinh bill sau này.
      *
      * @return array{split: bool, bills?: array<RoomFeeBill>}
      */
     public function splitQuarterlyBillToMonthly(int $studentId): array
     {
         $quarterlyBill = RoomFeeBill::where('student_id', $studentId)
-            ->whereNull('total_days')
+            ->where('months_count', '>', 1)
             ->whereIn('status', ['unpaid', 'overdue'])
             ->first();
 
@@ -226,12 +216,13 @@ class RoomFeeBillingService
 
         $occupancy   = Occupancy::find($quarterlyBill->occupancy_id);
         $totalAmount = (int) round((float) ($quarterlyBill->original_amount ?? $quarterlyBill->amount));
-        $monthlyBase = intdiv($totalAmount, 3);
+        $monthsCount = $quarterlyBill->months_count;
+        $monthlyBase = intdiv($totalAmount, $monthsCount);
 
         $months = [];
         $month  = (int) $quarterlyBill->month;
         $year   = (int) $quarterlyBill->year;
-        for ($i = 0; $i < 3; $i++) {
+        for ($i = 0; $i < $monthsCount; $i++) {
             $months[] = [$month, $year];
             $month++;
             if ($month > 12) {
@@ -242,7 +233,7 @@ class RoomFeeBillingService
 
         $newBills = [];
 
-        DB::transaction(function () use ($quarterlyBill, $occupancy, $months, $monthlyBase, $totalAmount, &$newBills) {
+        DB::transaction(function () use ($quarterlyBill, $occupancy, $months, $monthsCount, $monthlyBase, $totalAmount, &$newBills) {
             $status          = $quarterlyBill->status;
             $originalDueDate = $quarterlyBill->due_date;
             $studentId       = $quarterlyBill->student_id;
@@ -251,7 +242,8 @@ class RoomFeeBillingService
             $quarterlyBill->delete();
 
             foreach ($months as $index => [$m, $y]) {
-                $baseForMonth = $index === 2 ? ($totalAmount - $monthlyBase * 2) : $monthlyBase;
+                $isLast       = $index === $monthsCount - 1;
+                $baseForMonth = $isLast ? ($totalAmount - $monthlyBase * ($monthsCount - 1)) : $monthlyBase;
 
                 $discount = $occupancy
                     ? $this->discountService->calculate($occupancy, $baseForMonth)
@@ -271,6 +263,7 @@ class RoomFeeBillingService
                     'occupancy_id'     => $occupancyId,
                     'month'            => $m,
                     'year'             => $y,
+                    'months_count'     => 1,
                     'amount'           => $discount['final_amount'],
                     'original_amount'  => $discount['discount_percent'] > 0 ? $discount['original_amount'] : null,
                     'discount_percent' => $discount['discount_percent'] > 0 ? $discount['discount_percent'] : null,
@@ -341,63 +334,32 @@ class RoomFeeBillingService
     }
 
     /**
-     * Tạo hóa đơn prorated cho tháng đầu (vào giữa hoặc cuối tháng).
-     *
-     * Công thức: amount = price / total_days * days_stayed
-     * days_stayed = (ngày cuối tháng - ngày check-in + 1)
-     * due_date    = truyền vào từ caller (createInitialBill) hoặc ngày 20 tháng sau
+     * Tạo 1 hóa đơn gộp $monthsCount tháng liên tiếp, bắt đầu từ $startMonth/
+     * $startYear. $monthsCount = 1 là hóa đơn tháng bình thường (total_days =
+     * số ngày trong tháng, giữ nguyên quy ước cũ để không ảnh hưởng tới
+     * `is_quarterly` flag). $monthsCount > 1 là hóa đơn gộp nhiều tháng
+     * (total_days = null — đúng quy ước "is_quarterly" đã dùng sẵn ở
+     * RoomFeeBillController/StudentPaymentController).
      */
-    private function createProratedBill(Occupancy $occupancy, Carbon $checkIn, int $pricePerMonth, ?string $dueDate = null): RoomFeeBill
-    {
-        $month      = $checkIn->month;
-        $year       = $checkIn->year;
-        $totalDays  = $checkIn->daysInMonth;
-        $daysStayed = $totalDays - $checkIn->day + 1;
-        $rawAmount  = ($daysStayed === $totalDays)
-            ? $pricePerMonth
-            : (int) round($pricePerMonth / $totalDays * $daysStayed);
-
-        $dueDate ??= Carbon::create($year, $month, 1)
-            ->addMonthNoOverflow()
-            ->setDay(20)
-            ->toDateString();
-
-        $discount = $this->discountService->calculate($occupancy, $rawAmount);
+    private function createBundleBill(
+        Occupancy $occupancy,
+        int $startMonth,
+        int $startYear,
+        int $monthsCount,
+        int $pricePerMonth,
+        string $dueDate,
+    ): RoomFeeBill {
+        $baseAmount = $pricePerMonth * $monthsCount;
+        $discount   = $this->discountService->calculate($occupancy, $baseAmount);
+        $isSingleMonth = $monthsCount === 1;
+        $totalDays  = $isSingleMonth ? Carbon::create($startYear, $startMonth, 1)->daysInMonth : null;
 
         return RoomFeeBill::create([
             'student_id'       => $occupancy->student_id,
             'occupancy_id'     => $occupancy->id,
-            'month'            => $month,
-            'year'             => $year,
-            'amount'           => $discount['final_amount'],
-            'original_amount'  => $discount['original_amount'],
-            'discount_percent' => $discount['discount_percent'],
-            'discount_amount'  => $discount['discount_amount'],
-            'discount_reason'  => $discount['discount_reason'],
-            'days_stayed'      => $daysStayed,
-            'total_days'       => $totalDays,
-            'due_date'         => $dueDate,
-            'status'           => 'unpaid',
-        ]);
-    }
-
-    /**
-     * Tạo hóa đơn đầy đủ cho tháng (days_stayed = total_days).
-     *
-     * due_date = ngày 20 của tháng đang lập hóa đơn.
-     */
-    private function createFullMonthBill(Occupancy $occupancy, int $month, int $year, int $pricePerMonth): RoomFeeBill
-    {
-        $totalDays = Carbon::create($year, $month, 1)->daysInMonth;
-        $dueDate   = Carbon::create($year, $month, 20)->toDateString();
-
-        $discount = $this->discountService->calculate($occupancy, $pricePerMonth);
-
-        return RoomFeeBill::create([
-            'student_id'       => $occupancy->student_id,
-            'occupancy_id'     => $occupancy->id,
-            'month'            => $month,
-            'year'             => $year,
+            'month'            => $startMonth,
+            'year'             => $startYear,
+            'months_count'     => $monthsCount,
             'amount'           => $discount['final_amount'],
             'original_amount'  => $discount['original_amount'],
             'discount_percent' => $discount['discount_percent'],
@@ -411,48 +373,13 @@ class RoomFeeBillingService
     }
 
     /**
-     * Kiểm tra hóa đơn đã tồn tại cho sinh viên trong tháng/năm — bao gồm cả
-     * trường hợp tháng đó đã được gộp trả trước trong hóa đơn quý (xem
-     * isMonthCoveredByQuarterlyBill). Không check riêng 2 điều kiện này ở từng
-     * nơi gọi sẽ dẫn tới sinh trùng hóa đơn cho các tháng còn lại của quý.
+     * Kiểm tra tháng/năm này đã nằm trong khoảng bao phủ của 1 hóa đơn nào của
+     * sinh viên chưa (hóa đơn 1 tháng hay hóa đơn gộp nhiều tháng đều tính).
      */
     private function billExists(int $studentId, int $month, int $year): bool
     {
-        $exists = RoomFeeBill::where('student_id', $studentId)
-            ->where('month', $month)
-            ->where('year', $year)
-            ->exists();
-
-        return $exists || $this->isMonthCoveredByQuarterlyBill($studentId, $month, $year);
-    }
-
-    /**
-     * True nếu tháng/năm này nằm trong một hóa đơn "gộp quý" đã tạo sẵn
-     * (createInitialBill() khi sinh viên vào ở giữa tháng — gộp 3 tháng vào
-     * 1 dòng, gắn nhãn ở tháng đầu quý, total_days = null). Nếu không kiểm
-     * tra điều này, generateMonthlyBills()/createBillsOnActivation() sẽ coi
-     * 2 tháng còn lại của quý là "chưa có hóa đơn" và tạo thêm hóa đơn full
-     * tháng riêng, thu trùng tiền đã gộp trong hóa đơn quý.
-     */
-    private function isMonthCoveredByQuarterlyBill(int $studentId, int $month, int $year): bool
-    {
-        [$quarterMonth, $quarterYear] = $this->quarterStartMonth($month, $year);
-
         return RoomFeeBill::where('student_id', $studentId)
-            ->where('month', $quarterMonth)
-            ->where('year', $quarterYear)
-            ->whereNull('total_days')
+            ->coveringMonth($month, $year)
             ->exists();
-    }
-
-    /**
-     * Trả về [month, year] của tháng đầu quý chứa tháng/năm truyền vào.
-     * Ví dụ: tháng 8 -> quý 3 (7,8,9) -> trả về [7, $year].
-     */
-    private function quarterStartMonth(int $month, int $year): array
-    {
-        $startMonth = (int) (intdiv($month - 1, 3) * 3) + 1;
-
-        return [$startMonth, $year];
     }
 }

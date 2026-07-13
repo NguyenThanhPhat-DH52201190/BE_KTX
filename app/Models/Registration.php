@@ -4,6 +4,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Carbon\Carbon;
 
 class Registration extends Model
 {
@@ -23,6 +24,9 @@ class Registration extends Model
         'mother_job',
         'mother_phone',
         'parent_address',
+        'emergency_contact_name',
+        'emergency_contact_phone',
+        'emergency_contact_relationship',
         'stay_from_date',
         'stay_to_date',
         'cccd_front_url',
@@ -64,5 +68,18 @@ class Registration extends Model
         // occupancy theo thời gian. latestOfMany() đảm bảo luôn lấy đúng occupancy mới nhất
         // (id lớn nhất), không phải bản ghi đầu tiên theo thứ tự mặc định của DB.
         return $this->hasOne(Occupancy::class)->latestOfMany();
+    }
+
+    public function bedSelectionDeadline(): ?Carbon
+    {
+        $days = $this->period?->bed_selection_days;
+
+        if (! $days || ! $this->approved_at) {
+            return null;
+        }
+
+        return Carbon::parse($this->approved_at)
+            ->addDays((int) $days)
+            ->setTime(17, 0, 0);
     }
 }

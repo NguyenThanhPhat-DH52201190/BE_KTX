@@ -5,7 +5,6 @@ namespace App\Console\Commands;
 use App\Models\Bed;
 use App\Models\Occupancy;
 use App\Services\StudentNotificationService;
-use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -20,12 +19,12 @@ class ExpireBedSelectionCommand extends Command
     public function handle(StudentNotificationService $notifier): int
     {
         $this->isDry = (bool) $this->option('dry-run');
-        $today       = Carbon::today();
+        $now         = now();
 
         $this->info(sprintf(
             '[bed-selection:expire] %s (ngày: %s)',
             $this->isDry ? 'DRY RUN — không ghi dữ liệu.' : 'Bắt đầu...',
-            $today->toDateString(),
+            $now->toDateTimeString(),
         ));
 
         // Sinh viên có status ROOM_CONFIRMED (đã được phân phòng, chưa chọn giường)
@@ -39,8 +38,8 @@ class ExpireBedSelectionCommand extends Command
             ->whereNotNull('registration_periods.bed_selection_days')
             ->where('registration_periods.bed_selection_days', '>', 0)
             ->whereRaw(
-                'DATE(DATE_ADD(registrations.approved_at, INTERVAL registration_periods.bed_selection_days DAY)) < ?',
-                [$today->toDateString()],
+                "TIMESTAMP(DATE(DATE_ADD(registrations.approved_at, INTERVAL registration_periods.bed_selection_days DAY)), '17:00:00') <= ?",
+                [$now->toDateTimeString()],
             )
             ->select('occupancy.*')
             ->with(['student', 'registration', 'room.floor'])

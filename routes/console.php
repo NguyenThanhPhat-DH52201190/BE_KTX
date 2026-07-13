@@ -10,8 +10,9 @@ Artisan::command('inspire', function () {
 
 Schedule::command('periods:update-status')->dailyAt('00:00');
 
-// Tạo hóa đơn tiền phòng tháng mới cho tất cả sinh viên ACTIVE (ngày 01 lúc 07:00)
-Schedule::command('bills:generate-monthly')->monthlyOn(1, '07:00');
+// Tạo hóa đơn tiền phòng theo quý (gộp 3 tháng) cho tất cả sinh viên ACTIVE —
+// chạy đúng ngày 01 đầu mỗi quý (T1, T4, T7, T10) lúc 07:00.
+Schedule::command('bills:generate-quarterly')->cron('0 7 1 1,4,7,10 *');
 
 // Đánh dấu hóa đơn quá hạn (unpaid -> overdue) mỗi ngày lúc 01:00
 Schedule::command('bills:update-overdue')->dailyAt('01:00');

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Mail\GenericNotificationMail;
 use App\Models\Notification;
 use App\Models\Student;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -36,6 +37,36 @@ class StudentNotificationService
     public function notifyEmailOnly(?string $email, ?string $name, string $title, string $content, bool $queue = false): void
     {
         $this->sendEmail($email, $name, $title, $content, null, null, $queue);
+    }
+
+    public function notifyRoomAssigned(Student $student, string $roomName, ?Carbon $deadline = null, ?int $relatedId = null, bool $queue = false): void
+    {
+        $this->notifyStudent(
+            $student,
+            'Bạn đã được phân phòng ký túc xá',
+            $this->roomAssignmentContent($roomName, $deadline),
+            'room_assigned',
+            $relatedId,
+            $queue,
+        );
+    }
+
+    public function roomAssignmentContent(string $roomName, ?Carbon $deadline = null): string
+    {
+        $roomName = trim($roomName) !== '' ? trim($roomName) : 'chưa xác định';
+
+        if (! $deadline) {
+            return "Bạn đã được phân vào phòng: {$roomName}.\n\n"
+                . 'Vui lòng chọn giường để hoàn tất thủ tục lưu trú.';
+        }
+
+        $deadline = $deadline->copy()->timezone(config('app.timezone'));
+        $deadlineSentence = $deadline->format('H:i d/m/Y');
+        $deadlineLine = $deadline->format('d/m/Y H:i');
+
+        return "Bạn đã được phân vào phòng: {$roomName}.\n\n"
+            . "Vui lòng chọn giường trước {$deadlineSentence} để hoàn tất thủ tục lưu trú.\n\n"
+            . "Hạn chọn giường: {$deadlineLine}.";
     }
 
     private function createBellNotification(int $studentId, string $title, string $content, string $type, ?int $relatedId, bool $sendEmail): void

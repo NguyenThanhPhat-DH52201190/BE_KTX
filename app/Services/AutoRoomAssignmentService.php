@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Occupancy;
 use App\Models\Registration;
 use App\Models\Room;
+use Carbon\Carbon;
 
 class AutoRoomAssignmentService
 {
@@ -190,18 +191,27 @@ class AutoRoomAssignmentService
             $occupancy->status = 'ROOM_CONFIRMED';
             $occupancy->save();
 
-            $period          = $occupancy->registration?->period;
-            $bedSelectionDays = $period?->bed_selection_days;
             $room            = $occupancy->room;
             $roomName        = ($room?->floor?->building_code ?? '') . ($room?->room_number ?? '');
+            $deadline        = $this->bedSelectionDeadline($occupancy->registration);
+            $message         = $this->notifier()->roomAssignmentContent($roomName, $deadline);
+
+            if ($occupancy->student && $roomName !== '') {
+                $this->notifier()->notifyRoomAssigned(
+                    $occupancy->student,
+                    $roomName,
+                    $deadline,
+                    $occupancy->registration_id,
+                    queue: true,
+                );
+            }
 
             $notifications[] = [
                 'student_code' => $occupancy->student?->student_code,
                 'student_name' => $occupancy->student?->full_name,
                 'room_id'      => $occupancy->room_id,
                 'room_name'    => $roomName,
-                'message'      => "Ban duoc phan vao phong {$roomName}" .
-                    ($bedSelectionDays ? ", vui long chon giuong trong vong {$bedSelectionDays} ngay." : "."),
+                'message'      => $message,
             ];
         }
 
@@ -244,6 +254,16 @@ class AutoRoomAssignmentService
             ];
         }
         return $map;
+    }
+
+    private function bedSelectionDeadline(?Registration $registration): ?Carbon
+    {
+        return $registration?->bedSelectionDeadline();
+    }
+
+    private function notifier(): StudentNotificationService
+    {
+        return app(StudentNotificationService::class);
     }
 
     private function pickRoom(

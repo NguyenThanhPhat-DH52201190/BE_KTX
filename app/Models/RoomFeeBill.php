@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -14,6 +15,7 @@ class RoomFeeBill extends Model
         'occupancy_id',
         'month',
         'year',
+        'months_count',
         'amount',
         'original_amount',
         'discount_percent',
@@ -33,6 +35,7 @@ class RoomFeeBill extends Model
     ];
 
     protected $casts = [
+        'months_count'     => 'integer',
         'days_stayed'      => 'integer',
         'total_days'       => 'integer',
         'amount'           => 'integer',
@@ -52,5 +55,20 @@ class RoomFeeBill extends Model
     public function occupancy(): BelongsTo
     {
         return $this->belongsTo(Occupancy::class);
+    }
+
+    /**
+     * Lọc các hóa đơn có khoảng bao phủ [month/year, month/year + months_count - 1]
+     * chứa tháng/năm truyền vào — dùng thay cho so khớp `month`/`year` chính xác,
+     * vì từ khi có hóa đơn gộp nhiều tháng (quý), 1 hóa đơn có thể bao phủ nhiều
+     * tháng khác với tháng ghi trên cột `month`.
+     */
+    public function scopeCoveringMonth(Builder $query, int $month, int $year): Builder
+    {
+        $targetIndex = $year * 12 + $month;
+
+        return $query
+            ->whereRaw('(year * 12 + month) <= ?', [$targetIndex])
+            ->whereRaw('(year * 12 + month + months_count - 1) >= ?', [$targetIndex]);
     }
 }

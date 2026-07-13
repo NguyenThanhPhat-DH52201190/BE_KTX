@@ -30,16 +30,7 @@ class DormReservationController extends Controller
     {
         $data = $request->validate([
             'admission_code' => ['required', 'string'],
-            'date_of_birth'  => ['nullable', 'date'],
-            'cccd'           => ['nullable', 'string'],
         ]);
-
-        if (empty($data['date_of_birth']) && empty($data['cccd'])) {
-            return response()->json([
-                'message' => 'Vui lòng cung cấp ngày sinh hoặc CCCD để xác minh.',
-                'errors'  => ['date_of_birth' => ['Cần nhập ngày sinh hoặc CCCD.']],
-            ], 422);
-        }
 
         $candidate = AdmissionCandidate::where('admission_code', $data['admission_code'])->first();
 
@@ -61,38 +52,18 @@ class DormReservationController extends Controller
             ], 422);
         }
 
-        // Xác minh thông tin
-        $matched = false;
-
-        if (!empty($data['date_of_birth'])) {
-            $inputDob = \Carbon\Carbon::parse($data['date_of_birth'])->format('Y-m-d');
-            $candidateDob = \Carbon\Carbon::parse($candidate->date_of_birth)->format('Y-m-d');
-            if ($inputDob === $candidateDob) {
-                $matched = true;
-            }
-        }
-
-        if (!$matched && !empty($data['cccd'])) {
-            if ($candidate->cccd && trim($data['cccd']) === trim($candidate->cccd)) {
-                $matched = true;
-            }
-        }
-
-        if (!$matched) {
-            return response()->json([
-                'message' => 'Thông tin xác minh không khớp. Vui lòng kiểm tra lại ngày sinh hoặc CCCD.',
-            ], 422);
-        }
-
         return response()->json([
-            'id'           => $candidate->id,
-            'admission_code' => $candidate->admission_code,
-            'full_name'    => $candidate->full_name,
-            'date_of_birth' => $candidate->date_of_birth?->format('Y-m-d'),
-            'major_name'   => $candidate->major_name,
-            'course_year'  => $candidate->course_year,
-            'school_year'  => $candidate->school_year,
-            'gender'       => $candidate->gender,
+            'id'                => $candidate->id,
+            'admission_code'    => $candidate->admission_code,
+            'full_name'         => $candidate->full_name,
+            'date_of_birth'     => $candidate->date_of_birth?->format('Y-m-d'),
+            'major_name'        => $candidate->major_name,
+            'course_year'       => $candidate->course_year,
+            'school_year'       => $candidate->school_year,
+            'gender'            => $candidate->gender,
+            'cccd'              => $candidate->cccd,
+            'phone'             => $candidate->phone,
+            'permanent_address' => $candidate->permanent_address,
         ]);
     }
 
@@ -100,8 +71,6 @@ class DormReservationController extends Controller
     {
         $data = $request->validate([
             'admission_code'         => ['required', 'string'],
-            'date_of_birth'          => ['nullable', 'date'],
-            'cccd'                   => ['nullable', 'string'],
             'registration_period_id' => ['required', 'integer', 'exists:registration_periods,id'],
             'phone'                  => ['nullable', 'string', 'max:20'],
             'email'                  => ['nullable', 'email', 'max:191'],
@@ -118,33 +87,11 @@ class DormReservationController extends Controller
             'commitment_confirm'     => ['nullable', 'boolean'],
         ]);
 
-        if (empty($data['date_of_birth']) && empty($data['cccd'])) {
-            return response()->json([
-                'message' => 'Vui lòng cung cấp ngày sinh hoặc CCCD để xác minh.',
-            ], 422);
-        }
-
-        // Xác minh candidate
+        // Xác minh candidate (chỉ dựa vào admission_code, đồng bộ với verify())
         $candidate = AdmissionCandidate::where('admission_code', $data['admission_code'])->first();
 
         if (!$candidate || $candidate->status !== 'admitted') {
             return response()->json(['message' => 'Mã hồ sơ trúng tuyển không hợp lệ hoặc không ở trạng thái trúng tuyển.'], 422);
-        }
-
-        $matched = false;
-        if (!empty($data['date_of_birth'])) {
-            $inputDob = \Carbon\Carbon::parse($data['date_of_birth'])->format('Y-m-d');
-            if ($inputDob === \Carbon\Carbon::parse($candidate->date_of_birth)->format('Y-m-d')) {
-                $matched = true;
-            }
-        }
-        if (!$matched && !empty($data['cccd'])) {
-            if ($candidate->cccd && trim($data['cccd']) === trim($candidate->cccd)) {
-                $matched = true;
-            }
-        }
-        if (!$matched) {
-            return response()->json(['message' => 'Thông tin xác minh không khớp.'], 422);
         }
 
         // Kiểm tra đợt đăng ký

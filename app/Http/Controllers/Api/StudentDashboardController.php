@@ -28,7 +28,7 @@ class StudentDashboardController extends Controller
 
         // 1. Latest registration and current occupancy
         $latestRegistration = Registration::where('student_id', $student->id)
-            ->with('occupancy')
+            ->with(['occupancy.room.floor', 'occupancy.bed', 'period'])
             ->orderByDesc('created_at')
             ->first();
 
@@ -83,9 +83,10 @@ class StudentDashboardController extends Controller
             $month = $now->month;
             $year  = $now->year;
 
+            // coveringMonth() vì 1 hóa đơn có thể gộp nhiều tháng (quý), không còn
+            // khớp chính xác month/year nữa.
             $roomFee = RoomFeeBill::where('occupancy_id', $occupancyModel->id)
-                ->where('month', $month)
-                ->where('year', $year)
+                ->coveringMonth($month, $year)
                 ->first();
 
             $elecBill = ElectricityBill::where('occupancy_id', $occupancyModel->id)
@@ -157,6 +158,13 @@ class StudentDashboardController extends Controller
             ->orderByDesc('created_at')
             ->first(['id', 'name', 'end_date']);
 
+        $latestOccupancy = $latestRegistration?->occupancy;
+        $latestRoom = $latestOccupancy?->room;
+        $latestRoomName = $latestRoom
+            ? trim(($latestRoom->floor?->building_code ?? '') . ($latestRoom->room_number ?? ''))
+            : null;
+        $bedSelectionDeadline = $latestRegistration?->bedSelectionDeadline()?->toDateTimeString();
+
         return response()->json([
             'student'                    => [
                 'id'           => $student->id,
@@ -174,9 +182,12 @@ class StudentDashboardController extends Controller
                 'status'              => $latestRegistration->status,
                 'rejection_reason'    => $latestRegistration->rejection_reason,
                 'assigned_room_id'    => $latestRegistration->occupancy?->room_id,
+                'assigned_room_name'  => $latestRoomName !== '' ? $latestRoomName : null,
                 'bed_id'              => $latestRegistration->occupancy?->bed_id,
+                'selected_bed_number' => $latestOccupancy?->bed?->bed_number,
                 'bed_approval_status' => $latestRegistration->occupancy?->bed_approval_status,
                 'occupancy_status'    => $latestRegistration->occupancy?->status,
+                'bed_selection_deadline' => $bedSelectionDeadline,
             ] : null,
             'notifications'              => $notifications,
             'pending_requests'           => $pendingRequests,

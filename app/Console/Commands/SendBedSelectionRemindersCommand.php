@@ -57,12 +57,8 @@ class SendBedSelectionRemindersCommand extends Command
                 continue;
             }
 
-            $period       = $occupancy->registration?->period;
-            $approvedAt   = $occupancy->registration?->approved_at;
-            $selDays      = $period?->bed_selection_days ?? 0;
-            $deadline     = $approvedAt
-                ? Carbon::parse($approvedAt)->addDays($selDays)->toDateString()
-                : $tomorrow->toDateString();
+            $deadline     = $occupancy->registration?->bedSelectionDeadline()?->toDateTimeString()
+                ?? $tomorrow->copy()->setTime(17, 0, 0)->toDateTimeString();
 
             if ($this->isDry) {
                 $this->line("  [DRY] {$student->full_name} ({$student->student_code}) — hạn chọn giường: {$this->fmt($deadline)}");
@@ -149,6 +145,6 @@ HTML;
 
     private function fmt(string $date): string
     {
-        return Carbon::parse($date)->format('d/m/Y');
+        return Carbon::parse($date)->format('H:i d/m/Y');
     }
 }

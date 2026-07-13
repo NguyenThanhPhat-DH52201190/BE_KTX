@@ -124,6 +124,7 @@ class RegistrationController extends Controller
             'period_name' => $registration->period?->name,
             'period_status' => $registration->period?->status,
             'approved_at' => $registration->approved_at?->toDateString(),
+            'bed_selection_deadline' => $this->bedSelectionDeadline($registration)?->toDateTimeString(),
             'occupancy_id' => $registration->occupancy?->id,
             'assigned_room_id' => $registration->occupancy?->room_id,
             'assigned_bed_id' => $registration->occupancy?->bed_id,
@@ -220,6 +221,16 @@ class RegistrationController extends Controller
         }
 
         $isRoomChange = ! empty($oldRoomCode);
+        if (! $isRoomChange) {
+            $this->notifier()->notifyRoomAssigned(
+                $student,
+                $newRoomCode,
+                $this->bedSelectionDeadline($registration),
+                $registration->id,
+            );
+            return;
+        }
+
         $title = $isRoomChange ? 'Thông báo đổi phòng lưu trú' : 'Thông báo phân phòng lưu trú';
         $type = $isRoomChange ? 'room_assignment_changed' : 'room_assigned';
         $oldLabel = $oldRoomCode
@@ -251,13 +262,7 @@ class RegistrationController extends Controller
      */
     private function bedSelectionDeadline(Registration $registration): ?Carbon
     {
-        $days = $registration->period?->bed_selection_days;
-
-        if (! $days || ! $registration->approved_at) {
-            return null;
-        }
-
-        return Carbon::parse($registration->approved_at)->addDays($days);
+        return $registration->bedSelectionDeadline();
     }
 
     private function notifier(): StudentNotificationService
@@ -668,6 +673,21 @@ class RegistrationController extends Controller
                     'religion' => $data['religion'],
                     'permanent_address' => $data['permanent_address'],
                     'status' => 'active',
+                    // Cha/mẹ + liên hệ khẩn cấp là dữ liệu tĩnh gắn với con người, không phải
+                    // gắn với từng lần đăng ký — ghi (upsert) vào students mỗi lần nộp đơn để
+                    // các lần đăng ký sau tự động điền sẵn (FE đọc qua /student/profile).
+                    'father_name'       => $data['father_name'] ?? null,
+                    'father_birth_year' => $data['father_birth_year'] ?? null,
+                    'father_job'        => $data['father_job'] ?? null,
+                    'father_phone'      => $data['father_phone'] ?? null,
+                    'mother_name'       => $data['mother_name'] ?? null,
+                    'mother_birth_year' => $data['mother_birth_year'] ?? null,
+                    'mother_job'        => $data['mother_job'] ?? null,
+                    'mother_phone'      => $data['mother_phone'] ?? null,
+                    'parent_address'    => $data['parent_address'] ?? null,
+                    'emergency_contact_name'         => $data['emergency_contact_name'] ?? null,
+                    'emergency_contact_phone'        => $data['emergency_contact_phone'] ?? null,
+                    'emergency_contact_relationship' => $data['emergency_contact_relationship'] ?? null,
                 ];
 
                 if ($currentStudent) {
@@ -700,15 +720,21 @@ class RegistrationController extends Controller
                     'semester'               => $activePeriod->semester,
                     'school_year'            => $activePeriod->school_year,
                     'status'                 => 'submitted',
-                    'father_name'            => $data['father_name'] ?? ($data['parent_name'] ?? ''),
-                    'father_birth_year'      => $data['father_birth_year'] ?? '',
-                    'father_job'             => $data['father_job'] ?? '',
-                    'father_phone'           => $data['father_phone'] ?? ($data['parent_phone'] ?? ''),
-                    'mother_name'            => $data['mother_name'] ?? '',
-                    'mother_birth_year'      => $data['mother_birth_year'] ?? '',
-                    'mother_job'             => $data['mother_job'] ?? '',
-                    'mother_phone'           => $data['mother_phone'] ?? '',
-                    'parent_address'         => $data['parent_address'] ?? ($data['permanent_address'] ?? ''),
+                    // Snapshot lịch sử tại thời điểm nộp đơn — ĐỌC LẠI từ $student (vừa
+                    // update() ở trên) thay vì tin thẳng $data do FE gửi lên, vì input dù
+                    // đã set readonly ở FE vẫn có thể bị sửa value qua devtools rồi gửi lên.
+                    'father_name'            => $student->father_name,
+                    'father_birth_year'      => $student->father_birth_year,
+                    'father_job'             => $student->father_job,
+                    'father_phone'           => $student->father_phone,
+                    'mother_name'            => $student->mother_name,
+                    'mother_birth_year'      => $student->mother_birth_year,
+                    'mother_job'             => $student->mother_job,
+                    'mother_phone'           => $student->mother_phone,
+                    'parent_address'         => $student->parent_address,
+                    'emergency_contact_name'         => $student->emergency_contact_name,
+                    'emergency_contact_phone'        => $student->emergency_contact_phone,
+                    'emergency_contact_relationship' => $student->emergency_contact_relationship,
                     'stay_from_date'         => $activePeriod->stay_start_date?->toDateString(),
                     'stay_to_date'           => $activePeriod->stay_end_date?->toDateString(),
                     'commitment_confirm'     => $data['commitment_confirm'] ?? false,
@@ -939,13 +965,18 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
-        $registration = Registration::with('occupancy')->where('student_id', $account->student_id)
+        $registration = Registration::with(['occupancy', 'period'])->where('student_id', $account->student_id)
             ->where('status', 'approved')
             ->latest('id')
             ->first();
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn đăng ký'], 404);
+        }
+
+        $deadline = $this->bedSelectionDeadline($registration);
+        if ($deadline && now()->greaterThanOrEqualTo($deadline)) {
+            return response()->json(['message' => 'Đã quá hạn chọn giường. Vui lòng liên hệ ban quản lý KTX.'], 422);
         }
 
         // 1. Tìm giường — phải tồn tại trước khi check bất cứ điều gì

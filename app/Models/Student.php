@@ -30,9 +30,22 @@ class Student extends Model
         'permanent_address',
         'province_code',
         'avatar',
+        'aws_face_id',
         'status',
         'academic_status',
         'current_year',
+        'father_name',
+        'father_birth_year',
+        'father_job',
+        'father_phone',
+        'mother_name',
+        'mother_birth_year',
+        'mother_job',
+        'mother_phone',
+        'parent_address',
+        'emergency_contact_name',
+        'emergency_contact_phone',
+        'emergency_contact_relationship',
     ];
 
     

@@ -91,12 +91,12 @@ class OccupancyController extends Controller
                 'action_taken' => $a->action_taken,
             ])->values()->all();
 
-        // Current month invoice for this occupancy
+        // Current month invoice for this occupancy — dùng coveringMonth() vì 1 hóa
+        // đơn có thể gộp nhiều tháng (quý), không còn khớp chính xác month/year nữa.
         $now = now();
         $currentBill = RoomFeeBill::query()
             ->where('occupancy_id', $occupancy->id)
-            ->where('month', $now->month)
-            ->where('year', $now->year)
+            ->coveringMonth($now->month, $now->year)
             ->first();
 
         $currentInvoice = $currentBill ? [

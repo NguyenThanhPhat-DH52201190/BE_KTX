@@ -120,16 +120,22 @@ class StudentProfileController extends Controller
                 'academic_status'    => $student->academic_status,
                 'current_year'       => $student->current_year,
             ],
+            // Đọc trực tiếp từ students — đây là nguồn dữ liệu chính (dữ liệu tĩnh gắn
+            // với con người), không còn đọc qua $latestRegistration (đơn gần nhất) vì
+            // sẽ luôn null ở lần nộp đơn đầu tiên, không giải quyết đúng gốc vấn đề.
             'family' => [
-                'father_name'       => $latestRegistration?->father_name,
-                'father_birth_year' => $latestRegistration?->father_birth_year,
-                'father_job'        => $latestRegistration?->father_job,
-                'father_phone'      => $latestRegistration?->father_phone,
-                'mother_name'       => $latestRegistration?->mother_name,
-                'mother_birth_year' => $latestRegistration?->mother_birth_year,
-                'mother_job'        => $latestRegistration?->mother_job,
-                'mother_phone'      => $latestRegistration?->mother_phone,
-                'parent_address'    => $latestRegistration?->parent_address,
+                'father_name'       => $student->father_name,
+                'father_birth_year' => $student->father_birth_year,
+                'father_job'        => $student->father_job,
+                'father_phone'      => $student->father_phone,
+                'mother_name'       => $student->mother_name,
+                'mother_birth_year' => $student->mother_birth_year,
+                'mother_job'        => $student->mother_job,
+                'mother_phone'      => $student->mother_phone,
+                'parent_address'    => $student->parent_address,
+                'emergency_contact_name'         => $student->emergency_contact_name,
+                'emergency_contact_phone'        => $student->emergency_contact_phone,
+                'emergency_contact_relationship' => $student->emergency_contact_relationship,
             ],
             'residence' => $residence,
             'documents' => [

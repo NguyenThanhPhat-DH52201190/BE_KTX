@@ -23,9 +23,10 @@ class StudentObserver
     }
 
     /**
-     * Đồng bộ face chạy đồng bộ ngay trong request lưu avatar. Bọc try-catch
-     * ở đây (thêm một lớp bảo vệ ngoài lớp đã có trong Job) để lỗi AWS không
-     * bao giờ làm fail việc tạo/cập nhật sinh viên.
+     * SyncStudentFaceToRekognition chạy NỀN qua queue (ShouldQueue) — dispatch()
+     * chỉ ghi 1 dòng vào bảng jobs, không gọi AWS ngay nên không chặn request
+     * lưu avatar. try-catch ở đây chỉ để phòng lỗi lúc GHI job vào queue (DB
+     * lỗi, v.v.) — lỗi AWS thật sự (indexFace) được xử lý/log riêng trong job.
      */
     private function syncFace(Student $student): void
     {
