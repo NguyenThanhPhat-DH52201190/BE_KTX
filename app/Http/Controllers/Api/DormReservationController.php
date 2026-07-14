@@ -22,6 +22,8 @@ use Illuminate\Support\Str;
 
 class DormReservationController extends Controller
 {
+    private const ACTIVE_RESERVATION_STATUSES = ['submitted', 'approved', 'waitlisted'];
+
     // =========================================================
     // Public routes
     // =========================================================
@@ -36,34 +38,68 @@ class DormReservationController extends Controller
 
         if (!$candidate) {
             return response()->json([
-                'message' => 'Không tìm thấy mã hồ sơ trúng tuyển. Vui lòng kiểm tra lại.',
-            ], 404);
+                'verification_status' => 'not_found',
+                'message'             => 'Không tìm thấy hồ sơ trúng tuyển phù hợp.',
+            ]);
         }
+
+        $activePeriod = $this->findActiveAdmissionPeriod();
+        $existingReservation = $this->findBlockingReservation($candidate->id, $activePeriod?->id);
 
         if ($candidate->status === 'cancelled') {
             return response()->json([
-                'message' => 'Hồ sơ trúng tuyển này đã bị huỷ.',
-            ], 422);
+                'verification_status' => 'cancelled',
+                'message'             => 'Hồ sơ trúng tuyển đã bị hủy hoặc không còn hiệu lực. Vui lòng liên hệ nhà trường để được hỗ trợ.',
+                'full_name'           => $candidate->full_name,
+                'major_name'          => $candidate->major_name,
+                'course_year'         => $candidate->course_year,
+                'gender'              => $candidate->gender,
+            ]);
+        }
+
+        if ($existingReservation?->status === 'converted') {
+            return response()->json($this->verificationPayload(
+                $candidate,
+                $candidate->status === 'enrolled' ? 'enrolled' : 'admitted',
+                'Bạn đã hoàn tất đăng ký chính thức. Vui lòng đăng nhập bằng MSSV để tiếp tục.',
+                $existingReservation,
+            ));
+        }
+
+        if ($candidate->status === 'enrolled') {
+            return response()->json([
+                'verification_status' => 'enrolled',
+                'message'             => 'Bạn đã chính thức là sinh viên của trường. Vui lòng đăng ký ký túc xá bằng MSSV.',
+                'full_name'           => $candidate->full_name,
+                'major_name'          => $candidate->major_name,
+                'course_year'         => $candidate->course_year,
+                'gender'              => $candidate->gender,
+            ]);
         }
 
         if ($candidate->status !== 'admitted') {
             return response()->json([
-                'message' => 'Hồ sơ này không ở trạng thái trúng tuyển.',
-            ], 422);
+                'verification_status' => 'not_found',
+                'message'             => 'Không tìm thấy hồ sơ trúng tuyển phù hợp.',
+            ]);
+        }
+
+        if ($existingReservation) {
+            return response()->json($this->verificationPayload(
+                $candidate,
+                'admitted',
+                'Bạn đã có hồ sơ giữ chỗ đang hoạt động trong đợt này.',
+                $existingReservation,
+            ));
         }
 
         return response()->json([
-            'id'                => $candidate->id,
-            'admission_code'    => $candidate->admission_code,
-            'full_name'         => $candidate->full_name,
-            'date_of_birth'     => $candidate->date_of_birth?->format('Y-m-d'),
-            'major_name'        => $candidate->major_name,
-            'course_year'       => $candidate->course_year,
-            'school_year'       => $candidate->school_year,
-            'gender'            => $candidate->gender,
-            'cccd'              => $candidate->cccd,
-            'phone'             => $candidate->phone,
-            'permanent_address' => $candidate->permanent_address,
+            'verification_status' => 'admitted',
+            'message'             => 'Đã xác minh hồ sơ trúng tuyển.',
+            'full_name'           => $candidate->full_name,
+            'major_name'          => $candidate->major_name,
+            'course_year'         => $candidate->course_year,
+            'gender'              => $candidate->gender,
         ]);
     }
 
@@ -72,7 +108,6 @@ class DormReservationController extends Controller
         $data = $request->validate([
             'admission_code'         => ['required', 'string'],
             'registration_period_id' => ['required', 'integer', 'exists:registration_periods,id'],
-            'phone'                  => ['nullable', 'string', 'max:20'],
             'email'                  => ['nullable', 'email', 'max:191'],
             'priority_note'          => ['nullable', 'string', 'max:1000'],
             'father_name'            => ['nullable', 'string', 'max:191'],
@@ -87,69 +122,205 @@ class DormReservationController extends Controller
             'commitment_confirm'     => ['nullable', 'boolean'],
         ]);
 
-        // Xác minh candidate (chỉ dựa vào admission_code, đồng bộ với verify())
-        $candidate = AdmissionCandidate::where('admission_code', $data['admission_code'])->first();
+        return DB::transaction(function () use ($data) {
+            // Lock candidate để hai request submit gần như đồng thời không thể cùng tạo hồ sơ.
+            $candidate = AdmissionCandidate::where('admission_code', $data['admission_code'])
+                ->lockForUpdate()
+                ->first();
 
-        if (!$candidate || $candidate->status !== 'admitted') {
-            return response()->json(['message' => 'Mã hồ sơ trúng tuyển không hợp lệ hoặc không ở trạng thái trúng tuyển.'], 422);
-        }
+            if (!$candidate || $candidate->status !== 'admitted') {
+                return response()->json(['message' => 'Mã hồ sơ trúng tuyển không hợp lệ hoặc không ở trạng thái trúng tuyển.'], 422);
+            }
 
-        // Kiểm tra đợt đăng ký
-        $period = RegistrationPeriod::findOrFail($data['registration_period_id']);
+            // Nguồn sự thật duy nhất: đợt active đang mở cho tân sinh viên.
+            $period = $this->findActiveAdmissionPeriod(lock: true);
 
-        if (!$period->allow_admission_candidates) {
-            return response()->json(['message' => 'Đợt đăng ký này không mở nhóm tân sinh viên.'], 422);
-        }
+            if (!$period || (int) $data['registration_period_id'] !== (int) $period->id) {
+                return response()->json(['message' => 'Đợt đăng ký tân sinh viên hiện không hợp lệ hoặc đã đóng. Vui lòng tải lại trang và thử lại.'], 422);
+            }
 
-        // Kiểm tra trùng hồ sơ active
-        $existingActive = DormReservation::where('admission_candidate_id', $candidate->id)
-            ->where('registration_period_id', $period->id)
-            ->whereIn('status', ['submitted', 'approved', 'waitlisted'])
-            ->first();
+            $existingBlocking = $this->findBlockingReservation($candidate->id, $period->id, lock: true);
 
-        if ($existingActive) {
+            if ($existingBlocking) {
+                return response()->json([
+                    'message' => $existingBlocking->status === 'converted'
+                        ? 'Bạn đã hoàn tất đăng ký chính thức. Vui lòng đăng nhập bằng MSSV để tiếp tục.'
+                        : 'Bạn đã có hồ sơ giữ chỗ đang hoạt động trong đợt này.',
+                ], 422);
+            }
+
+            // Cập nhật thông tin liên hệ. Email LUÔN ghi đè bằng email thí sinh vừa tự nhập
+            // (kênh liên lạc cá nhân cho giai đoạn trước nhập học — thông báo duyệt/từ chối/
+            // chờ hồ sơ giữ chỗ qua notifyCandidate()) — không giữ điều kiện "chỉ ghi nếu
+            // candidate chưa có email" như trước, vì candidate seed sẵn email (dữ liệu trường
+            // gửi) sẽ luôn khiến email tự nhập bị bỏ qua, thông báo gửi sai chỗ.
+            $updateCandidate = [];
+            if (!empty($data['email'])) {
+                $updateCandidate['email'] = $data['email'];
+            }
+            if ($updateCandidate) {
+                $candidate->update($updateCandidate);
+            }
+
+            // Tạo reservation
+            $reservation = DormReservation::create([
+                'admission_candidate_id' => $candidate->id,
+                'registration_period_id' => $period->id,
+                'reservation_code'       => $this->generateReservationCode(),
+                'status'                 => 'submitted',
+                'priority_note'          => $data['priority_note'] ?? null,
+                'father_name'            => $data['father_name'] ?? null,
+                'father_birth_year'      => $data['father_birth_year'] ?? null,
+                'father_job'             => $data['father_job'] ?? null,
+                'father_phone'           => $data['father_phone'] ?? null,
+                'mother_name'            => $data['mother_name'] ?? null,
+                'mother_birth_year'      => $data['mother_birth_year'] ?? null,
+                'mother_job'             => $data['mother_job'] ?? null,
+                'mother_phone'           => $data['mother_phone'] ?? null,
+                'parent_address'         => $data['parent_address'] ?? null,
+                'commitment_confirm'     => $data['commitment_confirm'] ?? false,
+                'submitted_at'           => now(),
+            ]);
+
             return response()->json([
-                'message'     => 'Bạn đã có hồ sơ giữ chỗ đang hoạt động trong đợt này.',
-                'reservation' => $existingActive,
-            ], 422);
-        }
+                'message'     => 'Đã gửi hồ sơ giữ chỗ thành công.',
+                'reservation' => [
+                    'id'               => $reservation->id,
+                    'reservation_code' => $reservation->reservation_code,
+                    'status'           => $reservation->status,
+                ],
+            ], 201);
+        });
+    }
 
-        // Cập nhật thông tin liên hệ nếu candidate chưa có
-        $updateCandidate = [];
-        if (!empty($data['phone']) && !$candidate->phone) {
-            $updateCandidate['phone'] = $data['phone'];
-        }
-        if (!empty($data['email']) && !$candidate->email) {
-            $updateCandidate['email'] = $data['email'];
-        }
-        if ($updateCandidate) {
-            $candidate->update($updateCandidate);
-        }
-
-        // Tạo reservation
-        $reservation = DormReservation::create([
-            'admission_candidate_id' => $candidate->id,
-            'registration_period_id' => $period->id,
-            'reservation_code'       => $this->generateReservationCode(),
-            'status'                 => 'submitted',
-            'priority_note'          => $data['priority_note'] ?? null,
-            'father_name'            => $data['father_name'] ?? null,
-            'father_birth_year'      => $data['father_birth_year'] ?? null,
-            'father_job'             => $data['father_job'] ?? null,
-            'father_phone'           => $data['father_phone'] ?? null,
-            'mother_name'            => $data['mother_name'] ?? null,
-            'mother_birth_year'      => $data['mother_birth_year'] ?? null,
-            'mother_job'             => $data['mother_job'] ?? null,
-            'mother_phone'           => $data['mother_phone'] ?? null,
-            'parent_address'         => $data['parent_address'] ?? null,
-            'commitment_confirm'     => $data['commitment_confirm'] ?? false,
-            'submitted_at'           => now(),
+    public function lookup(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'reservation_code' => ['required', 'string', 'max:50'],
         ]);
 
+        $reservationCode = Str::upper(trim($data['reservation_code']));
+
+        $reservation = DormReservation::with('period')
+            ->where('reservation_code', $reservationCode)
+            ->first();
+
+        if (!$reservation) {
+            return response()->json([
+                'message' => 'Không tìm thấy hồ sơ với mã này, vui lòng kiểm tra lại.',
+            ], 404);
+        }
+
         return response()->json([
-            'message'      => 'Đã gửi hồ sơ giữ chỗ thành công.',
-            'reservation'  => $reservation->load('candidate', 'period'),
-        ], 201);
+            'message'     => 'Đã tìm thấy hồ sơ giữ chỗ.',
+            'reservation' => $this->reservationProgressPayload($reservation),
+        ]);
+    }
+
+    private function findActiveAdmissionPeriod(bool $lock = false): ?RegistrationPeriod
+    {
+        $query = RegistrationPeriod::where('status', 'active')
+            ->where('allow_admission_candidates', true)
+            ->latest('created_at');
+
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->first();
+    }
+
+    private function findActiveReservation(int $candidateId, int $periodId, bool $lock = false): ?DormReservation
+    {
+        $query = DormReservation::with('period')
+            ->where('admission_candidate_id', $candidateId)
+            ->where('registration_period_id', $periodId)
+            ->whereIn('status', self::ACTIVE_RESERVATION_STATUSES)
+            ->latest('submitted_at')
+            ->latest('created_at');
+
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->first();
+    }
+
+    private function findConvertedReservation(int $candidateId, bool $lock = false): ?DormReservation
+    {
+        $query = DormReservation::with('period')
+            ->where('admission_candidate_id', $candidateId)
+            ->where('status', 'converted')
+            ->latest('updated_at')
+            ->latest('created_at');
+
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->first();
+    }
+
+    private function findBlockingReservation(int $candidateId, ?int $periodId, bool $lock = false): ?DormReservation
+    {
+        $converted = $this->findConvertedReservation($candidateId, $lock);
+        if ($converted) {
+            return $converted;
+        }
+
+        if (!$periodId) {
+            return null;
+        }
+
+        return $this->findActiveReservation($candidateId, $periodId, $lock);
+    }
+
+    private function verificationPayload(
+        AdmissionCandidate $candidate,
+        string $verificationStatus,
+        string $message,
+        ?DormReservation $reservation = null,
+    ): array {
+        $payload = [
+            'verification_status' => $verificationStatus,
+            'message'             => $message,
+            'full_name'           => $candidate->full_name,
+            'major_name'          => $candidate->major_name,
+            'course_year'         => $candidate->course_year,
+            'gender'              => $candidate->gender,
+        ];
+
+        if ($reservation) {
+            $payload['existing_reservation'] = [
+                'reservation_code' => $reservation->reservation_code,
+                'status'           => $reservation->status,
+                'submitted_at'     => $this->reservationSubmittedAt($reservation),
+                'period_name'      => $reservation->period?->name,
+            ];
+        }
+
+        return $payload;
+    }
+
+    private function reservationProgressPayload(DormReservation $reservation): array
+    {
+        $payload = [
+            'reservation_code' => $reservation->reservation_code,
+            'status'           => $reservation->status,
+            'submitted_at'     => $this->reservationSubmittedAt($reservation),
+            'period_name'      => $reservation->period?->name,
+        ];
+
+        if ($reservation->status === 'rejected' && $reservation->rejection_reason) {
+            $payload['rejection_reason'] = $reservation->rejection_reason;
+        }
+
+        return $payload;
+    }
+
+    private function reservationSubmittedAt(DormReservation $reservation): ?string
+    {
+        return ($reservation->submitted_at ?? $reservation->created_at)?->toISOString();
     }
 
     // =========================================================
@@ -634,7 +805,7 @@ class DormReservationController extends Controller
 
         $reservation->update([$column => $url]);
 
-        return response()->json(['message' => 'Đã tải lên thành công.', 'url' => $url]);
+        return response()->json(['message' => 'Đã tải lên thành công.']);
     }
 
     private function copyPrioritiesToRegistration(DormReservation $reservation, int $studentId, int $registrationId): void

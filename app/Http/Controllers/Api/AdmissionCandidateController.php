@@ -128,167 +128,10 @@ class AdmissionCandidateController extends Controller
         return response()->json(['message' => 'Đã xóa hồ sơ thí sinh.']);
     }
 
-    public function enroll(Request $request, int $id): JsonResponse
-    {
-        $data = $request->validate([
-            'student_code'       => ['required', 'string', 'max:20'],
-            'class_name'         => ['required', 'string', 'max:100'],
-            'email'              => ['nullable', 'email', 'max:191'],
-            'phone'              => ['nullable', 'string', 'max:20'],
-            'faculty'            => ['nullable', 'string', 'max:191'],
-            'course_year'        => ['nullable', 'string', 'max:20'],
-            'current_year'       => ['nullable', 'integer', 'min:1', 'max:10'],
-            'cccd_issued_date'   => ['nullable', 'date'],
-            'cccd_issued_place'  => ['nullable', 'string', 'max:191'],
-            'nationality'        => ['nullable', 'string', 'max:100'],
-            'ethnicity'          => ['nullable', 'string', 'max:100'],
-            'religion'           => ['nullable', 'string', 'max:100'],
-            'permanent_address'  => ['nullable', 'string'],
-        ]);
-
-        return DB::transaction(function () use ($id, $data) {
-            $candidate = AdmissionCandidate::findOrFail($id);
-
-            if ($candidate->status === 'cancelled') {
-                return response()->json(['message' => 'Thí sinh đã bị huỷ, không thể nhập học.'], 422);
-            }
-
-            if ($candidate->status === 'enrolled' || $candidate->student_id !== null) {
-                return response()->json(['message' => 'Thí sinh này đã được chuyển thành sinh viên rồi.'], 422);
-            }
-
-            // Kiểm tra MSSV trùng
-            if (Student::where('student_code', $data['student_code'])->exists()) {
-                return response()->json([
-                    'message' => 'MSSV đã tồn tại trong hệ thống.',
-                    'errors'  => ['student_code' => ['MSSV này đã được sử dụng.']],
-                ], 422);
-            }
-
-            // Kiểm tra CCCD trùng trong bảng students
-            if ($candidate->cccd) {
-                $existingByCccd = Student::where('cccd', $candidate->cccd)->first();
-                if ($existingByCccd) {
-                    return response()->json([
-                        'message' => "CCCD {$candidate->cccd} đã tồn tại trong hệ thống sinh viên (MSSV: {$existingByCccd->student_code}).",
-                        'errors'  => ['cccd' => ['CCCD này đã thuộc về một sinh viên khác.']],
-                    ], 422);
-                }
-            }
-
-            // Kiểm tra email trùng (nếu có)
-            $effectiveEmail = $data['email'] ?? $candidate->email;
-            if ($effectiveEmail) {
-                $existingByEmail = Student::where('email', $effectiveEmail)->first();
-                if ($existingByEmail) {
-                    return response()->json([
-                        'message' => "Email {$effectiveEmail} đã tồn tại trong hệ thống sinh viên (MSSV: {$existingByEmail->student_code}).",
-                        'errors'  => ['email' => ['Email này đã thuộc về một sinh viên khác.']],
-                    ], 422);
-                }
-            }
-
-            // Tạo bản ghi sinh viên
-            $student = Student::create([
-                'student_code'      => $data['student_code'],
-                'full_name'         => $candidate->full_name,
-                'date_of_birth'     => $candidate->date_of_birth,
-                'gender'            => $candidate->gender,
-                'class_name'        => $data['class_name'],
-                'faculty'           => $data['faculty'] ?? null,
-                'course_year'       => $data['course_year'] ?? $candidate->course_year,
-                'phone'             => $data['phone'] ?? $candidate->phone,
-                'email'             => $effectiveEmail,
-                'cccd'              => $candidate->cccd,
-                'cccd_issued_date'  => $data['cccd_issued_date'] ?? null,
-                'cccd_issued_place' => $data['cccd_issued_place'] ?? null,
-                'nationality'       => $data['nationality'] ?? null,
-                'ethnicity'         => $data['ethnicity'] ?? null,
-                'religion'          => $data['religion'] ?? null,
-                'permanent_address' => $data['permanent_address'] ?? $candidate->permanent_address,
-                'province_code'     => $data['province_code'] ?? ProvinceHelper::resolveCode($data['permanent_address'] ?? $candidate->permanent_address),
-                'status'            => 'active',
-                'academic_status'   => 'studying',
-                'current_year'      => $data['current_year'] ?? 1,
-            ]);
-
-            // Cập nhật candidate
-            $candidate->update([
-                'status'      => 'enrolled',
-                'student_id'  => $student->id,
-                'enrolled_at' => now(),
-            ]);
-
-            // Cập nhật student_code cho các dorm_reservation liên quan
-            DormReservation::where('admission_candidate_id', $candidate->id)
-                ->update(['student_code' => $data['student_code']]);
-
-            // Auto-tạo registration nếu reservation có đủ thông tin gia đình
-            $fullReservation = DormReservation::where('admission_candidate_id', $candidate->id)
-                ->whereIn('status', ['submitted', 'approved', 'waitlisted'])
-                ->whereNotNull('father_name')
-                ->latest()
-                ->first();
-
-            if ($fullReservation) {
-                $period = RegistrationPeriod::find($fullReservation->registration_period_id);
-                // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
-                // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
-                $isPreApproved = $fullReservation->status === 'approved';
-                $reg = Registration::create([
-                    'student_id'             => $student->id,
-                    'registration_period_id' => $fullReservation->registration_period_id,
-                    'registration_type'      => 'new',
-                    'semester'               => $period?->semester,
-                    'school_year'            => $period?->school_year,
-                    'stay_from_date'         => $period?->stay_start_date?->format('Y-m-d'),
-                    'stay_to_date'           => $period?->stay_end_date?->format('Y-m-d'),
-                    'father_name'            => $fullReservation->father_name,
-                    'father_birth_year'      => $fullReservation->father_birth_year,
-                    'father_job'             => $fullReservation->father_job,
-                    'father_phone'           => $fullReservation->father_phone,
-                    'mother_name'            => $fullReservation->mother_name,
-                    'mother_birth_year'      => $fullReservation->mother_birth_year,
-                    'mother_job'             => $fullReservation->mother_job,
-                    'mother_phone'           => $fullReservation->mother_phone,
-                    'parent_address'         => $fullReservation->parent_address,
-                    'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
-                    'status'                 => $isPreApproved ? 'approved' : 'submitted',
-                    'approved_at'            => $isPreApproved ? now() : null,
-                    'avatar_url'             => $fullReservation->avatar_url,
-                    'cccd_front_url'         => $fullReservation->cccd_front_url,
-                    'cccd_back_url'          => $fullReservation->cccd_back_url,
-                    'top_priority_tier'      => $fullReservation->top_priority_tier,
-                    'total_priority_score'   => $fullReservation->total_priority_score,
-                ]);
-                $this->copyPrioritiesToRegistration($fullReservation, $student->id, $reg->id);
-                $fullReservation->update([
-                    'status'                    => 'converted',
-                    'converted_registration_id' => $reg->id,
-                ]);
-            }
-
-            // Gửi email thông báo cho sinh viên
-            if ($student->email) {
-                try {
-                    Mail::to($student->email)->send(new StudentEnrolledMail($student));
-                } catch (\Throwable $e) {
-                    Log::error('Gửi email thông báo thất bại', [
-                        'type'       => 'student_enrolled',
-                        'student_id' => $student->id,
-                        'email'      => $student->email,
-                        'error'      => $e->getMessage(),
-                    ]);
-                }
-            }
-
-            return response()->json([
-                'message'   => 'Đã chuyển thành sinh viên thành công.' . ($student->email ? ' Email thông báo đã được gửi.' : ' Sinh viên chưa có email — cần tự đăng ký tài khoản bằng MSSV.'),
-                'candidate' => $candidate->fresh(),
-                'student'   => $student,
-            ]);
-        });
-    }
+    // enroll() (nhập học từng người, tự sinh MSSV) đã bị BỎ HẲN — sai thẩm quyền: MSSV
+    // do phòng đào tạo trường cấp, KTX không được tự quyết định ai nhập học/MSSV bao
+    // nhiêu. Con đường DUY NHẤT chuyển admission_candidates → students là bulkEnroll()
+    // (Import Excel), đọc student_code thật trực tiếp từ file, không tự sinh.
 
     public function importTemplate(): Response
     {
@@ -305,7 +148,7 @@ class AdmissionCandidateController extends Controller
             'F1' => 'faculty',
             'G1' => 'course_year',
             'H1' => 'current_year',
-            'I1' => 'email',
+            'I1' => 'school_email',
             'J1' => 'phone',
             'K1' => 'cccd',
             'L1' => 'cccd_issued_date',
@@ -314,6 +157,21 @@ class AdmissionCandidateController extends Controller
             'O1' => 'ethnicity',
             'P1' => 'religion',
             'Q1' => 'permanent_address',
+            // Cha/mẹ + liên hệ khẩn cấp — nguồn duy nhất từ đây (trường thu lúc làm thủ
+            // tục nhập học trực tiếp), không còn thu lúc giữ chỗ online nữa.
+            'R1' => 'father_name',
+            'S1' => 'father_birth_year',
+            'T1' => 'father_job',
+            'U1' => 'father_phone',
+            'V1' => 'mother_name',
+            'W1' => 'mother_birth_year',
+            'X1' => 'mother_job',
+            'Y1' => 'mother_phone',
+            'Z1' => 'parent_address',
+            'AA1' => 'emergency_contact_name',
+            'AB1' => 'emergency_contact_phone',
+            'AC1' => 'emergency_contact_relationship',
+            'AD1' => 'admission_code',
         ];
 
         foreach ($headers as $cell => $value) {
@@ -321,7 +179,7 @@ class AdmissionCandidateController extends Controller
         }
 
         // Style header row
-        $sheet->getStyle('A1:Q1')->applyFromArray([
+        $sheet->getStyle('A1:AD1')->applyFromArray([
             'font'      => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
             'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '244CB8']],
             'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
@@ -336,7 +194,7 @@ class AdmissionCandidateController extends Controller
         $sheet->setCellValue('F2', 'Công nghệ thông tin');
         $sheet->setCellValue('G2', '2026-2030');
         $sheet->setCellValue('H2', 1);
-        $sheet->setCellValue('I2', 'nguyenvanan26@student.edu.vn');
+        $sheet->setCellValue('I2', 'nguyenvanan26@stu.edu.vn');
         $sheet->setCellValue('J2', '0901234567');
         $sheet->setCellValue('K2', '087654321001');
         $sheet->setCellValue('L2', '2021-01-15');
@@ -345,9 +203,23 @@ class AdmissionCandidateController extends Controller
         $sheet->setCellValue('O2', 'Kinh');
         $sheet->setCellValue('P2', 'Không');
         $sheet->setCellValue('Q2', '123 Đường ABC, Phường XYZ, Quận 1, TP.HCM');
+        $sheet->setCellValue('R2', 'Nguyễn Văn Bình');
+        $sheet->setCellValue('S2', '1975');
+        $sheet->setCellValue('T2', 'Nông dân');
+        $sheet->setCellValue('U2', '0912345678');
+        $sheet->setCellValue('V2', 'Trần Thị Lan');
+        $sheet->setCellValue('W2', '1978');
+        $sheet->setCellValue('X2', 'Nội trợ');
+        $sheet->setCellValue('Y2', '0912345679');
+        $sheet->setCellValue('Z2', '123 Đường ABC, Phường XYZ, Quận 1, TP.HCM');
+        $sheet->setCellValue('AA2', 'Nguyễn Thị Hoa');
+        $sheet->setCellValue('AB2', '0912345680');
+        $sheet->setCellValue('AC2', 'sibling');
+        $sheet->setCellValue('AD2', '01_TT_XTS_GBTT_00319');
 
         // Auto-width
-        foreach (range('A', 'Q') as $col) {
+        foreach (array_keys($headers) as $cell) {
+            $col = (string) preg_replace('/\d+$/', '', $cell);
             $sheet->getColumnDimension($col)->setAutoSize(true);
         }
         $sheet->freezePane('A2');
@@ -391,7 +263,7 @@ class AdmissionCandidateController extends Controller
             }
         }
 
-        $required = ['student_code', 'full_name', 'date_of_birth', 'class_name'];
+        $required = ['student_code', 'full_name', 'date_of_birth', 'class_name', 'school_email'];
         $missing  = array_diff($required, array_values($colMap));
         if ($missing) {
             return response()->json([
@@ -438,9 +310,35 @@ class AdmissionCandidateController extends Controller
                     return ['status' => 'error', 'message' => "CCCD '{$data['cccd']}' đã thuộc về sinh viên khác."];
                 }
 
-                // Check email collision
-                if (!empty($data['email']) && Student::where('email', $data['email'])->exists()) {
-                    return ['status' => 'error', 'message' => "Email '{$data['email']}' đã thuộc về sinh viên khác."];
+                $schoolEmail = $data['school_email'];
+                if (!filter_var($schoolEmail, FILTER_VALIDATE_EMAIL)) {
+                    return ['status' => 'error', 'message' => "Email trường '{$schoolEmail}' không hợp lệ."];
+                }
+
+                // Check school email collision.
+                if (Student::where('email', $schoolEmail)->exists()) {
+                    return ['status' => 'error', 'message' => "Email trường '{$schoolEmail}' đã thuộc về sinh viên khác."];
+                }
+
+                $candidate = null;
+                if (!empty($data['admission_code'])) {
+                    $candidate = AdmissionCandidate::where('admission_code', $data['admission_code'])->first();
+                    if (!$candidate) {
+                        return ['status' => 'error', 'message' => "Không tìm thấy hồ sơ trúng tuyển '{$data['admission_code']}'."];
+                    }
+                    if (!empty($data['cccd']) && $candidate->cccd && $candidate->cccd !== $data['cccd']) {
+                        return ['status' => 'error', 'message' => "CCCD không khớp với hồ sơ trúng tuyển '{$data['admission_code']}'."];
+                    }
+                } elseif (!empty($data['cccd'])) {
+                    $candidate = AdmissionCandidate::where('cccd', $data['cccd'])->first();
+                }
+
+                if (!$candidate) {
+                    return ['status' => 'error', 'message' => 'Không khớp hồ sơ trúng tuyển bằng admission_code hoặc CCCD. Không tạo sinh viên.'];
+                }
+
+                if ($candidate->status !== 'admitted' || $candidate->student_id) {
+                    return ['status' => 'skipped', 'message' => "Hồ sơ trúng tuyển '{$candidate->admission_code}' không ở trạng thái chờ nhập học."];
                 }
 
                 $currentYear = isset($data['current_year']) && is_numeric($data['current_year'])
@@ -457,7 +355,7 @@ class AdmissionCandidateController extends Controller
                     'faculty'           => $data['faculty'] ?? null,
                     'course_year'       => $data['course_year'] ?? null,
                     'phone'             => $data['phone'] ?? null,
-                    'email'             => $data['email'] ?? null,
+                    'email'             => $schoolEmail,
                     'cccd'              => $data['cccd'] ?? null,
                     'cccd_issued_date'  => !empty($data['cccd_issued_date']) ? $data['cccd_issued_date'] : null,
                     'cccd_issued_place' => $data['cccd_issued_place'] ?? null,
@@ -469,85 +367,106 @@ class AdmissionCandidateController extends Controller
                     'status'            => 'active',
                     'academic_status'   => 'studying',
                     'current_year'      => $currentYear,
+                    // Cha/mẹ + liên hệ khẩn cấp — nguồn DUY NHẤT giờ là Excel nhập học thật
+                    // (trường chỉ thực sự thu thông tin này lúc làm thủ tục nhập học trực
+                    // tiếp), không còn thu lúc giữ chỗ online nữa.
+                    'father_name'            => $data['father_name'] ?? null,
+                    'father_birth_year'      => $data['father_birth_year'] ?? null,
+                    'father_job'             => $data['father_job'] ?? null,
+                    'father_phone'           => $data['father_phone'] ?? null,
+                    'mother_name'            => $data['mother_name'] ?? null,
+                    'mother_birth_year'      => $data['mother_birth_year'] ?? null,
+                    'mother_job'             => $data['mother_job'] ?? null,
+                    'mother_phone'           => $data['mother_phone'] ?? null,
+                    'parent_address'         => $data['parent_address'] ?? null,
+                    'emergency_contact_name'         => $data['emergency_contact_name'] ?? null,
+                    'emergency_contact_phone'        => $data['emergency_contact_phone'] ?? null,
+                    'emergency_contact_relationship' => $data['emergency_contact_relationship'] ?? null,
                 ]);
 
-                // Auto-link to admission_candidate by CCCD
                 $linkedNote = '';
-                if (!empty($data['cccd'])) {
-                    $candidate = AdmissionCandidate::where('cccd', $data['cccd'])
-                        ->whereNull('student_id')
-                        ->first();
+                $candidate->update([
+                    'status'      => 'enrolled',
+                    'student_id'  => $student->id,
+                    'enrolled_at' => now(),
+                ]);
 
-                    if ($candidate) {
-                        $candidate->update([
-                            'status'      => 'enrolled',
-                            'student_id'  => $student->id,
-                            'enrolled_at' => now(),
-                        ]);
+                DormReservation::where('admission_candidate_id', $candidate->id)
+                    ->update(['student_code' => $data['student_code']]);
 
-                        DormReservation::where('admission_candidate_id', $candidate->id)
-                            ->update(['student_code' => $data['student_code']]);
+                $linkedNote = " Đã liên kết hồ sơ trúng tuyển ({$candidate->admission_code}).";
 
-                        $linkedNote = " Đã liên kết hồ sơ giữ chỗ ({$candidate->admission_code}).";
+                // Auto-tạo registration nếu có hồ sơ giữ chỗ đang hoạt động. Không còn
+                // lọc whereNotNull('father_name') như trước — từ khi bỏ Bước 2 "Thông
+                // tin người thân" khỏi FreshmanReservationPage, dorm_reservations mới
+                // sẽ luôn có father_name = null (không thu nữa), lọc theo cột đó sẽ
+                // chặn auto-tạo registration cho MỌI hồ sơ mới.
+                $fullReservation = DormReservation::where('admission_candidate_id', $candidate->id)
+                    ->whereIn('status', ['submitted', 'approved', 'waitlisted'])
+                    ->latest()
+                    ->first();
 
-                        // Auto-tạo registration nếu reservation có đủ thông tin gia đình
-                        $fullReservation = DormReservation::where('admission_candidate_id', $candidate->id)
-                            ->whereIn('status', ['submitted', 'approved', 'waitlisted'])
-                            ->whereNotNull('father_name')
-                            ->latest()
-                            ->first();
+                if ($fullReservation) {
+                    $period = RegistrationPeriod::find($fullReservation->registration_period_id);
+                    // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
+                    // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
+                    $isPreApproved = $fullReservation->status === 'approved';
+                    // Nguồn cha/mẹ ưu tiên: (a) dorm_reservation nếu có sẵn (dữ liệu lịch
+                    // sử — hồ sơ giữ chỗ tạo TRƯỚC khi bỏ Bước 2, lúc đó còn thu trực tiếp
+                    // lúc giữ chỗ); (b) nếu không có (hồ sơ mới, không còn thu ở bước giữ
+                    // chỗ) thì lấy từ $student — vừa được chính Excel bulkEnroll() này ghi
+                    // 12 cột cha/mẹ+khẩn cấp ở Student::create() phía trên, cùng 1 lượt xử
+                    // lý nên $student chắc chắn đã có dữ liệu nếu Excel cung cấp.
+                    // Liên hệ khẩn cấp luôn lấy từ $student vì dorm_reservations chưa bao
+                    // giờ có 3 cột này (chỉ thêm sau này cho students/registrations).
+                    $familySource = $fullReservation->father_name ? $fullReservation : $student;
+                    $reg = Registration::create([
+                        'student_id'             => $student->id,
+                        'registration_period_id' => $fullReservation->registration_period_id,
+                        'registration_type'      => 'new',
+                        'semester'               => $period?->semester,
+                        'school_year'            => $period?->school_year,
+                        'stay_from_date'         => $period?->stay_start_date?->format('Y-m-d'),
+                        'stay_to_date'           => $period?->stay_end_date?->format('Y-m-d'),
+                        'father_name'            => $familySource->father_name,
+                        'father_birth_year'      => $familySource->father_birth_year,
+                        'father_job'             => $familySource->father_job,
+                        'father_phone'           => $familySource->father_phone,
+                        'mother_name'            => $familySource->mother_name,
+                        'mother_birth_year'      => $familySource->mother_birth_year,
+                        'mother_job'             => $familySource->mother_job,
+                        'mother_phone'           => $familySource->mother_phone,
+                        'parent_address'         => $familySource->parent_address,
+                        'emergency_contact_name'         => $student->emergency_contact_name,
+                        'emergency_contact_phone'        => $student->emergency_contact_phone,
+                        'emergency_contact_relationship' => $student->emergency_contact_relationship,
+                        'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
+                        'status'                 => $isPreApproved ? 'approved' : 'submitted',
+                        'approved_at'            => $isPreApproved ? now() : null,
+                        'avatar_url'             => $fullReservation->avatar_url,
+                        'cccd_front_url'         => $fullReservation->cccd_front_url,
+                        'cccd_back_url'          => $fullReservation->cccd_back_url,
+                        'top_priority_tier'      => $fullReservation->top_priority_tier,
+                        'total_priority_score'   => $fullReservation->total_priority_score,
+                    ]);
+                    $this->copyPrioritiesToRegistration($fullReservation, $student->id, $reg->id);
+                    $fullReservation->update([
+                        'status'                    => 'converted',
+                        'converted_registration_id' => $reg->id,
+                    ]);
+                    $linkedNote .= ' Đã tự động tạo đơn đăng ký lưu trú.';
 
-                        if ($fullReservation) {
-                            $period = RegistrationPeriod::find($fullReservation->registration_period_id);
-                            // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
-                            // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
-                            $isPreApproved = $fullReservation->status === 'approved';
-                            $reg = Registration::create([
-                                'student_id'             => $student->id,
-                                'registration_period_id' => $fullReservation->registration_period_id,
-                                'registration_type'      => 'new',
-                                'semester'               => $period?->semester,
-                                'school_year'            => $period?->school_year,
-                                'stay_from_date'         => $period?->stay_start_date?->format('Y-m-d'),
-                                'stay_to_date'           => $period?->stay_end_date?->format('Y-m-d'),
-                                'father_name'            => $fullReservation->father_name,
-                                'father_birth_year'      => $fullReservation->father_birth_year,
-                                'father_job'             => $fullReservation->father_job,
-                                'father_phone'           => $fullReservation->father_phone,
-                                'mother_name'            => $fullReservation->mother_name,
-                                'mother_birth_year'      => $fullReservation->mother_birth_year,
-                                'mother_job'             => $fullReservation->mother_job,
-                                'mother_phone'           => $fullReservation->mother_phone,
-                                'parent_address'         => $fullReservation->parent_address,
-                                'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
-                                'status'                 => $isPreApproved ? 'approved' : 'submitted',
-                                'approved_at'            => $isPreApproved ? now() : null,
-                                'avatar_url'             => $fullReservation->avatar_url,
-                                'cccd_front_url'         => $fullReservation->cccd_front_url,
-                                'cccd_back_url'          => $fullReservation->cccd_back_url,
-                                'top_priority_tier'      => $fullReservation->top_priority_tier,
-                                'total_priority_score'   => $fullReservation->total_priority_score,
-                            ]);
-                            $this->copyPrioritiesToRegistration($fullReservation, $student->id, $reg->id);
-                            $fullReservation->update([
-                                'status'                    => 'converted',
-                                'converted_registration_id' => $reg->id,
-                            ]);
-                            $linkedNote .= ' Đã tự động tạo đơn đăng ký lưu trú.';
-
-                            // Hồ sơ giữ chỗ đã duyệt sẵn -> đơn nội trú tạo ra cũng
-                            // approved luôn, sinh viên chỉ còn chờ phân phòng.
-                            if ($isPreApproved) {
-                                app(StudentNotificationService::class)->notifyStudent(
-                                    $student,
-                                    'Đơn đăng ký nội trú đã được duyệt',
-                                    'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
-                                    'registration_approved',
-                                    $reg->id,
-                                    queue: true,
-                                );
-                            }
-                        }
+                    // Hồ sơ giữ chỗ đã duyệt sẵn -> đơn nội trú tạo ra cũng
+                    // approved luôn, sinh viên chỉ còn chờ phân phòng.
+                    if ($isPreApproved) {
+                        app(StudentNotificationService::class)->notifyStudent(
+                            $student,
+                            'Đơn đăng ký nội trú đã được duyệt',
+                            'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                            'registration_approved',
+                            $reg->id,
+                            queue: true,
+                        );
                     }
                 }
 

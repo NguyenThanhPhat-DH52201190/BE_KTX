@@ -88,10 +88,6 @@ class AuthController extends Controller
             return response()->json(['message' => 'MSSV không tồn tại'], 400);
         }
 
-        if (empty($student->email)) {
-            return response()->json(['message' => 'Sinh viên chưa có email trong hồ sơ. Vui lòng liên hệ quản trị.'], 400);
-        }
-
         // Kiểm tra xem đã có account cho student này chưa
         if (Account::where('student_id', $student->id)->exists()) {
             return response()->json(['message' => 'Tài khoản cho MSSV này đã tồn tại.'], 400);
@@ -121,12 +117,9 @@ class AuthController extends Controller
             $student = Student::where('student_code', $request->student_code)->first();
             $account = $student?->account;
         } else {
-            $student = Student::where('email', $request->email)->first();
-            $account = $student?->account;
-
-            // Fallback cho tài khoản quản trị chưa liên kết sinh viên.
+            // Email chỉ dùng cho tài khoản quản trị. Sinh viên đăng nhập bằng MSSV.
             if (!$account && Schema::hasColumn('accounts', 'email')) {
-                $account = Account::where('email', $request->email)->first();
+                $account = Account::where('email', $request->email)->where('role', 'admin')->first();
             }
 
             if (!$account) {

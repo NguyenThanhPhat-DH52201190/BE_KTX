@@ -32,9 +32,9 @@ class LoginRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'email.required_without' => 'Vui lòng nhập email hoặc MSSV.',
+            'email.required_without' => 'Vui lòng nhập email quản trị hoặc MSSV.',
             'email.email' => 'Email không hợp lệ.',
-            'student_code.required_without' => 'Vui lòng nhập MSSV hoặc email.',
+            'student_code.required_without' => 'Vui lòng nhập MSSV hoặc email quản trị.',
             'student_code.string' => 'MSSV không hợp lệ.',
             'password.required' => 'Vui lòng nhập mật khẩu.',
         ];

@@ -186,7 +186,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'show'])->whereNumber('id');
         Route::put('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'update'])->whereNumber('id');
         Route::delete('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'destroy'])->whereNumber('id');
-        Route::post('/admin/admission-candidates/{id}/enroll', [AdmissionCandidateController::class, 'enroll'])->whereNumber('id');
 
         // Tân sinh viên — xác minh tiêu chí ưu tiên hồ sơ giữ chỗ
         Route::get('/admin/reservation-priorities', [ReservationPriorityController::class, 'index']);
@@ -321,10 +320,15 @@ Route::get('/storage/{path}', [StorageController::class, 'serveImage'])->where('
 // Tân sinh viên — hồ sơ trúng tuyển & giữ chỗ KTX
 // =====================================================================
 
-Route::middleware('throttle:60,1')->group(function () {
-    // Public: xác minh thí sinh trúng tuyển
-    Route::post('/admission-candidates/verify', [DormReservationController::class, 'verify']);
+// Public: xác minh thí sinh trúng tuyển — rate limit riêng để chống dò admission_code.
+Route::post('/admission-candidates/verify', [DormReservationController::class, 'verify'])
+    ->middleware('admission.verify.limit');
 
+// Public: tra cứu trạng thái hồ sơ giữ chỗ — rate limit riêng để chống dò reservation_code.
+Route::post('/dorm-reservations/lookup', [DormReservationController::class, 'lookup'])
+    ->middleware('reservation.lookup.limit');
+
+Route::middleware('throttle:60,1')->group(function () {
     // Public: tạo hồ sơ giữ chỗ
     Route::post('/dorm-reservations', [DormReservationController::class, 'store']);
     Route::post('/dorm-reservations/{id}/upload-document', [DormReservationController::class, 'uploadDocument'])->whereNumber('id');

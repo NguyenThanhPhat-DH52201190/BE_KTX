@@ -5,6 +5,8 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Middleware\HandleCors;
 use App\Http\Middleware\EnsureAccountRole;
+use App\Http\Middleware\ThrottleAdmissionCandidateVerify;
+use App\Http\Middleware\ThrottleDormReservationLookup;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -27,6 +29,8 @@ return Application::configure(basePath: dirname(__DIR__))
         // ->middleware(['auth:sanctum', 'role:student']). Chưa gắn vào route nào.
         $middleware->alias([
             'role' => EnsureAccountRole::class,
+            'admission.verify.limit' => ThrottleAdmissionCandidateVerify::class,
+            'reservation.lookup.limit' => ThrottleDormReservationLookup::class,
         ]);
 
         // App này là pure JSON API, không có route tên 'login' (không có trang login

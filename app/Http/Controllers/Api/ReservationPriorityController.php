@@ -63,7 +63,20 @@ class ReservationPriorityController extends Controller
 
         return response()->json([
             'message'  => 'Đã khai báo tiêu chí ưu tiên.',
-            'priority' => $priority->load('criteria', 'evidences'),
+            'priority' => [
+                'id'                   => $priority->id,
+                'dorm_reservation_id'  => $priority->dorm_reservation_id,
+                'priority_criteria_id' => $priority->priority_criteria_id,
+                'status'               => $priority->status,
+                'verified_by'          => $priority->verified_by,
+                'verified_at'          => $priority->verified_at,
+                'criteria'             => [
+                    'id'   => $criteria->id,
+                    'name' => $criteria->name,
+                ],
+                'created_at'           => $priority->created_at,
+                'updated_at'           => $priority->updated_at,
+            ],
         ], 201);
     }
 
@@ -125,7 +138,7 @@ class ReservationPriorityController extends Controller
             'file_size'               => $file->getSize(),
         ]);
 
-        return response()->json(['message' => 'Đã upload minh chứng.', 'evidence' => $evidence], 201);
+        return response()->json(['message' => 'Đã upload minh chứng.'], 201);
     }
 
     /**

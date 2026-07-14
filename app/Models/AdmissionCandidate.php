@@ -45,6 +45,11 @@ class AdmissionCandidate extends Model
         });
     }
 
+    // expected_student_code KHÔNG còn được tự tính nữa (đã bỏ nút "Nhập học" đơn lẻ —
+    // mục đích duy nhất của giá trị gợi ý này). MSSV giờ chỉ đến từ Excel trường gửi
+    // (bulkEnroll()), không ai đọc cột này nữa. Cột vẫn giữ trong schema (cột chết),
+    // chỉ dừng ghi giá trị mới để tránh nhầm là MSSV thật.
+
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);

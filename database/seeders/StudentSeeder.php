@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Helpers\FacultyHelper;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -73,7 +74,7 @@ class StudentSeeder extends Seeder
             'Điện - Điện tử',
             'Xây dựng',
         ];
-        $facultyCodes = ['TH', 'QT', 'CK', 'DD', 'XD'];
+        $facultyCodes = ['TH', 'QT', 'CK', 'DDT', 'XD'];
 
         $surnames = [
             'Nguyễn', 'Trần', 'Lê', 'Phạm', 'Võ', 'Đặng', 'Bùi', 'Huỳnh',
@@ -105,8 +106,10 @@ class StudentSeeder extends Seeder
         $religions = ['Không', 'Phật giáo', 'Thiên Chúa giáo'];
 
         $rows = [];
-        $courseYears = ['D20', 'D21', 'D22', 'D23', 'D24', 'D25'];
         $courseCounts = [17, 17, 17, 17, 16, 16];
+        // Đếm sĩ số theo mã lớp (năm nhập học + khoa + số lớp) để không vượt quá 100
+        // SV/lớp khi random số lớp — key là chính class_name sinh ra.
+        $classCounts = [];
 
         for ($i = 0; $i < 100; $i++) {
             $provinceIndex = $i % count($provinces);
@@ -126,7 +129,10 @@ class StudentSeeder extends Seeder
                 }
                 $remaining -= $count;
             }
-            $courseYear = $courseYears[$courseIndex];
+            // course_year lưu khoảng năm học (hệ 4 năm), tách biệt hoàn toàn với class_name.
+            $admissionYear = 2020 + $courseIndex;
+            $courseYear = $admissionYear . '-' . ($admissionYear + 4);
+            $admissionYearShort = substr((string) $admissionYear, -2);
             $birthYear = 2002 + $courseIndex;
             // Phần lớn studying (86 sinh viên), các trạng thái khác phân bổ 2 sinh viên/trạng thái
             if ($i < 86) {
@@ -148,16 +154,30 @@ class StudentSeeder extends Seeder
                 ? (($i % 4) + 1)
                 : 4;
 
+            // Số khoa tra theo faculty (config/faculties.php) — mặc định 5 (CNTT) nếu không khớp
+            // được bảng ánh xạ, tránh sinh MSSV rỗng/lỗi cho seeder demo.
+            $departmentNumber = FacultyHelper::resolveDepartmentNumber($faculties[$facultyIndex]) ?? 5;
+            $studentCode = 'DH' . $departmentNumber . $admissionYearShort . str_pad((string) ($i + 1), 5, '0', STR_PAD_LEFT);
+
+            // class_name = D[năm nhập học 2 số]_[mã khoa viết tắt][số lớp 01-14 ngẫu nhiên].
+            // Lớp đại học không cố định sĩ số nên không cần logic "đầy mới sang lớp mới" —
+            // chỉ random lại nếu rơi trúng mã lớp đã đủ 100 SV.
+            do {
+                $classNumber = str_pad((string) random_int(1, 14), 2, '0', STR_PAD_LEFT);
+                $className = "D{$admissionYearShort}_{$facultyCodes[$facultyIndex]}{$classNumber}";
+            } while (($classCounts[$className] ?? 0) >= 100);
+            $classCounts[$className] = ($classCounts[$className] ?? 0) + 1;
+
             $rows[] = [
-                'student_code' => 'DH5250' . str_pad((string) ($i + 1), 4, '0', STR_PAD_LEFT),
+                'student_code' => $studentCode,
                 'full_name' => $surname . ' ' . $givenName,
                 'date_of_birth' => "{$birthYear}-{$month}-{$day}",
                 'gender' => $gender,
-                'class_name' => $courseYear . '_' . $facultyCodes[$facultyIndex] . str_pad((string) (($i % 40) + 1), 2, '0', STR_PAD_LEFT),
+                'class_name' => $className,
                 'faculty' => $faculties[$facultyIndex],
                 'course_year' => $courseYear,
                 'phone' => '09' . str_pad((string) (10000000 + $i), 8, '0', STR_PAD_LEFT),
-                'email' => 'dh5250' . str_pad((string) ($i + 1), 4, '0', STR_PAD_LEFT) . '@student.stu.edu.vn',
+                'email' => null,
                 'cccd' => str_pad((string) $provinceCode, 3, '0', STR_PAD_LEFT) . str_pad((string) (100000000 + $i), 9, '0', STR_PAD_LEFT),
                 'cccd_issued_date' => '2022-01-01',
                 'cccd_issued_place' => 'Cục Cảnh sát QLHC về TTXH',
@@ -175,9 +195,13 @@ class StudentSeeder extends Seeder
             ];
         }
 
+        // Khớp theo cccd (suy từ province_code + thứ tự $i, không đổi qua các lần sửa
+        // công thức student_code) thay vì student_code — để chạy lại seeder này sau khi
+        // đổi logic sinh MSSV (vd. đổi số khoa) không bị đụng unique constraint cccd/email
+        // với chính các dòng demo cũ do lần seed trước để lại.
         foreach ($rows as $row) {
             DB::table('students')->updateOrInsert(
-                ['student_code' => $row['student_code']],
+                ['cccd' => $row['cccd']],
                 $row
             );
         }
