@@ -201,7 +201,10 @@ class DormReservationController extends Controller
 
         $reservationCode = Str::upper(trim($data['reservation_code']));
 
-        $reservation = DormReservation::with('period')
+        $reservation = DormReservation::with([
+                'period',
+                'candidate:id,full_name,major_name,cccd,email,phone',
+            ])
             ->where('reservation_code', $reservationCode)
             ->first();
 
@@ -308,11 +311,26 @@ class DormReservationController extends Controller
             'reservation_code' => $reservation->reservation_code,
             'status'           => $reservation->status,
             'submitted_at'     => $this->reservationSubmittedAt($reservation),
+            'approved_at'      => $reservation->approved_at?->toISOString(),
             'period_name'      => $reservation->period?->name,
         ];
 
+        if ($reservation->candidate) {
+            $payload['candidate'] = [
+                'full_name'   => $reservation->candidate->full_name,
+                'major_name'  => $reservation->candidate->major_name,
+                'masked_cccd' => $this->maskIdentifier($reservation->candidate->cccd),
+                'masked_email' => $this->maskEmail($reservation->candidate->email),
+                'masked_phone' => $this->maskPhone($reservation->candidate->phone),
+            ];
+        }
+
         if ($reservation->status === 'rejected' && $reservation->rejection_reason) {
             $payload['rejection_reason'] = $reservation->rejection_reason;
+        }
+
+        if ($reservation->status === 'cancelled') {
+            $payload['cancellation_reason'] = $reservation->cancellation_reason;
         }
 
         return $payload;
@@ -321,6 +339,44 @@ class DormReservationController extends Controller
     private function reservationSubmittedAt(DormReservation $reservation): ?string
     {
         return ($reservation->submitted_at ?? $reservation->created_at)?->toISOString();
+    }
+
+    private function maskIdentifier(?string $value): ?string
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+
+        $last = mb_substr($value, -4);
+        return str_repeat('*', max(0, mb_strlen($value) - mb_strlen($last))) . $last;
+    }
+
+    private function maskEmail(?string $value): ?string
+    {
+        $value = trim((string) $value);
+        if ($value === '' || !str_contains($value, '@')) {
+            return null;
+        }
+
+        [$local, $domain] = explode('@', $value, 2);
+        $prefix = mb_substr($local, 0, min(4, mb_strlen($local)));
+
+        return $prefix . '***@' . $domain;
+    }
+
+    private function maskPhone(?string $value): ?string
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (mb_strlen($value) <= 4) {
+            return $this->maskIdentifier($value);
+        }
+
+        return mb_substr($value, 0, 2) . str_repeat('*', max(0, mb_strlen($value) - 4)) . mb_substr($value, -2);
     }
 
     // =========================================================
@@ -449,9 +505,25 @@ class DormReservationController extends Controller
             return response()->json(['message' => 'Hồ sơ đã được chuyển đổi hoặc đã huỷ, không thể huỷ lại.'], 422);
         }
 
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+            'admin_note' => ['nullable', 'string'],
+        ]);
+
+        $reason = trim($data['reason']);
+        if ($reason === '') {
+            return response()->json([
+                'message' => 'Vui lòng nhập lý do hủy giữ chỗ.',
+                'errors' => [
+                    'reason' => ['Vui lòng nhập lý do hủy giữ chỗ.'],
+                ],
+            ], 422);
+        }
+
         $reservation->update([
-            'status'     => 'cancelled',
-            'admin_note' => $request->input('admin_note', $reservation->admin_note),
+            'status'              => 'cancelled',
+            'cancellation_reason' => $reason,
+            'admin_note'          => $data['admin_note'] ?? $reservation->admin_note,
         ]);
 
         $this->notifyCandidate(

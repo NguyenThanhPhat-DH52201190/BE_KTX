@@ -203,7 +203,7 @@ class ReservationPriorityController extends Controller
      * Admin xác minh tiêu chí.
      * PATCH /admin/reservation-priorities/{id}/verify
      */
-    public function verify(int $id): JsonResponse
+    public function verify(Request $request, int $id): JsonResponse
     {
         $priority = ReservationPriority::with('dormReservation')->findOrFail($id);
 
@@ -213,6 +213,7 @@ class ReservationPriorityController extends Controller
 
         $priority->update([
             'status'      => 'verified',
+            'verified_by' => $request->user()?->id,
             'verified_at' => now(),
         ]);
 
@@ -228,7 +229,7 @@ class ReservationPriorityController extends Controller
      * Admin từ chối tiêu chí.
      * PATCH /admin/reservation-priorities/{id}/reject
      */
-    public function reject(int $id): JsonResponse
+    public function reject(Request $request, int $id): JsonResponse
     {
         $priority = ReservationPriority::with('dormReservation')->findOrFail($id);
 
@@ -238,6 +239,7 @@ class ReservationPriorityController extends Controller
 
         $priority->update([
             'status'      => 'rejected',
+            'verified_by' => $request->user()?->id,
             'verified_at' => now(),
         ]);
 

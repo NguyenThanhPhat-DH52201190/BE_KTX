@@ -183,6 +183,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/admin/admission-candidates', [AdmissionCandidateController::class, 'store']);
         Route::get('/admin/admission-candidates/import-template', [AdmissionCandidateController::class, 'importTemplate']);
         Route::post('/admin/admission-candidates/bulk-enroll', [AdmissionCandidateController::class, 'bulkEnroll']);
+        Route::get('/admin/admission-candidates/import-candidates-template', [AdmissionCandidateController::class, 'importCandidatesTemplate']);
+        Route::post('/admin/admission-candidates/import-candidates', [AdmissionCandidateController::class, 'importCandidates']);
         Route::get('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'show'])->whereNumber('id');
         Route::put('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'update'])->whereNumber('id');
         Route::delete('/admin/admission-candidates/{id}', [AdmissionCandidateController::class, 'destroy'])->whereNumber('id');

@@ -31,6 +31,7 @@ class DormReservation extends Model
         'cccd_front_url',
         'cccd_back_url',
         'rejection_reason',
+        'cancellation_reason',
         'admin_note',
         'submitted_at',
         'approved_at',
