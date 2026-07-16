@@ -3,6 +3,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Carbon\Carbon;
 
@@ -42,12 +43,17 @@ class Registration extends Model
         'registration_period_id',
         'top_priority_tier',
         'total_priority_score',
+        'cancelled_at',
+        'cancellation_reason',
+        'cancelled_by',
+        'source_dorm_reservation_id',
     ];
 
     protected $casts = [
         'top_priority_tier' => 'integer',
         'total_priority_score' => 'integer',
         'approved_at' => 'datetime',
+        'cancelled_at' => 'datetime',
     ];
 
 
@@ -59,6 +65,26 @@ class Registration extends Model
     public function period(): BelongsTo
     {
         return $this->belongsTo(RegistrationPeriod::class, 'registration_period_id');
+    }
+
+    public function studentPriorities(): HasMany
+    {
+        return $this->hasMany(StudentPriority::class, 'registration_id');
+    }
+
+    /** Có ít nhất 1 tiêu chí ưu tiên bị admin từ chối minh chứng — hồ sơ không được tiếp
+     *  tục tham gia ranking/duyệt/promotion/convert cho tới khi xử lý lại (xem báo cáo
+     *  sửa lỗi "minh chứng rejected vẫn được xếp hạng"). */
+    public function hasRejectedPriorityEvidence(): bool
+    {
+        return $this->studentPriorities()->where('status', 'rejected')->exists();
+    }
+
+    /** Giữ chỗ nguồn (DormReservation) đã sinh ra Registration này qua conversion — chỉ set
+     *  khi Registration được tạo từ luồng tân sinh viên, null với luồng tự đăng ký thường. */
+    public function sourceDormReservation(): BelongsTo
+    {
+        return $this->belongsTo(DormReservation::class, 'source_dorm_reservation_id');
     }
 
     public function occupancy(): HasOne

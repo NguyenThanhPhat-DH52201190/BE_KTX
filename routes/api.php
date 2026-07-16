@@ -210,6 +210,7 @@ Route::middleware('auth:sanctum')->group(function () {
         // được gọi từ trang chủ/trang tân sinh viên chưa đăng nhập.
         Route::post('/registration-periods', [RegistrationPeriodController::class, 'store']);
         Route::get('/registration-periods/{id}', [RegistrationPeriodController::class, 'show']);
+        Route::get('/registration-periods/{id}/capacity', [RegistrationPeriodController::class, 'capacity']);
         Route::put('/registration-periods/{id}', [RegistrationPeriodController::class, 'update']);
         Route::delete('/registration-periods/{id}', [RegistrationPeriodController::class, 'destroy']);
         Route::post('/registration-periods/{id}/process', [RegistrationPeriodController::class, 'process']);
@@ -328,6 +329,11 @@ Route::post('/admission-candidates/verify', [DormReservationController::class, '
 
 // Public: tra cứu trạng thái hồ sơ giữ chỗ — rate limit riêng để chống dò reservation_code.
 Route::post('/dorm-reservations/lookup', [DormReservationController::class, 'lookup'])
+    ->middleware('reservation.lookup.limit');
+
+// Public: tự hủy nhu cầu ở KTX trước deadline — reservation_code là bằng chứng sở hữu,
+// dùng chung rate limit với lookup() để chống dò mã.
+Route::post('/dorm-reservations/cancel', [DormReservationController::class, 'cancelSelf'])
     ->middleware('reservation.lookup.limit');
 
 Route::middleware('throttle:60,1')->group(function () {

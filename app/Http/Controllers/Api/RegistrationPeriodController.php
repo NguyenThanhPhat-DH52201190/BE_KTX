@@ -3,9 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Bed;
 use App\Models\Occupancy;
 use App\Models\RegistrationPeriod;
+use App\Services\DormCapacityService;
 use App\Services\PriorityRankingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -31,6 +31,11 @@ class RegistrationPeriodController extends Controller
             'registrations as approve_proposal_count' => fn ($q) => $q->where('auto_decision', 'approve')->where('status', 'submitted'),
             'registrations as reject_proposal_count'  => fn ($q) => $q->where('auto_decision', 'reject')->where('status', 'submitted'),
             'registrations as review_count'           => fn ($q) => $q->where('auto_decision', 'review')->where('status', 'submitted'),
+            // Đếm riêng cho luồng tân sinh viên — dùng hiển thị trạng thái đóng đợt tự động,
+            // không phục vụ chốt thủ công (đã bỏ cơ chế đó).
+            'dormReservations as admission_submitted_count'  => fn ($q) => $q->where('status', 'submitted'),
+            'dormReservations as admission_waitlisted_count' => fn ($q) => $q->where('status', 'waitlisted'),
+            'dormReservations as admission_approved_count'   => fn ($q) => $q->where('status', 'approved'),
         ])->addSelect(DB::raw("({$pendingCriteriaSubquery->toSql()}) as `pending_criteria_count`"))
           ->addBinding($pendingCriteriaSubquery->getBindings(), 'select');
     }
@@ -388,50 +393,101 @@ class RegistrationPeriodController extends Controller
 
     public function process(int $id): JsonResponse
     {
-        $period = RegistrationPeriod::findOrFail($id);
+        // Lock RegistrationPeriod TRƯỚC (đúng lock order chung) — 2 request process() cùng
+        // đợt tự serialize qua lock này; request sau đọc lại dữ liệu MỚI bên trong transaction
+        // của nó (không ghi đè bằng dữ liệu cũ). Không sửa PriorityRankingService.
+        $result = DB::transaction(function () use ($id) {
+            $period = RegistrationPeriod::where('id', $id)->lockForUpdate()->first();
 
-        if ($period->channel !== 'main') {
-            return response()->json(['message' => 'Chỉ áp dụng cho kênh chính (main).'], 422);
+            if (!$period) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đợt đăng ký.']];
+            }
+
+            if ($period->channel !== 'main') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Chỉ áp dụng cho kênh chính (main).']];
+            }
+
+            if (!in_array($period->status, ['active', 'closed', 'processing'], true)) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt phải ở trạng thái active, closed hoặc processing.']];
+            }
+
+            $capacityBefore = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period);
+            $freeBeds       = (int) $capacityBefore['available_approval_slots'];
+
+            $pendingCriteriaCount = \App\Models\StudentPriority::query()
+                ->whereHas('registration', fn ($q) => $q->where('registration_period_id', $period->id))
+                ->where('status', 'pending')
+                ->count();
+
+            // Đồng bộ với quy ước bên DormReservationController::rankReservations() — chặn
+            // xếp hạng cả đợt khi còn minh chứng ưu tiên chưa xác minh, tránh hồ sơ pending
+            // bị tính tier=99 (như không có ưu tiên) rồi lỡ được đề xuất duyệt/waitlist sai.
+            if ($pendingCriteriaCount > 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => [
+                        'message'                => "Còn {$pendingCriteriaCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh hoặc từ chối tất cả minh chứng trước khi xếp hạng.",
+                        'pending_priority_count' => $pendingCriteriaCount,
+                    ],
+                ];
+            }
+
+            $ranker = new PriorityRankingService();
+            $rankResult = $ranker->rankPeriod($period->id, $freeBeds, recalculate: true);
+
+            $totalApplicants = $rankResult['approved']->count() + $rankResult['waitlist']->count();
+            foreach ($rankResult['approved'] as $reg) {
+                $reg->auto_decision = 'approve';
+                $reg->auto_decision_reason = null;
+                $reg->save();
+            }
+            foreach ($rankResult['waitlist'] as $index => $reg) {
+                $rank = $rankResult['approved']->count() + $index + 1;
+                $reg->auto_decision = 'reject';
+                $reg->auto_decision_reason = "Không đủ chỉ tiêu — xếp hạng thứ {$rank}/{$totalApplicants}, chỉ tiêu {$freeBeds} suất.";
+                $reg->save();
+            }
+
+            $period->status = 'processing';
+            $period->save();
+
+            $capacityAfterProposals = app(DormCapacityService::class)
+                ->summarizeForRegistrationPeriod($period, $rankResult['approved']->count());
+
+            return [
+                'ok'                     => true,
+                'free_beds'              => $freeBeds,
+                'approved'               => $rankResult['approved']->count(),
+                'waitlist'               => $rankResult['waitlist']->count(),
+                'pending_criteria_count' => $pendingCriteriaCount,
+                'capacity'               => $capacityAfterProposals,
+            ];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
-
-        if (!in_array($period->status, ['active', 'closed', 'processing'], true)) {
-            return response()->json(['message' => 'Đợt phải ở trạng thái active, closed hoặc processing.'], 422);
-        }
-
-        $totalAvailable = Bed::where('status', 'active')->count();
-        $occupiedCount  = Occupancy::occupiedBedsQuery()->pluck('bed_id')->unique()->count();
-        $freeBeds       = max(0, $totalAvailable - $occupiedCount);
-
-        $pendingCriteriaCount = \App\Models\StudentPriority::query()
-            ->whereHas('registration', fn ($q) => $q->where('registration_period_id', $period->id))
-            ->where('status', 'pending')
-            ->count();
-
-        $ranker = new PriorityRankingService();
-        $result = $ranker->rankPeriod($period->id, $freeBeds, recalculate: true);
-
-        $totalApplicants = $result['approved']->count() + $result['waitlist']->count();
-        foreach ($result['approved'] as $reg) {
-            $reg->auto_decision = 'approve';
-            $reg->auto_decision_reason = null;
-            $reg->save();
-        }
-        foreach ($result['waitlist'] as $index => $reg) {
-            $rank = $result['approved']->count() + $index + 1;
-            $reg->auto_decision = 'reject';
-            $reg->auto_decision_reason = "Không đủ chỉ tiêu — xếp hạng thứ {$rank}/{$totalApplicants}, chỉ tiêu {$freeBeds} suất.";
-            $reg->save();
-        }
-
-        $period->status = 'processing';
-        $period->save();
 
         return response()->json([
             'message'                => 'Đã xếp hạng xong.',
-            'free_beds'              => $freeBeds,
-            'approved'               => $result['approved']->count(),
-            'waitlist'               => $result['waitlist']->count(),
-            'pending_criteria_count' => $pendingCriteriaCount,
+            'free_beds'              => $result['free_beds'],
+            'approved'               => $result['approved'],
+            'waitlist'               => $result['waitlist'],
+            'pending_criteria_count' => $result['pending_criteria_count'],
+            'capacity'               => $result['capacity'],
+        ]);
+    }
+
+    public function capacity(int $id, Request $request): JsonResponse
+    {
+        $period = RegistrationPeriod::findOrFail($id);
+
+        $proposedApprovedCount = max(0, (int) $request->query('proposed_approved_count', 0));
+
+        return response()->json([
+            'capacity' => app(DormCapacityService::class)
+                ->summarizeForRegistrationPeriod($period, $proposedApprovedCount),
         ]);
     }
 

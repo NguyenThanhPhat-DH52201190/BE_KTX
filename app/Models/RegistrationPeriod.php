@@ -67,4 +67,20 @@ class RegistrationPeriod extends Model
 
         return $stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->toDateString() : null;
     }
+
+    /**
+     * Hạn cuối xác nhận nhập học cho hồ sơ giữ chỗ tân sinh viên — LUÔN là 17:00 của
+     * end_date, không phải 23:59:59/00:00. Đây là mốc đóng đợt THẬT (không cần admin xác
+     * nhận tay) — quá mốc này, verify()/store()/bulkEnroll() tự chặn ngay lập tức, và
+     * command registration-periods:auto-close-admission (chạy mỗi 5 phút) sẽ tự chuyển
+     * hồ sơ chưa converted sang expired + đóng đợt.
+     */
+    public function admissionDeadline(): ?\Carbon\Carbon
+    {
+        if (!$this->end_date) {
+            return null;
+        }
+
+        return \Carbon\Carbon::parse($this->end_date)->setTime(17, 0, 0);
+    }
 }

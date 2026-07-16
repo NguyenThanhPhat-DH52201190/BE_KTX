@@ -4,9 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Registration\StoreRegistrationRequest;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Models\Registration;
 use App\Models\RegistrationPeriod;
+use App\Models\DormReservation;
 use App\Models\Occupancy;
 use App\Models\CheckoutRequest;
 use App\Models\OccupancyExtension;
@@ -23,6 +25,7 @@ use App\Models\RoomFeeBill;
 use App\Helpers\StorageHelper;
 use App\Jobs\ProcessPriorityEvidenceJob;
 use App\Services\AutoReviewService;
+use App\Services\DormCapacityService;
 use App\Services\RoomFeeBillingService;
 use App\Services\StudentNotificationService;
 use Carbon\Carbon;
@@ -129,11 +132,15 @@ class RegistrationController extends Controller
             'rejection_reason' => $registration->rejection_reason,
             'auto_decision' => $registration->auto_decision,
             'auto_decision_reason' => $registration->auto_decision_reason,
+            'source_dorm_reservation_id' => $registration->source_dorm_reservation_id,
             'registration_period_id' => $registration->registration_period_id,
             'channel' => $registration->period?->channel,
             'period_name' => $registration->period?->name,
             'period_status' => $registration->period?->status,
             'approved_at' => $registration->approved_at?->toDateString(),
+            'cancelled_at' => $registration->cancelled_at?->toISOString(),
+            'cancellation_reason' => $registration->cancellation_reason,
+            'cancelled_by' => $registration->cancelled_by,
             'bed_selection_deadline' => $this->bedSelectionDeadline($registration)?->toDateTimeString(),
             'occupancy_id' => $registration->occupancy?->id,
             'assigned_room_id' => $registration->occupancy?->room_id,
@@ -848,18 +855,83 @@ class RegistrationController extends Controller
         return response()->json($this->formatRegistration($registration, $student?->email));
     }
 
+    /** Message lỗi capacity dùng chung — nhất quán giữa các endpoint duyệt (BUG-2/RR-2/RR-3). */
+    private const CAPACITY_CONFLICT_MESSAGE = 'Không thể duyệt hồ sơ vì sức chứa KTX đã thay đổi hoặc không còn suất trống. Vui lòng tải lại dữ liệu.';
+
     public function approve($id, Request $request)
     {
-        $registration = Registration::with('student')->find($id);
+        // Lock order thống nhất: RegistrationPeriod trước, rồi Registration.
+        $result = DB::transaction(function () use ($id) {
+            $registration = Registration::with('student')->lockForUpdate()->find($id);
 
-        if (!$registration) {
-            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+            if (!$registration) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đơn']];
+            }
+
+            $period = $registration->registration_period_id
+                ? RegistrationPeriod::where('id', $registration->registration_period_id)->lockForUpdate()->first()
+                : null;
+
+            // Re-check trạng thái SAU khi đã lock — không cho duyệt lại đơn đã cancelled/
+            // rejected (idempotent: trả lỗi rõ, không âm thầm đổi trạng thái).
+            if ($registration->status === 'cancelled') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đơn đã bị hủy, không thể duyệt.']];
+            }
+            if ($registration->status === 'rejected') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đơn đã bị từ chối, không thể duyệt.']];
+            }
+
+            // Minh chứng ưu tiên bị từ chối — không được duyệt (thường status đã tự chuyển
+            // 'rejected' ngay khi admin từ chối minh chứng; check này phòng vệ thêm với dữ
+            // liệu cũ chưa cascade).
+            if ($registration->hasRejectedPriorityEvidence()) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.']];
+            }
+
+            // Registration nguồn giữ chỗ (tân sinh viên) — suất đã được DormReservation
+            // approved giữ từ trước, KHÔNG tính đây là chiếm thêm suất mới nên bỏ qua check
+            // capacity thường. Thay vào đó phải lock + xác nhận DormReservation nguồn vẫn
+            // còn approved.
+            $sourceReservation = null;
+            if ($registration->status !== 'approved' && $registration->source_dorm_reservation_id) {
+                $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Hồ sơ giữ chỗ nguồn không còn ở trạng thái approved (có thể đã bị thay đổi bởi thao tác khác). Vui lòng tải lại dữ liệu.']];
+                }
+            } elseif ($registration->status !== 'approved') {
+                // submitted -> approved là hành động thật sự chiếm thêm 1 suất committed nên cần
+                // check capacity; nếu đã approved sẵn (double-click/gọi lại) thì đây là no-op, không
+                // chiếm thêm suất nào nên không cần re-check.
+                $capacity = app(DormCapacityService::class)
+                    ->summarizeForRegistrationPeriod($period ?? $registration->registration_period_id);
+                if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity]];
+                }
+            }
+
+            $registration->status = 'approved';
+            $registration->approved_at = now();
+            $registration->save();
+
+            if ($sourceReservation) {
+                $sourceReservation->update([
+                    'status'                    => 'converted',
+                    'converted_registration_id' => $registration->id,
+                ]);
+            }
+
+            return ['ok' => true, 'registration' => $registration];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
 
-        $registration->status = 'approved';
-        $registration->approved_at = now();
-        $registration->save();
-
+        // Gửi thông báo SAU khi transaction đã commit.
+        $registration = $result['registration'];
         if ($registration->student) {
             $this->notifyRegistrationDecision($registration);
         }
@@ -906,6 +978,10 @@ class RegistrationController extends Controller
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể phân phòng.'], 422);
         }
 
         $occupancy = Occupancy::firstOrNew([
@@ -1071,9 +1147,13 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể kích hoạt lưu trú.'], 422);
+        }
+
         $occupancy = $registration->occupancy;
 
-        if (!$occupancy || !$occupancy->bed_id) {
+        if (!$occupancy || !$occupancy->bed_id || $occupancy->status === 'CANCELLED') {
             return response()->json(['message' => 'Sinh viên chưa chọn giường.'], 422);
         }
 
@@ -1131,6 +1211,10 @@ class RegistrationController extends Controller
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể từ chối giường.'], 422);
         }
 
         $occupancy = $registration->occupancy;
@@ -1413,6 +1497,20 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể từ chối.'], 422);
+        }
+
+        // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
+        // giữ sẵn — từ chối thẳng ở đây sẽ để lại DormReservation vẫn approved trong khi
+        // Registration đã rejected (mâu thuẫn dữ liệu, suất bị kẹt không giải phóng được cho
+        // waitlist). Tạm chặn, chờ nghiệp vụ hủy giữ chỗ + giải phóng suất + promotion riêng.
+        if ($registration->source_dorm_reservation_id && $registration->status === 'submitted') {
+            return response()->json([
+                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể từ chối qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
+            ], 422);
+        }
+
         $registration->status = 'rejected';
         $registration->rejection_reason = $request->input('rejectionReason');
         $registration->save();
@@ -1493,6 +1591,44 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể đổi quyết định tự động.'], 422);
+        }
+
+        // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
+        // giữ sẵn — không cho đổi đề xuất rời khỏi 'approve' qua dropdown thường (reject/review
+        // đều để lại DormReservation approved dở dang, suất bị kẹt). Tạm chặn, chờ nghiệp vụ
+        // hủy giữ chỗ + giải phóng suất + promotion riêng.
+        if ($registration->source_dorm_reservation_id
+            && $registration->auto_decision === 'approve'
+            && $request->input('decision') !== 'approve'
+        ) {
+            return response()->json([
+                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể đổi đề xuất qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
+            ], 422);
+        }
+
+        if ($request->input('decision') === 'approve' && $registration->hasRejectedPriorityEvidence()) {
+            return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
+        }
+
+        if ($request->input('decision') === 'approve' && $registration->auto_decision !== 'approve') {
+            $proposedApprovedCount = Registration::where('registration_period_id', $registration->registration_period_id)
+                ->where('status', 'submitted')
+                ->where('auto_decision', 'approve')
+                ->count() + 1;
+
+            $capacity = app(DormCapacityService::class)
+                ->summarizeForRegistrationPeriod($registration->registration_period_id, $proposedApprovedCount);
+
+            if (($capacity['capacity_exceeded'] ?? false) === true) {
+                return response()->json([
+                    'message'  => 'Không thể chọn duyệt thêm vì đã đạt giới hạn sức chứa của đợt.',
+                    'capacity' => $capacity,
+                ], 422);
+            }
+        }
+
         $registration->auto_decision = $request->input('decision');
         $registration->auto_decision_reason = $request->input('reason');
         $registration->save();
@@ -1508,18 +1644,82 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể xác nhận quyết định tự động.'], 422);
+        }
+
         if (!in_array($registration->auto_decision, ['approve', 'reject'])) {
             return response()->json(['message' => 'Đơn chưa có quyết định tự động (auto_decision phải là approve hoặc reject)'], 422);
         }
 
-        $registration->status = $registration->auto_decision === 'approve' ? 'approved' : 'rejected';
-        if ($registration->status === 'approved') {
-            $registration->approved_at = now();
+        $result = DB::transaction(function () use ($id) {
+            $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])
+                ->whereKey($id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$registration) {
+                return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+            }
+
+            RegistrationPeriod::whereKey($registration->registration_period_id)->lockForUpdate()->first();
+
+            if ($registration->auto_decision === 'approve' && $registration->hasRejectedPriorityEvidence()) {
+                return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
+            }
+
+            // Registration nguồn giữ chỗ (tân sinh viên) — suất đã được DormReservation
+            // approved giữ từ trước (xem DormCapacityService::approved_dorm_reservations),
+            // KHÔNG tính đây là 1 suất mới nên bỏ qua check capacity thường. Thay vào đó
+            // phải lock + xác nhận DormReservation nguồn vẫn còn approved rồi mới cho qua.
+            $sourceReservation = null;
+            if ($registration->auto_decision === 'approve' && $registration->source_dorm_reservation_id) {
+                $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                    return response()->json([
+                        'message' => 'Hồ sơ giữ chỗ nguồn không còn ở trạng thái approved (có thể đã bị thay đổi bởi thao tác khác). Vui lòng tải lại dữ liệu.',
+                    ], 422);
+                }
+            } elseif ($registration->auto_decision === 'approve' && $registration->status !== 'approved') {
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($registration->registration_period_id);
+                if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                    return response()->json([
+                        'message'  => 'Sức chứa KTX đã thay đổi. Hiện không còn suất để duyệt thêm đơn này. Vui lòng xếp hạng hoặc điều chỉnh lại.',
+                        'capacity' => $capacity,
+                    ], 422);
+                }
+            }
+
+            $registration->status = $registration->auto_decision === 'approve' ? 'approved' : 'rejected';
+            if ($registration->status === 'approved') {
+                $registration->approved_at = now();
+            }
+            if ($registration->status === 'rejected' && $registration->auto_decision_reason) {
+                $registration->rejection_reason = $registration->auto_decision_reason;
+            }
+            $registration->save();
+
+            // Chính thức chuyển DormReservation nguồn sang converted NGAY LÚC NÀY (không
+            // phải lúc tạo Registration) — suất chuyển từ counter approved_dorm_reservations
+            // sang approved_unassigned_registrations, tổng available_approval_slots không đổi.
+            if ($sourceReservation) {
+                $sourceReservation->update([
+                    'status'                    => 'converted',
+                    'converted_registration_id' => $registration->id,
+                ]);
+            }
+
+            return $registration;
+        });
+
+        if ($result instanceof JsonResponse) {
+            return $result;
         }
-        if ($registration->status === 'rejected' && $registration->auto_decision_reason) {
-            $registration->rejection_reason = $registration->auto_decision_reason;
-        }
-        $registration->save();
+
+        $registration = $result;
 
         if ($registration->student) {
             $this->notifyRegistrationDecision($registration);
@@ -1530,62 +1730,171 @@ class RegistrationController extends Controller
 
     public function confirmBatch($periodId)
     {
-        $period = RegistrationPeriod::find($periodId);
+        // Lock order thống nhất: RegistrationPeriod trước, rồi tới tập Registration (theo id
+        // tăng dần) — toàn bộ batch trong 1 transaction, không save() rời rạc ngoài transaction.
+        try {
+        $result = DB::transaction(function () use ($periodId) {
+            $period = RegistrationPeriod::where('id', $periodId)->lockForUpdate()->first();
 
-        if (!$period) {
-            return response()->json(['message' => 'Không tìm thấy đợt đăng ký'], 404);
+            if (!$period) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đợt đăng ký']];
+            }
+
+            if ($period->channel !== 'main') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Chỉ áp dụng cho đợt kênh chính (main)']];
+            }
+
+            if ($period->status !== 'processing') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt phải đang ở trạng thái processing']];
+            }
+
+            // Lock đúng tập registration còn 'submitted' TẠI THỜI ĐIỂM lock (1 query, không
+            // tách bước) — registration nào đã bị xử lý/hủy bởi request khác trước khi lock
+            // được cấp sẽ tự động không nằm trong tập này, không có chuyện "xác nhận âm thầm"
+            // một registration đã cancelled.
+            $registrations = Registration::with('student')
+                ->where('registration_period_id', $periodId)
+                ->whereIn('status', ['submitted'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            // Lock luôn tập DormReservation nguồn (nếu có Registration nào là nguồn giữ chỗ
+            // tân sinh viên) trong CÙNG transaction, theo đúng thứ tự id tăng dần — nhất
+            // quán lock order chung của hệ thống (RegistrationPeriod trước, rồi tới
+            // DormReservation/Registration theo id).
+            $sourceReservationIds = $registrations->pluck('source_dorm_reservation_id')->filter()->unique()->sort()->values();
+            $sourceReservations = $sourceReservationIds->isEmpty()
+                ? collect()
+                : DormReservation::whereIn('id', $sourceReservationIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+
+            // Minh chứng ưu tiên bị từ chối — không được nằm trong đề xuất duyệt, dù
+            // auto_decision đang là 'approve' (1 query, không N+1 theo từng registration).
+            $rejectedEvidenceRegIds = StudentPriority::whereIn('registration_id', $registrations->pluck('id'))
+                ->where('status', 'rejected')
+                ->distinct()
+                ->pluck('registration_id');
+
+            // Registration nguồn giữ chỗ KHÔNG tính vào approveProposalCount — suất của
+            // chúng đã được DormReservation approved giữ từ trước (đếm ở
+            // approved_dorm_reservations), không phải suất mới cần capacity thường cấp.
+            $approveProposalCount = $registrations
+                ->where('auto_decision', 'approve')
+                ->reject(fn ($r) => $rejectedEvidenceRegIds->contains($r->id))
+                ->reject(fn ($r) => $r->source_dorm_reservation_id !== null)
+                ->count();
+            if ($approveProposalCount > 0) {
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period, $approveProposalCount);
+                if (($capacity['capacity_exceeded'] ?? false) === true) {
+                    return [
+                        'ok'      => false,
+                        'status'  => 422,
+                        'payload' => [
+                            'message'  => "Sức chứa KTX đã thay đổi. Hiện chỉ có thể duyệt {$capacity['available_approval_slots']} hồ sơ nhưng đang chọn {$approveProposalCount} hồ sơ. Vui lòng điều chỉnh lại.",
+                            'capacity' => $capacity,
+                        ],
+                    ];
+                }
+            }
+
+            $confirmed = 0;
+            $skippedReview = 0;
+            $skippedNull = 0;
+            $skippedRejectedEvidence = 0;
+            $toNotify = [];
+
+            foreach ($registrations as $reg) {
+                if ($rejectedEvidenceRegIds->contains($reg->id)) {
+                    // Minh chứng ưu tiên không hợp lệ — không được confirm batch/single dù
+                    // auto_decision đề xuất gì. Ép thẳng sang rejected, không giữ nguyên
+                    // submitted (tránh còn xuất hiện ở "Chờ xác nhận" cho đợt đã đóng).
+                    $reg->status = 'rejected';
+                    $reg->rejection_reason = 'Minh chứng ưu tiên không hợp lệ.';
+                    $reg->auto_decision = 'reject';
+                    $reg->auto_decision_reason = 'Minh chứng ưu tiên không hợp lệ.';
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $skippedRejectedEvidence++;
+                    continue;
+                }
+
+                if ($reg->auto_decision === 'approve') {
+                    $reg->status = 'approved';
+                    $reg->approved_at = now();
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $confirmed++;
+
+                    // Registration nguồn giữ chỗ — chuyển luôn DormReservation nguồn sang
+                    // converted trong CÙNG transaction. DormReservation không còn approved
+                    // (bất thường, ví dụ bị admin đổi tay ở nơi khác giữa lúc chờ xác nhận)
+                    // thì throw để rollback TOÀN BỘ batch — không để 1 phần Registration đã
+                    // approved còn phần DormReservation dở dang.
+                    if ($reg->source_dorm_reservation_id) {
+                        $sourceReservation = $sourceReservations->get($reg->source_dorm_reservation_id);
+                        if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                            throw new RuntimeException("CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:{$reg->id}");
+                        }
+                        $sourceReservation->update([
+                            'status' => 'converted',
+                            'converted_registration_id' => $reg->id,
+                        ]);
+                    }
+                } elseif ($reg->auto_decision === 'reject') {
+                    $reg->status = 'rejected';
+                    if ($reg->auto_decision_reason) {
+                        $reg->rejection_reason = $reg->auto_decision_reason;
+                    }
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $confirmed++;
+                } elseif ($reg->auto_decision === 'review') {
+                    $skippedReview++;
+                } else {
+                    $skippedNull++;
+                }
+            }
+
+            $period->status = 'closed';
+            $period->save();
+
+            return [
+                'ok'                       => true,
+                'confirmed'                => $confirmed,
+                'skippedReview'            => $skippedReview,
+                'skippedNull'              => $skippedNull,
+                'skippedRejectedEvidence'  => $skippedRejectedEvidence,
+                'toNotify'                 => $toNotify,
+            ];
+        });
+        } catch (RuntimeException $exception) {
+            if (str_starts_with($exception->getMessage(), 'CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:')) {
+                $failedRegId = substr($exception->getMessage(), strlen('CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:'));
+
+                return response()->json([
+                    'message' => "Hồ sơ giữ chỗ nguồn của đơn #{$failedRegId} không còn ở trạng thái approved. Toàn bộ thao tác xác nhận hàng loạt đã được hủy, vui lòng tải lại dữ liệu.",
+                ], 422);
+            }
+
+            throw $exception;
         }
 
-        if ($period->channel !== 'main') {
-            return response()->json(['message' => 'Chỉ áp dụng cho đợt kênh chính (main)'], 422);
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
 
-        if ($period->status !== 'processing') {
-            return response()->json(['message' => 'Đợt phải đang ở trạng thái processing'], 422);
-        }
-
-        $registrations = Registration::with('student')
-            ->where('registration_period_id', $periodId)
-            ->whereIn('status', ['submitted'])
-            ->get();
-
-        $confirmed = 0;
-        $skippedReview = 0;
-        $skippedNull = 0;
-
-        foreach ($registrations as $reg) {
-            if ($reg->auto_decision === 'approve') {
-                $reg->status = 'approved';
-                $reg->approved_at = now();
-                $reg->save();
-                if ($reg->student) {
-                    $this->notifyRegistrationDecision($reg, queue: true);
-                }
-                $confirmed++;
-            } elseif ($reg->auto_decision === 'reject') {
-                $reg->status = 'rejected';
-                if ($reg->auto_decision_reason) {
-                    $reg->rejection_reason = $reg->auto_decision_reason;
-                }
-                $reg->save();
-                if ($reg->student) {
-                    $this->notifyRegistrationDecision($reg, queue: true);
-                }
-                $confirmed++;
-            } elseif ($reg->auto_decision === 'review') {
-                $skippedReview++;
-            } else {
-                $skippedNull++;
+        // Gửi thông báo SAU khi transaction đã commit (vẫn queue:true như hành vi cũ).
+        foreach ($result['toNotify'] as $reg) {
+            if ($reg->student) {
+                $this->notifyRegistrationDecision($reg, queue: true);
             }
         }
 
-        $period->status = 'closed';
-        $period->save();
-
         return response()->json([
-            'confirmed'      => $confirmed,
-            'skipped_review' => $skippedReview,
-            'skipped_null'   => $skippedNull,
+            'confirmed'                  => $result['confirmed'],
+            'skipped_review'             => $result['skippedReview'],
+            'skipped_null'               => $result['skippedNull'],
+            'skipped_rejected_evidence'  => $result['skippedRejectedEvidence'],
         ]);
     }
 

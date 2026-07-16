@@ -171,7 +171,13 @@ class StudentDashboardController extends Controller
                 'student_code' => $student->student_code,
                 'full_name'    => $student->full_name,
                 'email'        => $student->email,
-                'avatar'       => $student->avatar,
+                // Sinh viên nguồn giữ chỗ tân sinh viên có thể chưa có Student.avatar (dữ liệu
+                // cũ trước fix) — fallback sang avatar_url của Registration mới nhất, strip
+                // prefix storage đã lưu sẵn (nếu có) trước khi trả về path tương đối thuần.
+                'avatar'       => (function () use ($student, $latestRegistration) {
+                    $raw = $student->avatar ?? $latestRegistration?->avatar_url;
+                    return $raw ? preg_replace('#^/?(api/)?storage/#', '', ltrim($raw, '/')) : null;
+                })(),
                 'class_name'   => $student->class_name,
                 'faculty'      => $student->faculty,
             ],

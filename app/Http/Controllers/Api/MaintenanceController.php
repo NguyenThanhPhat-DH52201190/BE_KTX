@@ -241,7 +241,7 @@ class MaintenanceController extends Controller
         $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
         $occupancies = $this->activeOccupancyQuery()
             ->where('room_id', $room->id)
-            ->with(['student', 'bed', 'room.floor'])
+            ->with(['student', 'registration', 'bed', 'room.floor'])
             ->orderBy('bed_id')
             ->get();
 
@@ -985,11 +985,15 @@ class MaintenanceController extends Controller
             return null;
         }
 
+        // Sinh viên nguồn giữ chỗ tân sinh viên có thể chưa có Student.avatar (dữ liệu cũ
+        // trước fix) — fallback sang avatar_url của Registration gắn với occupancy này.
+        $avatarRaw = $student->avatar ?? $occupancy->registration?->avatar_url;
+
         return [
             'id' => $student->id,
             'student_code' => $student->student_code,
             'full_name' => $student->full_name,
-            'avatar' => $this->assetUrl($student->avatar),
+            'avatar' => $this->assetUrl($avatarRaw),
         ];
     }
 
@@ -1099,6 +1103,10 @@ class MaintenanceController extends Controller
             return $path;
         }
 
-        return url('/storage/' . ltrim($path, '/'));
+        // Một số bản ghi (vd. Registration convert từ hồ sơ giữ chỗ tân sinh viên) đã có sẵn
+        // prefix storage trong path lưu — phải strip trước, tránh double-prefix khiến ảnh 404.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
+
+        return url('/storage/' . $cleanPath);
     }
 }

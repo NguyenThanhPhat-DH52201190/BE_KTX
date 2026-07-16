@@ -130,7 +130,7 @@ class RoomController extends Controller
         // Lấy occupancy đang hiệu lực theo từng bed_id, kèm sinh viên.
         $occupancies = Occupancy::occupiedBedsQuery()
             ->whereIn('bed_id', $beds->pluck('id')->all())
-            ->with('student')
+            ->with(['student', 'registration'])
             ->get()
             ->keyBy('bed_id');
         $occupancyIds = $occupancies->pluck('id')->all();
@@ -160,7 +160,7 @@ class RoomController extends Controller
             ->get()
             ->keyBy('old_bed_id');
         $maintenanceOccupancies = Occupancy::query()
-            ->with(['student'])
+            ->with(['student', 'registration'])
             ->whereIn('id', $maintenanceLogs->pluck('occupancy_id')->filter()->unique()->all())
             ->get()
             ->keyBy('id');
@@ -337,7 +337,7 @@ class RoomController extends Controller
                     'occupancy_id' => $maintenanceOccupancy->id,
                     'student_name' => $maintenanceOccupancy->student->full_name,
                     'student_code' => $maintenanceOccupancy->student->student_code,
-                    'student_avatar' => $this->getImageUrl($maintenanceOccupancy->student->avatar),
+                    'student_avatar' => $this->getImageUrl($maintenanceOccupancy->student->avatar ?? $maintenanceOccupancy->registration?->avatar_url),
                     'temporary_bed_id' => $maintenanceLog->new_bed_id,
                     'temporary_bed_number' => $temporaryBed?->bed_number ? (string) $temporaryBed->bed_number : null,
                     'transferred_at' => $maintenanceLog->transferred_at,
@@ -350,7 +350,10 @@ class RoomController extends Controller
                     'id' => $student->id,
                     'student_code' => $student->student_code,
                     'full_name' => $student->full_name,
-                    'avatar' => $this->getImageUrl($student->avatar),
+                    // Sinh viên nguồn giữ chỗ tân sinh viên chưa chắc có Student.avatar (ảnh chỉ
+                    // lưu ở DormReservation/Registration.avatar_url lúc nộp hồ sơ) — fallback
+                    // sang avatar_url của Registration gắn với occupancy này.
+                    'avatar' => $this->getImageUrl($student->avatar ?? $occupancy?->registration?->avatar_url),
                     'class_name' => $student->class_name,
                     'faculty' => $student->faculty,
                     'academic_status' => $student->academic_status,
@@ -413,7 +416,9 @@ class RoomController extends Controller
             return $path;
         }
 
-        $cleanPath = ltrim($path, '/');
+        // Một số bản ghi (vd. Registration convert từ hồ sơ giữ chỗ tân sinh viên) đã có sẵn
+        // prefix storage trong path lưu — phải strip trước, tránh double-prefix khiến ảnh 404.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
         $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
 
         return $isProduction

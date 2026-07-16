@@ -10,6 +10,16 @@ class DormReservation extends Model
 {
     protected $table = 'dorm_reservations';
 
+    // Lý do cụ thể khi status chuyển 'expired' — do AutoCloseAdmissionPeriodsCommand ghi,
+    // KHÔNG dùng cancellation_reason/rejection_reason/admin_note (3 cột đó do người nhập,
+    // mang ý nghĩa khác). Việc 5 chỉ theo dõi đúng nhóm EXPIRATION_APPROVED_NOT_CONVERTED —
+    // KHÔNG dùng tên "not_enrolled" vì candidate.status=enrolled không còn đồng nghĩa
+    // reservation đã converted (submitted/waitlisted cũng tạo Student được từ Import nhập
+    // học + DormReservationConversionService).
+    public const EXPIRATION_PERIOD_CLOSED_SUBMITTED  = 'period_closed_while_submitted';
+    public const EXPIRATION_PERIOD_CLOSED_WAITLISTED = 'period_closed_while_waitlisted';
+    public const EXPIRATION_APPROVED_NOT_CONVERTED   = 'approved_not_converted';
+
     protected $fillable = [
         'admission_candidate_id',
         'registration_period_id',
@@ -32,6 +42,9 @@ class DormReservation extends Model
         'cccd_back_url',
         'rejection_reason',
         'cancellation_reason',
+        'cancelled_at',
+        'cancelled_by',
+        'expiration_reason',
         'admin_note',
         'submitted_at',
         'approved_at',
@@ -45,6 +58,7 @@ class DormReservation extends Model
         'submitted_at' => 'datetime',
         'approved_at'  => 'datetime',
         'expires_at'   => 'datetime',
+        'cancelled_at' => 'datetime',
     ];
 
     public function candidate(): BelongsTo
@@ -65,5 +79,13 @@ class DormReservation extends Model
     public function reservationPriorities(): HasMany
     {
         return $this->hasMany(ReservationPriority::class, 'dorm_reservation_id');
+    }
+
+    /** Có ít nhất 1 tiêu chí ưu tiên bị admin từ chối minh chứng — hồ sơ không được tiếp
+     *  tục tham gia ranking/duyệt/promotion/convert cho tới khi xử lý lại (xem báo cáo
+     *  sửa lỗi "minh chứng rejected vẫn được xếp hạng"). */
+    public function hasRejectedPriorityEvidence(): bool
+    {
+        return $this->reservationPriorities()->where('status', 'rejected')->exists();
     }
 }

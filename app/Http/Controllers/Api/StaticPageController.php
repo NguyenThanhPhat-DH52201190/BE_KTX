@@ -102,7 +102,9 @@ class StaticPageController extends Controller
             return $path;
         }
 
-        $cleanPath = ltrim($path, '/');
+        // Một số bản ghi (vd. Registration convert từ hồ sơ giữ chỗ tân sinh viên) đã có sẵn
+        // prefix storage trong path lưu — phải strip trước, tránh double-prefix khiến ảnh 404.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
         $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
 
         return $isProduction

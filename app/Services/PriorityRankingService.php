@@ -70,7 +70,13 @@ class PriorityRankingService
      */
     public function recalculatePeriod(int $periodId): void
     {
+        // Registration nguồn giữ chỗ (tân sinh viên, source_dorm_reservation_id NOT NULL) đã
+        // được xếp hạng/duyệt ở cấp DormReservation từ trước, suất đã cam kết — không tính
+        // lại điểm/tier ở đây, tránh ghi đè top_priority_tier/total_priority_score đã copy
+        // nguyên vẹn từ reservation lúc convert().
         Registration::where('registration_period_id', $periodId)
+            ->whereNull('source_dorm_reservation_id')
+            ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->get()
             ->each(fn (Registration $registration) => $this->calculateForRegistration($registration));
     }
@@ -121,6 +127,7 @@ class PriorityRankingService
     {
         DormReservation::where('registration_period_id', $periodId)
             ->whereIn('status', ['submitted', 'waitlisted'])
+            ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->get()
             ->each(fn (DormReservation $r) => $this->calculateForReservation($r));
     }
@@ -137,8 +144,13 @@ class PriorityRankingService
             $this->recalculateReservationPeriod($periodId);
         }
 
+        // Loại hoàn toàn hồ sơ có minh chứng ưu tiên bị từ chối khỏi tập eligible — không
+        // chỉ cho điểm 0/tier thấp, mà không được xếp hạng/đề xuất duyệt/waitlist ở đây
+        // nữa (đã chuyển rejected ngay khi admin từ chối minh chứng, filter này chỉ để
+        // phòng vệ thêm với dữ liệu cũ/race, không đổi thuật toán tính điểm/thứ tự).
         $ranked = DormReservation::where('registration_period_id', $periodId)
             ->whereIn('status', ['submitted', 'waitlisted'])
+            ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->orderBy('top_priority_tier', 'asc')
             ->orderByDesc('total_priority_score')
             ->orderBy('created_at', 'asc')
@@ -174,7 +186,14 @@ class PriorityRankingService
             $this->recalculatePeriod($periodId);
         }
 
+        // Loại hoàn toàn hồ sơ có minh chứng ưu tiên bị từ chối khỏi tập eligible — xem
+        // ghi chú tương tự ở rankReservationPeriod(). Loại luôn Registration nguồn giữ chỗ
+        // (source_dorm_reservation_id NOT NULL) — suất của chúng đã được cam kết từ
+        // DormReservation approved trước đó (không nằm trong $availableBeds truyền vào), xếp
+        // hạng lại có thể đổi auto_decision approve→reject và làm mất suất đã giữ.
         $ranked = Registration::where('registration_period_id', $periodId)
+            ->whereNull('source_dorm_reservation_id')
+            ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->orderBy('top_priority_tier', 'asc')
             ->orderByDesc('total_priority_score')
             ->orderBy('created_at', 'asc')

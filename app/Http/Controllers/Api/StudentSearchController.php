@@ -47,9 +47,10 @@ class StudentSearchController extends Controller
                 $room      = $occupancy?->room;
                 $floor     = $room?->floor;
 
-                $avatarUrl = $student->avatar
-                    ? $this->resolveImageUrl((string) $student->avatar)
-                    : null;
+                // Sinh viên nguồn giữ chỗ tân sinh viên có thể chưa có Student.avatar (dữ liệu
+                // cũ trước fix) — fallback sang avatar_url của Registration mới nhất.
+                $avatarRaw = $student->avatar ?? $latestReg?->avatar_url;
+                $avatarUrl = $avatarRaw ? $this->resolveImageUrl((string) $avatarRaw) : null;
 
                 return [
                     'id'               => $student->id,
@@ -95,7 +96,9 @@ class StudentSearchController extends Controller
             return $path;
         }
 
-        $cleanPath    = ltrim($path, '/');
+        // Một số bản ghi (vd. Registration convert từ hồ sơ giữ chỗ tân sinh viên) đã có sẵn
+        // prefix storage trong path lưu — phải strip trước, tránh double-prefix khiến ảnh 404.
+        $cleanPath    = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
         $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
 
         return $isProduction

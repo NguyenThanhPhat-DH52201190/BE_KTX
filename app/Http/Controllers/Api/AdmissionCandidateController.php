@@ -11,6 +11,7 @@ use App\Models\RegistrationPeriod;
 use App\Models\Student;
 use App\Models\StudentPriority;
 use App\Models\StudentPriorityEvidence;
+use App\Services\DormReservationConversionService;
 use App\Services\StudentNotificationService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -33,6 +34,9 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class AdmissionCandidateController extends Controller
 {
+    // Đủ điều kiện TẠO STUDENT (xác nhận đã tham gia luồng KTX) — rộng hơn điều kiện tạo
+    // Registration. Chỉ 'approved' mới tạo được Registration (xem CONVERTIBLE_RESERVATION_STATUSES).
+    private const ADMISSION_RESERVATION_STATUSES = ['submitted', 'approved', 'waitlisted'];
     private const CONVERTIBLE_RESERVATION_STATUSES = ['approved'];
 
     public function index(Request $request): JsonResponse
@@ -581,6 +585,21 @@ class AdmissionCandidateController extends Controller
                 }
 
                 if ($candidate->status === 'enrolled' || $candidate->student_id) {
+                    // Đã nhập học từ trước — thử tự khắc phục nếu còn sót 1 reservation
+                    // approved chưa converted (dữ liệu cũ, trước khi có conversion service
+                    // dùng chung). Không tạo Student mới, không đổi candidate.
+                    $approvedReservation = $this->findApprovedReservationForCandidate($candidate->id, true);
+                    if ($approvedReservation) {
+                        $registration = app(DormReservationConversionService::class)->convert($approvedReservation);
+                        if ($registration) {
+                            return array_merge($rowIdentity, [
+                                'status' => 'success',
+                                'student_code' => $data['student_code'],
+                                'message' => "Sinh viên đã nhập học từ trước — đã tự khắc phục hồ sơ giữ chỗ approved còn sót, tạo đơn đăng ký nội trú #{$registration->id}.",
+                            ]);
+                        }
+                    }
+
                     return array_merge($rowIdentity, ['status' => 'skipped', 'message' => 'Sinh viên đã được xử lý nhập học trước đó.']);
                 }
 
@@ -592,7 +611,10 @@ class AdmissionCandidateController extends Controller
                     return array_merge($rowIdentity, ['status' => 'skipped', 'message' => "Hồ sơ trúng tuyển '{$candidate->admission_code}' không ở trạng thái chờ nhập học."]);
                 }
 
-                $fullReservation = $this->findConvertibleReservationForCandidate($candidate->id, true);
+                // Đủ điều kiện tạo Student: có reservation thuộc submitted/approved/waitlisted
+                // (đã tham gia luồng KTX) — KHÔNG bắt buộc phải approved. Chỉ approved mới
+                // được tạo Registration (xem nhánh bên dưới).
+                $fullReservation = $this->findAdmissionReservationForCandidate($candidate->id, true);
                 if (!$fullReservation) {
                     $hasConvertedReservation = DormReservation::where('admission_candidate_id', $candidate->id)
                         ->where('status', 'converted')
@@ -604,6 +626,18 @@ class AdmissionCandidateController extends Controller
                         'message' => $hasConvertedReservation
                             ? 'Hồ sơ giữ chỗ đã được chuyển thành đơn đăng ký nội trú trước đó.'
                             : $this->reservationNotConvertibleMessage($candidate->id, true),
+                    ]);
+                }
+
+                // Chặn import bổ sung sau 17:00 end_date của đợt sở hữu reservation — phòng
+                // trường hợp scheduler auto-close chưa kịp chạy (độ trễ tối đa ~5 phút) nên
+                // reservation vẫn còn submitted/approved/waitlisted dù đã qua hạn thật.
+                $reservationDeadline = $fullReservation->period?->admissionDeadline();
+                if ($reservationDeadline && now()->greaterThan($reservationDeadline)) {
+                    return array_merge($rowIdentity, [
+                        'status' => 'skipped',
+                        'message' => 'Đợt đăng ký đã kết thúc lúc 17:00 ngày '
+                            . $reservationDeadline->format('d/m/Y') . ', không thể nhập bổ sung.',
                     ]);
                 }
 
@@ -622,19 +656,23 @@ class AdmissionCandidateController extends Controller
                     return array_merge($rowIdentity, ['status' => 'error', 'message' => "Email trường '{$schoolEmail}' đã thuộc về sinh viên khác."]);
                 }
 
-                $existingRegistration = Registration::where('registration_period_id', $fullReservation->registration_period_id)
-                    ->where('status', '!=', 'rejected')
-                    ->where(function ($q) use ($data, $candidate) {
-                        $q->whereHas('student', fn ($studentQuery) => $studentQuery->where('student_code', $data['student_code']));
-                        if ($candidate->student_id) {
-                            $q->orWhere('student_id', $candidate->student_id);
-                        }
-                    })
-                    ->lockForUpdate()
-                    ->exists();
+                // Chỉ cần kiểm tra trùng Registration khi reservation đang approved (sắp tạo
+                // Registration) — submitted/waitlisted không tạo Registration nên bỏ qua check này.
+                if ($fullReservation->status === 'approved') {
+                    $existingRegistration = Registration::where('registration_period_id', $fullReservation->registration_period_id)
+                        ->whereNotIn('status', ['rejected', 'cancelled'])
+                        ->where(function ($q) use ($data, $candidate) {
+                            $q->whereHas('student', fn ($studentQuery) => $studentQuery->where('student_code', $data['student_code']));
+                            if ($candidate->student_id) {
+                                $q->orWhere('student_id', $candidate->student_id);
+                            }
+                        })
+                        ->lockForUpdate()
+                        ->exists();
 
-                if ($existingRegistration) {
-                    return array_merge($rowIdentity, ['status' => 'skipped', 'message' => 'Sinh viên đã có đơn đăng ký nội trú trong đợt này.']);
+                    if ($existingRegistration) {
+                        return array_merge($rowIdentity, ['status' => 'skipped', 'message' => 'Sinh viên đã có đơn đăng ký nội trú trong đợt này.']);
+                    }
                 }
 
                 $currentYear = isset($data['current_year']) && is_numeric($data['current_year'])
@@ -642,10 +680,21 @@ class AdmissionCandidateController extends Controller
                     : 1;
 
                 // All data comes from Excel (from phòng đào tạo)
+                // Ảnh đại diện lúc nộp hồ sơ giữ chỗ chỉ lưu ở DormReservation.avatar_url —
+                // Student.avatar KHÔNG tự có, khiến StudentObserver không bao giờ đồng bộ
+                // khuôn mặt lên AWS Rekognition (search bằng khuôn mặt luôn "không tìm thấy"
+                // dù đúng người). Copy sang Student.avatar ngay lúc tạo, strip prefix
+                // "/api/storage/" hoặc "/storage/" đã lưu sẵn trong avatar_url — Student.avatar
+                // luôn lưu path tương đối thuần (vd. "students/avatar/xxx.jpg"), không có prefix.
+                $reservationAvatarPath = $fullReservation->avatar_url
+                    ? preg_replace('#^/?(api/)?storage/#', '', ltrim($fullReservation->avatar_url, '/'))
+                    : null;
+
                 $student = Student::create([
                     'student_code'      => $data['student_code'],
                     'full_name'         => $data['full_name'],
                     'date_of_birth'     => $data['date_of_birth'],
+                    'avatar'            => $reservationAvatarPath,
                     'gender'            => in_array($data['gender'] ?? '', ['male', 'female']) ? $data['gender'] : null,
                     'class_name'        => $data['class_name'],
                     'faculty'           => $data['faculty'] ?? null,
@@ -680,74 +729,59 @@ class AdmissionCandidateController extends Controller
                     'emergency_contact_relationship' => $data['emergency_contact_relationship'] ?? null,
                 ]);
 
-                $linkedNote = '';
                 $candidate->update([
                     'status'      => 'enrolled',
                     'student_id'  => $student->id,
                     'enrolled_at' => now(),
                 ]);
 
-                $linkedNote = " Đã liên kết hồ sơ trúng tuyển ({$candidate->admission_code}).";
+                // Chỉ reservation approved mới tạo Registration (cấp chỗ KTX thật). Submitted/
+                // waitlisted chỉ xác nhận candidate đã nhập học — chưa tạo Registration, chưa
+                // cấp chỗ, chờ xếp hạng/duyệt hoặc đôn danh sách chờ (Việc 6) xử lý sau, không
+                // cần import lại Excel lúc đó.
+                $registration = null;
+                if ($fullReservation->status === 'approved') {
+                    $registration = app(DormReservationConversionService::class)->convert($fullReservation);
+                    if (!$registration) {
+                        // Đã pre-check đầy đủ ở trên (trùng Registration, candidate hợp lệ) nên
+                        // tới đây coi là bất thường — KHÔNG throw để giữ Student/candidate đã
+                        // tạo (thí sinh đã nhập học thật), chỉ log rõ để admin xử lý tay phần
+                        // Registration còn thiếu.
+                        Log::error('bulkEnroll: DormReservationConversionService trả null dù đã pre-check hợp lệ', [
+                            'reservation_id' => $fullReservation->id,
+                            'candidate_id'   => $candidate->id,
+                        ]);
+                    }
+                } else {
+                    // submitted/waitlisted: chỉ liên kết student_code vào ĐÚNG reservation liên
+                    // quan, không đụng reservation khác của candidate, không đổi status.
+                    $fullReservation->update(['student_code' => $data['student_code']]);
+                }
 
-                $period = RegistrationPeriod::find($fullReservation->registration_period_id);
-                // Hồ sơ giữ chỗ đã được admin duyệt trước đó thì đơn lưu trú tạo ra
-                // không cần duyệt lại lần nữa — chuyển thẳng sang bước phân phòng.
-                $isPreApproved = $fullReservation->status === 'approved';
-                // Nguồn cha/mẹ ưu tiên: (a) dorm_reservation nếu có sẵn (dữ liệu lịch
-                // sử — hồ sơ giữ chỗ tạo TRƯỚC khi bỏ Bước 2, lúc đó còn thu trực tiếp
-                // lúc giữ chỗ); (b) nếu không có (hồ sơ mới, không còn thu ở bước giữ
-                // chỗ) thì lấy từ $student — vừa được chính Excel bulkEnroll() này ghi
-                // 12 cột cha/mẹ+khẩn cấp ở Student::create() phía trên, cùng 1 lượt xử
-                // lý nên $student chắc chắn đã có dữ liệu nếu Excel cung cấp.
-                // Liên hệ khẩn cấp luôn lấy từ $student vì dorm_reservations chưa bao
-                // giờ có 3 cột này (chỉ thêm sau này cho students/registrations).
-                $familySource = $fullReservation->father_name ? $fullReservation : $student;
-                $reg = Registration::create([
-                    'student_id'             => $student->id,
-                    'registration_period_id' => $fullReservation->registration_period_id,
-                    'registration_type'      => 'new',
-                    'semester'               => $period?->semester,
-                    'school_year'            => $period?->school_year,
-                    'stay_from_date'         => $period?->stay_start_date?->format('Y-m-d'),
-                    'stay_to_date'           => $period?->stay_end_date?->format('Y-m-d'),
-                    'father_name'            => $familySource->father_name,
-                    'father_birth_year'      => $familySource->father_birth_year,
-                    'father_job'             => $familySource->father_job,
-                    'father_phone'           => $familySource->father_phone,
-                    'mother_name'            => $familySource->mother_name,
-                    'mother_birth_year'      => $familySource->mother_birth_year,
-                    'mother_job'             => $familySource->mother_job,
-                    'mother_phone'           => $familySource->mother_phone,
-                    'parent_address'         => $familySource->parent_address,
-                    'emergency_contact_name'         => $student->emergency_contact_name,
-                    'emergency_contact_phone'        => $student->emergency_contact_phone,
-                    'emergency_contact_relationship' => $student->emergency_contact_relationship,
-                    'commitment_confirm'     => $fullReservation->commitment_confirm ?? true,
-                    'status'                 => $isPreApproved ? 'approved' : 'submitted',
-                    'approved_at'            => $isPreApproved ? now() : null,
-                    'avatar_url'             => $fullReservation->avatar_url,
-                    'cccd_front_url'         => $fullReservation->cccd_front_url,
-                    'cccd_back_url'          => $fullReservation->cccd_back_url,
-                    'top_priority_tier'      => $fullReservation->top_priority_tier,
-                    'total_priority_score'   => $fullReservation->total_priority_score,
-                ]);
-                $this->copyPrioritiesToRegistration($fullReservation, $student->id, $reg->id);
-                $fullReservation->update([
-                    'student_code'              => $data['student_code'],
-                    'status'                    => 'converted',
-                    'converted_registration_id' => $reg->id,
-                ]);
-                $linkedNote .= ' Đã tự động tạo đơn đăng ký lưu trú.';
+                $enrollmentResult = match (true) {
+                    $registration !== null => 'converted',
+                    $fullReservation->status === 'waitlisted' => 'waitlisted',
+                    default => 'awaiting_review',
+                };
 
-                // Hồ sơ giữ chỗ đã duyệt sẵn -> đơn nội trú tạo ra cũng
-                // approved luôn, sinh viên chỉ còn chờ phân phòng.
-                if ($isPreApproved) {
+                $message = match ($enrollmentResult) {
+                    'converted' => 'Đã nhập học và chuyển hồ sơ giữ chỗ thành đơn nội trú.',
+                    'waitlisted' => 'Đã xác nhận nhập học. Hồ sơ giữ chỗ đang trong danh sách chờ.',
+                    default => 'Đã xác nhận nhập học. Hồ sơ giữ chỗ đang chờ xét duyệt.',
+                };
+
+                // Thông báo riêng cho submitted/waitlisted — trường hợp converted đã được
+                // DormReservationConversionService::convert() gửi "Đơn đăng ký nội trú đã
+                // được duyệt" ngay bên trong rồi, không gửi lặp ở đây.
+                if ($enrollmentResult !== 'converted') {
                     app(StudentNotificationService::class)->notifyStudent(
                         $student,
-                        'Đơn đăng ký nội trú đã được duyệt',
-                        'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
-                        'registration_approved',
-                        $reg->id,
+                        'Đã xác nhận nhập học',
+                        $enrollmentResult === 'waitlisted'
+                            ? 'Bạn đã được xác nhận nhập học. Hồ sơ giữ chỗ KTX hiện đang trong danh sách chờ.'
+                            : 'Bạn đã được xác nhận nhập học. Hồ sơ giữ chỗ KTX đang chờ xét duyệt.',
+                        'admission_enrolled_pending_ktx',
+                        null,
                         queue: true,
                     );
                 }
@@ -768,9 +802,10 @@ class AdmissionCandidateController extends Controller
                 }
 
                 return array_merge($rowIdentity, [
-                    'status'       => 'success',
-                    'student_code' => $data['student_code'],
-                    'message'      => "Đã tạo sinh viên.{$linkedNote}" . ($student->email ? ' Email đã gửi.' : ''),
+                    'status'            => 'success',
+                    'student_code'      => $data['student_code'],
+                    'enrollment_result' => $enrollmentResult,
+                    'message'           => $message . ($student->email ? ' Email đã gửi.' : ''),
                 ]);
             });
 
@@ -781,11 +816,31 @@ class AdmissionCandidateController extends Controller
         return response()->json(compact('summary', 'rows'));
     }
 
-    private function findConvertibleReservationForCandidate(int $candidateId, bool $lock = false): ?DormReservation
+    /**
+     * Đủ điều kiện TẠO STUDENT — reservation thuộc submitted/approved/waitlisted (đã tham
+     * gia luồng KTX bằng 1 hồ sơ giữ chỗ hợp lệ). KHÔNG dùng để xác định có được tạo
+     * Registration hay không — xem findApprovedReservationForCandidate().
+     */
+    private function findAdmissionReservationForCandidate(int $candidateId, bool $lock = false): ?DormReservation
+    {
+        return $this->findReservationForCandidateByStatuses($candidateId, self::ADMISSION_RESERVATION_STATUSES, $lock);
+    }
+
+    /**
+     * Đủ điều kiện TẠO REGISTRATION — chỉ reservation đang approved, chưa converted.
+     * Dùng để convert (bulkEnroll khi reservation đã approved sẵn, hoặc tự khắc phục dữ
+     * liệu cũ khi candidate đã enrolled nhưng có approved-reservation sót lại chưa converted).
+     */
+    private function findApprovedReservationForCandidate(int $candidateId, bool $lock = false): ?DormReservation
+    {
+        return $this->findReservationForCandidateByStatuses($candidateId, self::CONVERTIBLE_RESERVATION_STATUSES, $lock);
+    }
+
+    private function findReservationForCandidateByStatuses(int $candidateId, array $statuses, bool $lock = false): ?DormReservation
     {
         $activePeriod = $this->findActiveAdmissionPeriod($lock);
         $query = DormReservation::where('admission_candidate_id', $candidateId)
-            ->whereIn('status', self::CONVERTIBLE_RESERVATION_STATUSES)
+            ->whereIn('status', $statuses)
             ->whereNull('converted_registration_id');
 
         if ($lock) {

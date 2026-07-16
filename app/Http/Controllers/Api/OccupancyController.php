@@ -217,7 +217,10 @@ class OccupancyController extends Controller
             return $path;
         }
 
-        $cleanPath    = ltrim($path, '/');
+        // Một số bản ghi (vd. Registration được convert từ hồ sơ giữ chỗ tân sinh viên) đã có
+        // sẵn prefix storage trong path lưu — phải strip trước, nếu không sẽ bị double-prefix
+        // (vd. "/storage/api/storage/..."), ảnh không hiển thị được (404).
+        $cleanPath    = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
         $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
 
         return $isProduction

@@ -12,6 +12,10 @@ use App\Models\RegistrationPeriod;
 use App\Models\ReservationPriority;
 use App\Models\StudentPriority;
 use App\Models\StudentPriorityEvidence;
+use App\Services\DormReservationCancellationService;
+use App\Services\DormReservationConversionService;
+use App\Services\DormWaitlistPromotionService;
+use App\Services\DormCapacityService;
 use App\Services\PriorityRankingService;
 use App\Services\StudentNotificationService;
 use App\Models\Student;
@@ -93,6 +97,17 @@ class DormReservationController extends Controller
             ));
         }
 
+        if (!$activePeriod) {
+            return response()->json([
+                'verification_status' => 'period_closed',
+                'message'             => 'Đợt đăng ký giữ chỗ KTX đã kết thúc.',
+                'full_name'           => $candidate->full_name,
+                'major_name'          => $candidate->major_name,
+                'course_year'         => $candidate->course_year,
+                'gender'              => $candidate->gender,
+            ]);
+        }
+
         return response()->json([
             'verification_status' => 'admitted',
             'message'             => 'Đã xác minh hồ sơ trúng tuyển.',
@@ -135,8 +150,12 @@ class DormReservationController extends Controller
             // Nguồn sự thật duy nhất: đợt active đang mở cho tân sinh viên.
             $period = $this->findActiveAdmissionPeriod(lock: true);
 
-            if (!$period || (int) $data['registration_period_id'] !== (int) $period->id) {
-                return response()->json(['message' => 'Đợt đăng ký tân sinh viên hiện không hợp lệ hoặc đã đóng. Vui lòng tải lại trang và thử lại.'], 422);
+            if (!$period) {
+                return response()->json(['message' => 'Đợt đăng ký giữ chỗ KTX đã kết thúc.'], 422);
+            }
+
+            if ((int) $data['registration_period_id'] !== (int) $period->id) {
+                return response()->json(['message' => 'Đợt đăng ký tân sinh viên hiện không hợp lệ. Vui lòng tải lại trang và thử lại.'], 422);
             }
 
             $existingBlocking = $this->findBlockingReservation($candidate->id, $period->id, lock: true);
@@ -203,7 +222,8 @@ class DormReservationController extends Controller
 
         $reservation = DormReservation::with([
                 'period',
-                'candidate:id,full_name,major_name,cccd,email,phone',
+                'candidate:id,full_name,major_name,cccd,email,phone,status,student_id',
+                'convertedRegistration',
             ])
             ->where('reservation_code', $reservationCode)
             ->first();
@@ -220,17 +240,122 @@ class DormReservationController extends Controller
         ]);
     }
 
+    /** Message chung cho MỌI lý do xác minh thất bại — không tiết lộ hồ sơ có tồn tại hay
+     *  email đúng/sai (chống dò reservation_code + email theo từng phần riêng biệt). */
+    private const CANCEL_VERIFICATION_FAILED_MESSAGE = 'Không thể xác minh thông tin hồ sơ hoặc hồ sơ không đủ điều kiện hủy.';
+
+    /**
+     * Tự hủy nhu cầu ở KTX trước deadline — reservation_code KHÔNG còn là bằng chứng sở
+     * hữu duy nhất (dò được bằng brute-force dù có throttle) — bắt buộc thêm email đã
+     * đăng ký với hồ sơ làm yếu tố thứ 2, so khớp tuyệt đối (chuẩn hóa lowercase+trim) với
+     * admission_candidates.email. Không có cơ chế token/OTP dùng chung sẵn có trong dự án
+     * để tái dùng (xem rà soát) nên chọn phương án B theo yêu cầu. Dùng chung cho cả thí
+     * sinh chưa có tài khoản lẫn sinh viên đã enrolled (chưa làm route auth:sanctum riêng
+     * — xem báo cáo cuối, quyết định hoãn vì scope lớn, không bắt buộc theo yêu cầu).
+     */
+    public function cancelSelf(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'reservation_code' => ['required', 'string', 'max:50'],
+            'email'            => ['required', 'string', 'email', 'max:255'],
+            'reason'           => ['required', 'string', 'max:1000'],
+        ]);
+
+        $reservationCode = Str::upper(trim($data['reservation_code']));
+        $email = Str::lower(trim($data['email']));
+
+        $reservation = DormReservation::with('candidate')
+            ->where('reservation_code', $reservationCode)
+            ->first();
+
+        // Cùng 1 message cho "không tìm thấy" lẫn "email không khớp" — tránh lộ việc mã
+        // hồ sơ có tồn tại hay không qua nội dung phản hồi.
+        if (!$reservation || !$reservation->candidate || !$reservation->candidate->email
+            || Str::lower(trim($reservation->candidate->email)) !== $email
+        ) {
+            return response()->json([
+                'message' => self::CANCEL_VERIFICATION_FAILED_MESSAGE,
+            ], 422);
+        }
+
+        $reason = trim($data['reason']);
+        if ($reason === '') {
+            return response()->json([
+                'message' => 'Vui lòng nhập lý do hủy.',
+                'errors'  => ['reason' => ['Vui lòng nhập lý do hủy.']],
+            ], 422);
+        }
+
+        $result = app(DormReservationCancellationService::class)->cancel($reservation->id, $reason, 'candidate');
+
+        if (!$result['ok']) {
+            return response()->json([
+                'message' => $result['message'],
+                'code'    => $result['code'],
+            ], 422);
+        }
+
+        $promotionOutcome = null;
+        if ($result['releasedApprovedSlot'] && $result['periodId']) {
+            $promotionOutcome = app(DormWaitlistPromotionService::class)->promoteOne($result['periodId']);
+        }
+
+        // Gửi thông báo SAU KHI cả 2 transaction (hủy + đôn waitlist) đã commit — không
+        // gửi mail trong transaction để tránh giữ lock lâu / rollback vẫn lỡ gửi mail.
+        $this->notifyCandidate(
+            $result['reservation']->candidate,
+            $result['cancelledRegistration'] ? 'Đơn đăng ký nội trú KTX đã được hủy' : 'Yêu cầu ở KTX đã được hủy',
+            $result['cancelledRegistration']
+                ? 'Đơn đăng ký nội trú của bạn đã được hủy trước thời hạn.'
+                : 'Yêu cầu ở KTX của bạn đã được hủy thành công.',
+        );
+
+        if ($promotionOutcome && $promotionOutcome['promoted']) {
+            $promotedReservation = $promotionOutcome['reservation'];
+            $promotedCandidate   = $promotedReservation->candidate;
+
+            if ($promotionOutcome['converted']) {
+                $this->notifyCandidate(
+                    $promotedCandidate,
+                    'Đơn đăng ký nội trú KTX đã được tạo',
+                    'Bạn đã được chuyển từ danh sách chờ và đơn đăng ký nội trú KTX đã được tạo thành công.',
+                );
+            } elseif ($promotedCandidate?->status !== 'enrolled') {
+                $this->notifyCandidate(
+                    $promotedCandidate,
+                    'Hồ sơ giữ chỗ KTX đã được duyệt',
+                    'Bạn đã được chuyển từ danh sách chờ sang trạng thái được duyệt giữ chỗ KTX. Vui lòng hoàn tất thủ tục nhập học theo hướng dẫn.',
+                );
+            }
+            // Đã enrolled nhưng convert() thất bại (trùng/race) — KHÔNG gửi "hoàn tất nhập
+            // học" (sai, vì đã enrolled) và KHÔNG khẳng định đã tạo Registration. Đã log
+            // warning ở DormWaitlistPromotionService; admin xử lý thủ công.
+        }
+
+        return response()->json([
+            'message'           => 'Đã hủy thành công.',
+            'reservation'       => $this->reservationProgressPayload($result['reservation']->fresh(['candidate', 'period', 'convertedRegistration'])),
+            'promoted_waitlist' => (bool) ($promotionOutcome['promoted'] ?? false),
+        ]);
+    }
+
     private function findActiveAdmissionPeriod(bool $lock = false): ?RegistrationPeriod
     {
         $query = RegistrationPeriod::where('status', 'active')
             ->where('allow_admission_candidates', true)
-            ->latest('created_at');
+            ->orderByDesc('created_at');
 
         if ($lock) {
             $query->lockForUpdate();
         }
 
-        return $query->first();
+        // Chặn nộp mới sau hạn dự kiến (end_date lúc 17:00) ngay cả khi status DB chưa kịp
+        // đồng bộ sang 'closed' (syncPeriodStatuses() chỉ chạy khi có ai gọi GET
+        // /registration-periods, không đảm bảo chạy trước lúc store()/verify() được gọi).
+        return $query->get()->first(function (RegistrationPeriod $period) {
+            $deadline = $period->admissionDeadline();
+            return $deadline === null || now()->lessThanOrEqualTo($deadline);
+        });
     }
 
     private function findActiveReservation(int $candidateId, int $periodId, bool $lock = false): ?DormReservation
@@ -299,6 +424,7 @@ class DormReservationController extends Controller
                 'status'           => $reservation->status,
                 'submitted_at'     => $this->reservationSubmittedAt($reservation),
                 'period_name'      => $reservation->period?->name,
+                'period_end_date'  => $reservation->period?->end_date?->toDateString(),
             ];
         }
 
@@ -313,6 +439,7 @@ class DormReservationController extends Controller
             'submitted_at'     => $this->reservationSubmittedAt($reservation),
             'approved_at'      => $reservation->approved_at?->toISOString(),
             'period_name'      => $reservation->period?->name,
+            'period_end_date'  => $reservation->period?->end_date?->toDateString(),
         ];
 
         if ($reservation->candidate) {
@@ -331,9 +458,60 @@ class DormReservationController extends Controller
 
         if ($reservation->status === 'cancelled') {
             $payload['cancellation_reason'] = $reservation->cancellation_reason;
+            $payload['cancelled_at']        = $reservation->cancelled_at?->toISOString();
         }
 
+        if ($reservation->status === 'expired' && $reservation->expiration_reason) {
+            $payload['expiration_reason'] = $reservation->expiration_reason;
+        }
+
+        // reservation.status vẫn giữ 'converted' sau khi Registration bị hủy (bảo toàn
+        // lịch sử — xem DormReservationCancellationService) — phải lộ trạng thái
+        // Registration ra payload để FE biết đơn thật sự đã bị hủy, không hiển thị nhầm
+        // "đã chuyển thành đơn chính thức" như bình thường.
+        if ($reservation->status === 'converted' && $reservation->convertedRegistration) {
+            $registration = $reservation->convertedRegistration;
+            $payload['registration_status'] = $registration->status;
+
+            if ($registration->status === 'cancelled') {
+                $payload['registration_cancelled_at']        = $registration->cancelled_at?->toISOString();
+                $payload['registration_cancellation_reason'] = $registration->cancellation_reason;
+            }
+        }
+
+        $payload['can_cancel'] = $this->canCancelReservation($reservation);
+
         return $payload;
+    }
+
+    /**
+     * Gợi ý hiển thị nút hủy cho FE — KHÔNG phải nguồn xác thực cuối cùng, cancelSelf()
+     * vẫn tự kiểm tra lại toàn bộ điều kiện trong transaction có lock trước khi hủy thật.
+     */
+    private function canCancelReservation(DormReservation $reservation): bool
+    {
+        if (in_array($reservation->status, ['expired', 'rejected', 'cancelled'], true)) {
+            return false;
+        }
+
+        $deadline = $reservation->period?->admissionDeadline();
+        if ($deadline && now()->greaterThan($deadline)) {
+            return false;
+        }
+
+        if ($reservation->status === 'converted') {
+            $registration = $reservation->convertedRegistration;
+            if (!$registration || in_array($registration->status, ['cancelled', 'rejected'], true)) {
+                return false;
+            }
+
+            $occupancy = Occupancy::where('registration_id', $registration->id)->orderByDesc('id')->first();
+            if ($occupancy && $occupancy->status === 'ACTIVE') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function reservationSubmittedAt(DormReservation $reservation): ?string
@@ -385,7 +563,14 @@ class DormReservationController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $query = DormReservation::with(['candidate', 'period'])
+        $validStatuses = ['submitted', 'approved', 'rejected', 'waitlisted', 'converted', 'expired', 'cancelled'];
+
+        $query = DormReservation::with(['candidate', 'period', 'convertedRegistration'])
+            ->withCount([
+                'reservationPriorities as priority_pending_count' => fn ($q) => $q->where('status', 'pending'),
+                'reservationPriorities as priority_verified_count' => fn ($q) => $q->where('status', 'verified'),
+                'reservationPriorities as priority_rejected_count' => fn ($q) => $q->where('status', 'rejected'),
+            ])
             ->orderByDesc('created_at');
 
         if ($s = $request->input('search')) {
@@ -401,15 +586,75 @@ class DormReservationController extends Controller
             });
         }
 
-        if ($status = $request->input('status')) {
-            $query->where('status', $status);
+        if ($statusesInput = $request->input('statuses')) {
+            $statuses = is_array($statusesInput)
+                ? $statusesInput
+                : explode(',', (string) $statusesInput);
+            $statuses = array_values(array_intersect(
+                $validStatuses,
+                array_map(static fn ($status) => trim((string) $status), $statuses)
+            ));
+
+            if ($statuses !== []) {
+                $query->whereIn('status', $statuses);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
+        } elseif ($status = $request->input('status')) {
+            if (in_array($status, $validStatuses, true)) {
+                $query->where('status', $status);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
+        }
+
+        if ($registrationStatus = $request->input('registration_status')) {
+            if ($registrationStatus === 'cancelled') {
+                $query->where('status', 'converted')
+                    ->whereHas('convertedRegistration', function ($rq) {
+                        $rq->where('status', 'cancelled');
+                    });
+            } elseif ($registrationStatus === 'not_cancelled') {
+                $query->where('status', 'converted')
+                    ->whereHas('convertedRegistration', function ($rq) {
+                        $rq->where('status', '!=', 'cancelled');
+                    });
+            }
         }
 
         if ($periodId = $request->input('registration_period_id')) {
             $query->where('registration_period_id', $periodId);
         }
 
-        return response()->json($query->paginate(20));
+        // Việc 5 — lọc riêng nhóm "đã duyệt nhưng cuối cùng không thành đơn nội trú" (không
+        // tin FE, backend tự AND cứng với status=expired nếu FE lỡ gửi expiration_reason mà
+        // quên status, tránh trả nhầm cả submitted/waitlisted chưa expired).
+        if ($expirationReason = $request->input('expiration_reason')) {
+            $query->where('expiration_reason', $expirationReason)->where('status', 'expired');
+        }
+
+        $paginated = $query->paginate(20);
+
+        // Tổng hợp tình trạng minh chứng ưu tiên cho FE (badge thay cho "Đã nộp hồ sơ") từ
+        // 3 count đã eager-load qua withCount ở trên — không query thêm theo từng hồ sơ.
+        // Ưu tiên hiển thị: còn minh chứng chờ xác minh > đã có minh chứng hợp lệ > toàn bộ
+        // minh chứng bị từ chối, vì "chờ xác minh" là việc cần admin xử lý gấp nhất.
+        $paginated->getCollection()->transform(function (DormReservation $reservation) {
+            $reservation->has_priority_evidence = ($reservation->priority_pending_count
+                + $reservation->priority_verified_count
+                + $reservation->priority_rejected_count) > 0;
+
+            $reservation->priority_evidence_status = match (true) {
+                $reservation->priority_pending_count > 0 => 'pending',
+                $reservation->priority_verified_count > 0 => 'verified',
+                $reservation->priority_rejected_count > 0 => 'rejected',
+                default => null,
+            };
+
+            return $reservation;
+        });
+
+        return response()->json($paginated);
     }
 
     public function show(int $id): JsonResponse
@@ -425,32 +670,124 @@ class DormReservationController extends Controller
         return response()->json($reservation);
     }
 
+    /** Message lỗi capacity dùng chung — nhất quán giữa các endpoint duyệt (BUG-2/RR-2/RR-3). */
+    private const CAPACITY_CONFLICT_MESSAGE = 'Không thể duyệt hồ sơ vì sức chứa KTX đã thay đổi hoặc không còn suất trống. Vui lòng tải lại dữ liệu.';
+
     public function approve(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::with('candidate')->findOrFail($id);
+        $adminNoteInput = $request->input('admin_note');
 
-        if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
-            return response()->json(['message' => 'Chỉ duyệt được hồ sơ ở trạng thái đã nộp hoặc đang chờ.'], 422);
+        // Lock order thống nhất toàn hệ thống: RegistrationPeriod trước, rồi tới
+        // DormReservation/Registration — xem DormWaitlistPromotionService (lock period rồi
+        // mới lock tập reservation) để tránh deadlock khi 2 luồng giao nhau.
+        $result = DB::transaction(function () use ($id, $adminNoteInput) {
+            $reservation = DormReservation::with('candidate')->lockForUpdate()->findOrFail($id);
+
+            $period = $reservation->registration_period_id
+                ? RegistrationPeriod::where('id', $reservation->registration_period_id)->lockForUpdate()->first()
+                : null;
+
+            if ($period && $this->admissionPeriodPastDeadline($period)) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => [
+                        'message' => 'Đợt đăng ký giữ chỗ KTX đã kết thúc lúc 17:00 ngày '
+                            . $period->admissionDeadline()->format('d/m/Y') . '.',
+                    ],
+                ];
+            }
+
+            // Re-check trạng thái SAU khi đã lock — hồ sơ có thể đã bị duyệt/hủy/từ chối bởi
+            // request khác trong lúc chờ lock (idempotent: không duyệt lại, trả lỗi rõ).
+            if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => 'Hồ sơ hiện không ở trạng thái có thể duyệt (có thể đã được xử lý bởi thao tác khác). Vui lòng tải lại dữ liệu.'],
+                ];
+            }
+
+            $pendingPriorityCount = ReservationPriority::where('dorm_reservation_id', $reservation->id)
+                ->where('status', 'pending')
+                ->count();
+
+            if ($pendingPriorityCount > 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => [
+                        'message' => "Còn {$pendingPriorityCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh hoặc từ chối tất cả minh chứng trước khi duyệt.",
+                        'pending_priority_count' => $pendingPriorityCount,
+                    ],
+                ];
+            }
+
+            // Minh chứng ưu tiên bị từ chối — hồ sơ không được duyệt (thường status đã tự
+            // chuyển 'rejected' ngay khi admin từ chối minh chứng; check này chỉ để phòng
+            // vệ thêm với dữ liệu cũ chưa cascade).
+            if ($reservation->hasRejectedPriorityEvidence()) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'],
+                ];
+            }
+
+            // Tính capacity SAU KHI đã lock RegistrationPeriod — chặn 2 request approve()
+            // đọc cùng 1 giá trị "còn suất" trước khi cả hai cùng ghi approved (BUG-2).
+            $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period ?? $reservation->registration_period_id);
+            if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity],
+                ];
+            }
+
+            $reservation->update([
+                'status'      => 'approved',
+                'approved_at' => now(),
+                'admin_note'  => $adminNoteInput ?? $reservation->admin_note,
+            ]);
+
+            $converted = null;
+            // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
+            // Registration, không cần đợi import lại Excel. convert() tự mở transaction lồng
+            // (savepoint) — giữ nguyên logic hiện có, không đổi hành vi.
+            if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
+                $converted = app(DormReservationConversionService::class)->convert($reservation);
+            }
+
+            return [
+                'ok'          => true,
+                'reservation' => $reservation->fresh(['candidate', 'period']),
+                'converted'   => $converted,
+            ];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
 
-        $reservation->update([
-            'status'      => 'approved',
-            'approved_at' => now(),
-            'admin_note'  => $request->input('admin_note', $reservation->admin_note),
-        ]);
-
+        // Gửi thông báo SAU khi transaction đã commit — không giữ lock trong lúc gửi mail.
+        $reservation = $result['reservation'];
         $this->notifyCandidate(
             $reservation->candidate,
             'Hồ sơ giữ chỗ KTX đã được duyệt',
-            'Hồ sơ đăng ký giữ chỗ KTX của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.',
+            $this->approvedNotificationContent($reservation),
         );
 
-        return response()->json(['message' => 'Đã duyệt hồ sơ giữ chỗ.', 'reservation' => $reservation->load('candidate', 'period')]);
+        return response()->json(['message' => 'Đã duyệt hồ sơ giữ chỗ.', 'reservation' => $reservation]);
     }
 
     public function reject(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::with('candidate')->findOrFail($id);
+        $reservation = DormReservation::with(['candidate', 'period'])->findOrFail($id);
+
+        if ($blocked = $this->ensureAdmissionPeriodStillOpen($reservation)) {
+            return $blocked;
+        }
 
         if (!in_array($reservation->status, ['submitted', 'waitlisted', 'approved'], true)) {
             return response()->json(['message' => 'Không thể từ chối hồ sơ ở trạng thái hiện tại.'], 422);
@@ -477,10 +814,18 @@ class DormReservationController extends Controller
 
     public function waitlist(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::with('candidate')->findOrFail($id);
+        $reservation = DormReservation::with(['candidate', 'period'])->findOrFail($id);
+
+        if ($blocked = $this->ensureAdmissionPeriodStillOpen($reservation)) {
+            return $blocked;
+        }
 
         if ($reservation->status !== 'submitted') {
             return response()->json(['message' => 'Chỉ chuyển được hồ sơ đã nộp vào danh sách chờ.'], 422);
+        }
+
+        if ($reservation->hasRejectedPriorityEvidence()) {
+            return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
         }
 
         $reservation->update([
@@ -499,7 +844,11 @@ class DormReservationController extends Controller
 
     public function cancel(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::with('candidate')->findOrFail($id);
+        $reservation = DormReservation::with(['candidate', 'period'])->findOrFail($id);
+
+        if ($blocked = $this->ensureAdmissionPeriodStillOpen($reservation)) {
+            return $blocked;
+        }
 
         if (in_array($reservation->status, ['converted', 'cancelled'], true)) {
             return response()->json(['message' => 'Hồ sơ đã được chuyển đổi hoặc đã huỷ, không thể huỷ lại.'], 422);
@@ -584,7 +933,7 @@ class DormReservationController extends Controller
             // Kiểm tra không tạo trùng registration cho cùng student + period
             $existingReg = Registration::where('student_id', $studentId)
                 ->where('registration_period_id', $periodId)
-                ->whereNotIn('status', ['rejected'])
+                ->whereNotIn('status', ['rejected', 'cancelled'])
                 ->first();
 
             if ($existingReg) {
@@ -676,35 +1025,90 @@ class DormReservationController extends Controller
 
         $periodId = $data['registration_period_id'];
 
-        $pendingCount = ReservationPriority::whereHas(
-            'dormReservation',
-            fn ($q) => $q->where('registration_period_id', $periodId)
-        )->where('status', 'pending')->count();
+        // Lock RegistrationPeriod TRƯỚC (đúng lock order chung của hệ thống) — 2 request rank
+        // cùng 1 đợt sẽ tự serialize qua lock này (request sau chờ, rồi tự đọc lại dữ liệu MỚI
+        // bên trong transaction của nó, không có chuyện ghi đè bằng dữ liệu cũ). Không lock
+        // trực tiếp từng dorm_reservation vì PriorityRankingService tự làm nhiều vòng
+        // query/update (recalculate rồi rank) — lock period là đủ để loại race giữa 2 lần rank,
+        // không cần sửa PriorityRankingService (không đổi thuật toán ranking).
+        $result = DB::transaction(function () use ($periodId) {
+            $period = RegistrationPeriod::where('id', $periodId)->lockForUpdate()->first();
 
-        if ($pendingCount > 0) {
-            return response()->json([
-                'message'                => "Còn {$pendingCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh tất cả minh chứng trước khi xếp hạng.",
-                'pending_priority_count' => $pendingCount,
-            ], 422);
+            if (!$period) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đợt đăng ký.']];
+            }
+
+            if ($this->admissionPeriodPastDeadline($period)) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt đăng ký giữ chỗ KTX đã kết thúc, không thể xếp hạng.']];
+            }
+
+            $pendingCount = ReservationPriority::whereHas(
+                'dormReservation',
+                fn ($q) => $q->where('registration_period_id', $periodId)
+            )->where('status', 'pending')->count();
+
+            if ($pendingCount > 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => [
+                        'message'                => "Còn {$pendingCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh tất cả minh chứng trước khi xếp hạng.",
+                        'pending_priority_count' => $pendingCount,
+                    ],
+                ];
+            }
+
+            $capacityBefore = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period);
+            $freeBeds       = (int) $capacityBefore['available_approval_slots'];
+
+            $ranker = new PriorityRankingService();
+            $rankResult = $ranker->rankReservationPeriod($periodId, $freeBeds);
+            $capacityWithProposals = app(DormCapacityService::class)
+                ->summarizeForRegistrationPeriod($period, $rankResult['approved']->count());
+
+            $toNotifyApproved  = [];
+            $toNotifyWaitlist  = [];
+
+            foreach ($rankResult['approved'] as $reservation) {
+                $reservation->update(['status' => 'approved', 'approved_at' => now()]);
+                $toNotifyApproved[] = $reservation;
+
+                // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
+                // Registration, không cần đợi import lại Excel. convert() tự mở transaction lồng
+                // (savepoint) — giữ nguyên logic hiện có.
+                if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
+                    app(DormReservationConversionService::class)->convert($reservation);
+                }
+            }
+            foreach ($rankResult['waitlist'] as $reservation) {
+                $reservation->update(['status' => 'waitlisted']);
+                $toNotifyWaitlist[] = $reservation;
+            }
+
+            return [
+                'ok'                => true,
+                'free_beds'         => $freeBeds,
+                'approved_count'    => $rankResult['approved']->count(),
+                'waitlist_count'    => $rankResult['waitlist']->count(),
+                'capacity'          => $capacityWithProposals,
+                'toNotifyApproved'  => $toNotifyApproved,
+                'toNotifyWaitlist'  => $toNotifyWaitlist,
+            ];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
 
-        $totalAvailable = Bed::where('status', 'active')->count();
-        $occupiedCount  = Occupancy::occupiedBedsQuery()->pluck('bed_id')->unique()->count();
-        $freeBeds       = max(0, $totalAvailable - $occupiedCount);
-
-        $ranker = new PriorityRankingService();
-        $result = $ranker->rankReservationPeriod($periodId, $freeBeds);
-
-        foreach ($result['approved'] as $reservation) {
-            $reservation->update(['status' => 'approved', 'approved_at' => now()]);
+        // Gửi thông báo SAU khi transaction đã commit.
+        foreach ($result['toNotifyApproved'] as $reservation) {
             $this->notifyCandidate(
                 $reservation->candidate,
                 'Hồ sơ giữ chỗ KTX đã được duyệt',
-                'Hồ sơ đăng ký giữ chỗ KTX của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.',
+                $this->approvedNotificationContent($reservation),
             );
         }
-        foreach ($result['waitlist'] as $reservation) {
-            $reservation->update(['status' => 'waitlisted']);
+        foreach ($result['toNotifyWaitlist'] as $reservation) {
             $this->notifyCandidate(
                 $reservation->candidate,
                 'Hồ sơ giữ chỗ KTX đang chờ xét duyệt',
@@ -714,9 +1118,10 @@ class DormReservationController extends Controller
 
         return response()->json([
             'message'   => 'Đã xếp hạng xong.',
-            'free_beds' => $freeBeds,
-            'approved'  => $result['approved']->count(),
-            'waitlist'  => $result['waitlist']->count(),
+            'free_beds' => $result['free_beds'],
+            'approved'  => $result['approved_count'],
+            'waitlist'  => $result['waitlist_count'],
+            'capacity'  => $result['capacity'],
         ]);
     }
 
@@ -754,7 +1159,7 @@ class DormReservationController extends Controller
 
             $existing = Registration::where('student_id', $studentId)
                 ->where('registration_period_id', $periodId)
-                ->whereNotIn('status', ['rejected'])
+                ->whereNotIn('status', ['rejected', 'cancelled'])
                 ->exists();
 
             if ($existing) {
@@ -835,6 +1240,53 @@ class DormReservationController extends Controller
     // =========================================================
     // Helpers
     // =========================================================
+
+    private function approvedNotificationContent(DormReservation $reservation): string
+    {
+        $deadline = $reservation->period?->admissionDeadline();
+        if (!$deadline) {
+            return 'Hồ sơ giữ chỗ của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.';
+        }
+
+        return 'Hồ sơ giữ chỗ của bạn đã được duyệt. Vui lòng hoàn tất thủ tục nhập học trước 17:00 ngày '
+            . $deadline->format('d/m/Y') . ' để tiếp tục giữ chỗ KTX.';
+    }
+
+    /**
+     * true nếu đợt tân sinh viên đã qua hạn 17:00 end_date — dùng để chặn các action admin
+     * làm thay đổi dorm_reservations trong cửa sổ chờ scheduler auto-close (tối đa ~5 phút),
+     * không chỉ dựa vào registration_periods.status (có thể lệch vài phút so với deadline
+     * thật, xem AutoCloseAdmissionPeriodsCommand). Period không thuộc luồng tân sinh viên
+     * (allow_admission_candidates = false) không bị chặn theo quy tắc này.
+     */
+    private function admissionPeriodPastDeadline(RegistrationPeriod $period): bool
+    {
+        if (!$period->allow_admission_candidates) {
+            return false;
+        }
+
+        $deadline = $period->admissionDeadline();
+
+        return $deadline !== null && now()->greaterThan($deadline);
+    }
+
+    /**
+     * Chặn action admin (approve/reject/waitlist/cancel) làm thay đổi dorm_reservation
+     * thuộc đợt tân sinh viên đã qua hạn — trả JsonResponse 422 nếu bị chặn, null nếu
+     * còn hợp lệ để xử lý tiếp.
+     */
+    private function ensureAdmissionPeriodStillOpen(DormReservation $reservation): ?JsonResponse
+    {
+        $period = $reservation->period;
+        if (!$period || !$this->admissionPeriodPastDeadline($period)) {
+            return null;
+        }
+
+        return response()->json([
+            'message' => 'Đợt đăng ký giữ chỗ KTX đã kết thúc lúc 17:00 ngày '
+                . $period->admissionDeadline()->format('d/m/Y') . '.',
+        ], 422);
+    }
 
     private function notifyCandidate(?AdmissionCandidate $candidate, string $title, string $content): void
     {

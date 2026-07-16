@@ -10,6 +10,11 @@ Artisan::command('inspire', function () {
 
 Schedule::command('periods:update-status')->dailyAt('00:00');
 
+// Đóng đợt tân sinh viên đúng lúc qua hạn 17:00 end_date: hồ sơ giữ chỗ chưa
+// converted → expired, đợt → closed. Chạy dày (5 phút) vì đây là mốc giờ cụ thể
+// trong ngày (17:00), không thể chờ tới lượt chạy hằng ngày như periods:update-status.
+Schedule::command('registration-periods:auto-close-admission')->everyFiveMinutes()->withoutOverlapping();
+
 // Tạo hóa đơn tiền phòng theo quý (gộp 3 tháng) cho tất cả sinh viên ACTIVE —
 // chạy đúng ngày 01 đầu mỗi quý (T1, T4, T7, T10) lúc 07:00.
 Schedule::command('bills:generate-quarterly')->cron('0 7 1 1,4,7,10 *');

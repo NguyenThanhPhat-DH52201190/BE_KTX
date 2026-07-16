@@ -10,6 +10,7 @@ use App\Models\ReservationPriorityEvidence;
 use App\Services\PriorityRankingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 class ReservationPriorityController extends Controller
@@ -245,9 +246,28 @@ class ReservationPriorityController extends Controller
 
         (new PriorityRankingService())->calculateForReservation($priority->dormReservation);
 
+        // Minh chứng ưu tiên không hợp lệ — hồ sơ không còn đủ điều kiện tham gia ranking/
+        // duyệt/promotion/convert. Chuyển thẳng sang rejected trừ khi đã ở trạng thái cuối
+        // (converted/cancelled/expired), trường hợp đó KHÔNG tự động sửa, chỉ log cảnh báo
+        // để admin xử lý riêng (không tự hủy hồ sơ đã converted/ACTIVE).
+        $reservation = $priority->dormReservation;
+        if ($reservation && !in_array($reservation->status, ['converted', 'cancelled', 'expired'], true)) {
+            $reservation->update([
+                'status'            => 'rejected',
+                'rejection_reason'  => 'Minh chứng ưu tiên không hợp lệ.',
+            ]);
+        } elseif ($reservation) {
+            Log::warning('[ReservationPriorityController::reject] Minh chứng ưu tiên bị từ chối nhưng reservation đã ở trạng thái cuối (converted/cancelled/expired) — không tự động chuyển, cần admin xử lý riêng.', [
+                'reservation_id' => $reservation->id,
+                'priority_id'    => $priority->id,
+                'status'         => $reservation->status,
+            ]);
+        }
+
         return response()->json([
-            'message'  => 'Đã từ chối tiêu chí ưu tiên.',
-            'priority' => $priority->fresh(['criteria', 'evidences']),
+            'message'     => 'Đã từ chối tiêu chí ưu tiên.',
+            'priority'    => $priority->fresh(['criteria', 'evidences']),
+            'reservation' => $reservation?->fresh(),
         ]);
     }
 }

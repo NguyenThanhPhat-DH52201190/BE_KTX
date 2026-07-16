@@ -13,6 +13,7 @@ use App\Models\Room;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
 use App\Models\StudentSupportRequest;
+use App\Services\DormCapacityService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -50,15 +51,10 @@ class DashboardController extends Controller
             ->distinct('bed_id')
             ->count('bed_id');
 
-        // Available beds: beds with status='active' that have no ACTIVE occupancy assigned
-        $availableBeds = Bed::where('status', 'active')
-            ->whereNotIn('id', function ($query) {
-                $query->select('bed_id')
-                    ->from('occupancy')
-                    ->where('status', 'ACTIVE')
-                    ->whereNotNull('bed_id');
-            })
-            ->count();
+        // Giường khả dụng — dùng chung nguồn duy nhất với DormCapacityService (BUG-1: trước
+        // đây Dashboard chỉ trừ Occupancy ACTIVE, lệch với Capacity UI trừ cả ROOM_CONFIRMED/
+        // PENDING_PAYMENT, khiến cùng nhãn "Giường khả dụng" hiển thị 2 số khác nhau).
+        $availableBeds = app(DormCapacityService::class)->countAvailablePhysicalBeds();
 
         $maintenanceBeds = Bed::where('status', 'maintenance')->count();
 
