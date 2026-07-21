@@ -199,6 +199,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/admin/dorm-reservations/batch-convert', [DormReservationController::class, 'batchConvert']);
         Route::get('/admin/dorm-reservations', [DormReservationController::class, 'index']);
         Route::get('/admin/dorm-reservations/{id}', [DormReservationController::class, 'show'])->whereNumber('id');
+        Route::get('/admin/dorm-reservations/{id}/history', [DormReservationController::class, 'history'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/approve', [DormReservationController::class, 'approve'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/reject', [DormReservationController::class, 'reject'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/waitlist', [DormReservationController::class, 'waitlist'])->whereNumber('id');

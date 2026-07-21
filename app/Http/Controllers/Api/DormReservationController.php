@@ -573,6 +573,19 @@ class DormReservationController extends Controller
             ])
             ->orderByDesc('created_at');
 
+        // Chỉ hiển thị lần nộp MỚI NHẤT của mỗi thí sinh trong cùng 1 đợt đăng ký — tránh
+        // liệt kê trùng khi thí sinh bị từ chối rồi nộp lại hồ sơ mới (cùng candidate + đợt).
+        // Các lần nộp cũ hơn vẫn xem được qua tab "Lịch sử" (GET .../history). Hồ sơ không
+        // gắn candidate (dữ liệu cũ/edge case) không nhóm được nên luôn giữ nguyên.
+        $query->where(function ($q) {
+            $q->whereNull('admission_candidate_id')
+              ->orWhereRaw('id = (
+                  select max(dr2.id) from dorm_reservations dr2
+                  where dr2.admission_candidate_id = dorm_reservations.admission_candidate_id
+                    and dr2.registration_period_id <=> dorm_reservations.registration_period_id
+              )');
+        });
+
         if ($s = $request->input('search')) {
             $query->where(function ($q) use ($s) {
                 $q->where('reservation_code', 'like', "%{$s}%")
@@ -633,6 +646,22 @@ class DormReservationController extends Controller
             $query->where('expiration_reason', $expirationReason)->where('status', 'expired');
         }
 
+        // Lọc theo tình trạng minh chứng ưu tiên tổng hợp (badge FE đang hiển thị), dùng lại
+        // đúng thứ tự ưu tiên pending > verified > rejected như transform bên dưới, để filter
+        // và badge luôn khớp nhau. Các cột priority_*_count là subquery scalar từ withCount ở
+        // trên nên HAVING dùng được mà không cần GROUP BY.
+        if ($priorityEvidenceStatus = $request->input('priority_evidence_status')) {
+            match ($priorityEvidenceStatus) {
+                'pending' => $query->having('priority_pending_count', '>', 0),
+                'verified' => $query->having('priority_pending_count', 0)
+                    ->having('priority_verified_count', '>', 0),
+                'rejected' => $query->having('priority_pending_count', 0)
+                    ->having('priority_verified_count', 0)
+                    ->having('priority_rejected_count', '>', 0),
+                default => $query->whereRaw('1 = 0'),
+            };
+        }
+
         $paginated = $query->paginate(20);
 
         // Tổng hợp tình trạng minh chứng ưu tiên cho FE (badge thay cho "Đã nộp hồ sơ") từ
@@ -668,6 +697,28 @@ class DormReservationController extends Controller
         ])->findOrFail($id);
 
         return response()->json($reservation);
+    }
+
+    /**
+     * Toàn bộ lịch sử các lần nộp hồ sơ giữ chỗ của cùng 1 thí sinh (mọi đợt đăng ký),
+     * dùng cho tab "Lịch sử" ở modal chi tiết — vì index() giờ chỉ trả về bản mới nhất
+     * của mỗi (candidate, đợt), các lần nộp cũ hơn (VD: bị từ chối rồi nộp lại) không
+     * còn xuất hiện trực tiếp trong danh sách nữa.
+     */
+    public function history(int $id): JsonResponse
+    {
+        $reservation = DormReservation::findOrFail($id);
+
+        if (!$reservation->admission_candidate_id) {
+            return response()->json(['data' => [$reservation->load(['candidate', 'period'])]]);
+        }
+
+        $history = DormReservation::with(['candidate', 'period'])
+            ->where('admission_candidate_id', $reservation->admission_candidate_id)
+            ->orderBy('id')
+            ->get();
+
+        return response()->json(['data' => $history]);
     }
 
     /** Message lỗi capacity dùng chung — nhất quán giữa các endpoint duyệt (BUG-2/RR-2/RR-3). */
@@ -789,7 +840,9 @@ class DormReservationController extends Controller
             return $blocked;
         }
 
-        if (!in_array($reservation->status, ['submitted', 'waitlisted', 'approved'], true)) {
+        // Hồ sơ đã duyệt ("approved") là trạng thái cuối — không cho từ chối lại để tránh
+        // đảo ngược một quyết định duyệt đã có hiệu lực (sinh viên đã được cấp chỗ).
+        if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
             return response()->json(['message' => 'Không thể từ chối hồ sơ ở trạng thái hiện tại.'], 422);
         }
 
@@ -1294,7 +1347,10 @@ class DormReservationController extends Controller
             return;
         }
 
-        app(StudentNotificationService::class)->notifyEmailOnly($candidate->email, $candidate->full_name, $title, $content);
+        // queue: true — đẩy việc gửi mail (bắt tay SMTP thật với Gmail) ra hàng đợi thay vì
+        // gửi đồng bộ, để request duyệt/từ chối/hủy... trả kết quả về FE ngay, không phải
+        // chờ SMTP xong (từng khiến 1 lần duyệt mất vài giây tới hàng chục giây).
+        app(StudentNotificationService::class)->notifyEmailOnly($candidate->email, $candidate->full_name, $title, $content, queue: true);
     }
 
     private function generateReservationCode(): string
