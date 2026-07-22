@@ -120,6 +120,6 @@ return [
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
     // Email dùng để fallback đăng nhập tài khoản admin khi chưa liên kết student_id.
-    'admin_login_email' => env('ADMIN_LOGIN_EMAIL', 'kytucxadaihoccongnghesaigon@gmail.com'),
+    'admin_login_email' => env('ADMIN_LOGIN_EMAIL'),
 
 ];

@@ -800,19 +800,24 @@ class DormReservationController extends Controller
                 ];
             }
 
-            // CHỈ đề xuất duyệt — KHÔNG đổi status ngay, để hồ sơ vẫn nằm trong tập
-            // submitted/waitlisted và được PriorityRankingService xếp hạng công bằng cùng
-            // các hồ sơ khác (tránh chiếm suất trước hồ sơ ưu tiên cao hơn nộp sau). Status
-            // chỉ thực sự chuyển approved/waitlisted khi chạy "Xếp hạng" cho đợt
-            // (xem rankReservations()).
             $reservation->update([
-                'approve_proposed_at' => now(),
-                'admin_note'          => $adminNoteInput ?? $reservation->admin_note,
+                'status'      => 'approved',
+                'approved_at' => now(),
+                'admin_note'  => $adminNoteInput ?? $reservation->admin_note,
             ]);
+
+            $converted = null;
+            // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
+            // Registration, không cần đợi import lại Excel. convert() tự mở transaction lồng
+            // (savepoint) — giữ nguyên logic hiện có, không đổi hành vi.
+            if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
+                $converted = app(DormReservationConversionService::class)->convert($reservation);
+            }
 
             return [
                 'ok'          => true,
                 'reservation' => $reservation->fresh(['candidate', 'period']),
+                'converted'   => $converted,
             ];
         });
 
@@ -820,10 +825,15 @@ class DormReservationController extends Controller
             return response()->json($result['payload'], $result['status']);
         }
 
-        return response()->json([
-            'message'     => 'Đã đề xuất duyệt hồ sơ này. Hồ sơ sẽ được duyệt chính thức khi chạy Xếp hạng cho đợt.',
-            'reservation' => $result['reservation'],
-        ]);
+        // Gửi thông báo SAU khi transaction đã commit — không giữ lock trong lúc gửi mail.
+        $reservation = $result['reservation'];
+        $this->notifyCandidate(
+            $reservation->candidate,
+            'Hồ sơ giữ chỗ KTX đã được duyệt',
+            $this->approvedNotificationContent($reservation),
+        );
+
+        return response()->json(['message' => 'Đã duyệt hồ sơ giữ chỗ.', 'reservation' => $reservation]);
     }
 
     public function reject(Request $request, int $id): JsonResponse
@@ -1117,7 +1127,7 @@ class DormReservationController extends Controller
             $toNotifyWaitlist  = [];
 
             foreach ($rankResult['approved'] as $reservation) {
-                $reservation->update(['status' => 'approved', 'approved_at' => now(), 'approve_proposed_at' => null]);
+                $reservation->update(['status' => 'approved', 'approved_at' => now()]);
                 $toNotifyApproved[] = $reservation;
 
                 // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
@@ -1128,7 +1138,7 @@ class DormReservationController extends Controller
                 }
             }
             foreach ($rankResult['waitlist'] as $reservation) {
-                $reservation->update(['status' => 'waitlisted', 'approve_proposed_at' => null]);
+                $reservation->update(['status' => 'waitlisted']);
                 $toNotifyWaitlist[] = $reservation;
             }
 
