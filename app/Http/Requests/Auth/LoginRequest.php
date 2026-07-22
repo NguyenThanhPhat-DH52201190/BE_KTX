@@ -23,7 +23,8 @@ class LoginRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'email' => 'required|email',
+            'email' => 'required_without:student_code|email',
+            'student_code' => 'required_without:email|string',
             'password' => 'required|string',
         ];
     }
@@ -31,8 +32,10 @@ class LoginRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'email.required' => 'Vui lòng nhập email.',
+            'email.required_without' => 'Vui lòng nhập email quản trị hoặc MSSV.',
             'email.email' => 'Email không hợp lệ.',
+            'student_code.required_without' => 'Vui lòng nhập MSSV hoặc email quản trị.',
+            'student_code.string' => 'MSSV không hợp lệ.',
             'password.required' => 'Vui lòng nhập mật khẩu.',
         ];
     }

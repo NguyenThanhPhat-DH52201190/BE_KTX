@@ -2,155 +2,208 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+use App\Helpers\FacultyHelper;
 use Illuminate\Database\Seeder;
-use App\Models\Student;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class StudentSeeder extends Seeder
 {
     /**
-     * Run the database seeds.
+     * Tạo 100 sinh viên giả:
+     *  - Giới tính trùng với tên đọc rõ ràng nam/nữ.
+     *  - 50-60% học vụ là đang học (studying), phần còn lại trải đều các trạng thái khác.
+     *  - Đa số dân tộc Kinh, có thêm các dân tộc khác và nhiều tỉnh/thành trên toàn quốc.
      */
     public function run(): void
     {
-        $rows = [
-            [
-                'student_code' => 'DH12234456',
-                'full_name' => 'Nguyễn Văn A',
-                'date_of_birth' => '2004-02-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH03',
-                'faculty' => 'Kinh tế - Quản trị',
-                'course_year' => 'D22_TH03',
-                'phone' => '0123456789',
-                'email' => 'dh12234456@student.stu.edu.vn',
-                'cccd' => '021258123654',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'Bình Dương',
-                'nationality' => 'Việt Nam',
-                'ethnicity' => 'Kinh',
-                'religion' => 'Không',
-                'permanent_address' => '180 Cao Lo, Quan 8, Ho Chi Minh',
-                'avatar' => 'students/avatar/eSmQs4WqDm4X5WdMC03LbQIFybf5hUTz80RRFaNJ.jpg',
-                'status' => 'active',
-                'created_at' => '2026-05-10 05:06:32',
-                'updated_at' => '2026-05-10 05:23:09',
-            ],
-            [
-                'student_code' => 'DH52201190',
-                'full_name' => 'Phát Nguyễn Thanh',
-                'date_of_birth' => '2004-02-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH03',
-                'faculty' => 'Xây Dựng',
-                'course_year' => 'D22_TH03',
-                'phone' => '0123465788',
-                'email' => 'dh52201190@student.stu.edu.vn',
-                'cccd' => '036996336978',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'Bình Dương',
-                'nationality' => 'Việt Nam',
-                'ethnicity' => 'Kinh',
-                'religion' => 'Không',
-                'permanent_address' => 'xyz,abc,mnop',
-                'avatar' => 'students/avatar/zP2msfwijnYjfDKlNeOafx2xgX63ShgzIBbz4Jdi.png',
-                'status' => 'active',
-                'created_at' => '2026-05-14 01:12:56',
-                'updated_at' => '2026-05-14 01:16:45',
-            ],
-            [
-                'student_code' => 'DH52201699',
-                'full_name' => 'Nguyễn Thị Cẩm Tú',
-                'date_of_birth' => '2004-08-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH14',
-                'faculty' => 'Công nghệ thực phẩm',
-                'course_year' => 'D22_TH14',
-                'phone' => '0258852963',
-                'email' => 'dh52201699@student.stu.edu.vn',
-                'cccd' => '045698712336',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'Bình Dương',
-                'nationality' => 'Hoa Kỳ',
-                'ethnicity' => 'Kinh',
-                'religion' => 'Không',
-                'permanent_address' => 'abc,xyz,mnpq',
-                'avatar' => 'students/avatar/8E3rrk2ytHbDpt5OCUNpTjcalpWKQFx3HV7EZhya.jpg',
-                'status' => 'active',
-                'created_at' => '2026-05-14 01:27:29',
-                'updated_at' => '2026-05-14 01:31:44',
-            ],
-            [
-                'student_code' => 'DH52200662',
-                'full_name' => 'Nguyễn Minh Hiền',
-                'date_of_birth' => '2004-02-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH03',
-                'faculty' => 'Kinh tế - Quản trị',
-                'course_year' => 'D22_TH03',
-                'phone' => '0123456789',
-                'email' => 'dh52200662@student.stu.edu.vn',
-                'cccd' => '022233366664',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'Bình Dương',
-                'nationality' => 'Hoa Kỳ',
-                'ethnicity' => 'Kinh',
-                'religion' => 'Không',
-                'permanent_address' => '250 Nguyễn Tri Phương , Quận 5, TP. Hồ Chí Minh',
-                'avatar' => 'students/avatar/zHT9StAbRLFWKyWhdDm40GPgcfU92n09MemxcF0o.webp',
-                'status' => 'active',
-                'created_at' => '2026-05-14 01:37:47',
-                'updated_at' => '2026-05-14 01:37:47',
-            ],
-            [
-                'student_code' => 'DH85236936',
-                'full_name' => 'Nguyễn Văn A',
-                'date_of_birth' => '2004-08-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH03',
-                'faculty' => 'Kinh tế - Quản trị',
-                'course_year' => 'D22_TH03',
-                'phone' => '0987898778',
-                'email' => 'dh85236936@student.stu.edu.vn',
-                'cccd' => '014774117891',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'Bình Dương',
-                'nationality' => 'Hoa Kỳ',
-                'ethnicity' => 'Kinh',
-                'religion' => 'Không',
-                'permanent_address' => 'abc,xyz,mnpq',
-                'avatar' => 'students/avatar/kirpHskTgtQE8t5zfouIBJ0SfD6mN1yF64Fs7ZiH.jpg',
-                'status' => 'active',
-                'created_at' => '2026-05-15 03:36:54',
-                'updated_at' => '2026-05-15 04:00:23',
-            ],
-            [
-                'student_code' => 'DH52201202',
-                'full_name' => 'Phát Nguyễn Thanh',
-                'date_of_birth' => '2004-08-12',
-                'gender' => 'male',
-                'class_name' => 'D22_TH14',
-                'faculty' => 'Cơ khí',
-                'course_year' => 'D22_TH14',
-                'phone' => '0222222222',
-                'email' => 'dh52201202@student.stu.edu.vn',
-                'cccd' => '036985214723',
-                'cccd_issued_date' => '2020-02-01',
-                'cccd_issued_place' => 'SG',
-                'nationality' => 'Hoa Kỳ',
-                'ethnicity' => 'Hoa',
-                'religion' => 'Phật giáo',
-                'permanent_address' => '180 Phạm Thế Hiển, quận 8 , thành phố Hồ Chí Minh',
-                'avatar' => 'students/avatar/vm7xVZVnyyUAtPu3rNJ68d4ACWhcgfkrC4UDst3b.png',
-                'status' => 'active',
-                'created_at' => '2026-05-15 08:06:00',
-                'updated_at' => '2026-05-15 08:42:32',
-            ],
+        $now = Carbon::now();
+
+        $provinces = [
+            ['01', 'Thành phố Hà Nội'],
+            ['31', 'Thành phố Hải Phòng'],
+            ['46', 'Thành phố Huế'],
+            ['48', 'Thành phố Đà Nẵng'],
+            ['79', 'Thành phố Hồ Chí Minh'],
+            ['92', 'Thành phố Cần Thơ'],
+            ['04', 'Tỉnh Cao Bằng'],
+            ['08', 'Tỉnh Tuyên Quang'],
+            ['10', 'Tỉnh Lào Cai'],
+            ['11', 'Tỉnh Điện Biên'],
+            ['12', 'Tỉnh Lai Châu'],
+            ['14', 'Tỉnh Sơn La'],
+            ['19', 'Tỉnh Thái Nguyên'],
+            ['20', 'Tỉnh Lạng Sơn'],
+            ['22', 'Tỉnh Quảng Ninh'],
+            ['25', 'Tỉnh Phú Thọ'],
+            ['27', 'Tỉnh Bắc Ninh'],
+            ['33', 'Tỉnh Hưng Yên'],
+            ['37', 'Tỉnh Ninh Bình'],
+            ['38', 'Tỉnh Thanh Hóa'],
+            ['40', 'Tỉnh Nghệ An'],
+            ['42', 'Tỉnh Hà Tĩnh'],
+            ['45', 'Tỉnh Quảng Trị'],
+            ['51', 'Tỉnh Quảng Ngãi'],
+            ['56', 'Tỉnh Khánh Hòa'],
+            ['64', 'Tỉnh Gia Lai'],
+            ['66', 'Tỉnh Đắk Lắk'],
+            ['68', 'Tỉnh Lâm Đồng'],
+            ['72', 'Tỉnh Tây Ninh'],
+            ['75', 'Tỉnh Đồng Nai'],
+            ['86', 'Tỉnh Vĩnh Long'],
+            ['87', 'Tỉnh Đồng Tháp'],
+            ['89', 'Tỉnh An Giang'],
+            ['96', 'Tỉnh Cà Mau'],
         ];
 
-        // upsert để chạy nhiều lần không tạo duplicate; key là student_code
-        Student::upsert($rows, ['student_code'], [
-            'full_name', 'date_of_birth', 'gender', 'class_name', 'faculty', 'course_year', 'phone', 'email', 'cccd', 'cccd_issued_date', 'cccd_issued_place', 'nationality', 'ethnicity', 'religion', 'permanent_address', 'avatar', 'status', 'created_at', 'updated_at'
-        ]);
+        $academicStatuses = [
+            'studying',
+            'temporary_leave',
+            'dropped_out',
+            'suspended',
+            'waiting_graduation',
+            'graduated',
+            'overtime_training',
+            'transferred',
+        ];
+
+        $faculties = [
+            'Công nghệ thông tin',
+            'Kinh tế - Quản trị',
+            'Cơ khí',
+            'Điện - Điện tử',
+            'Xây dựng',
+        ];
+        $facultyCodes = ['TH', 'QT', 'CK', 'DDT', 'XD'];
+
+        $surnames = [
+            'Nguyễn', 'Trần', 'Lê', 'Phạm', 'Võ', 'Đặng', 'Bùi', 'Huỳnh',
+            'Phan', 'Ngô', 'Đỗ', 'Mai', 'Lý', 'Trịnh', 'Dương', 'Lâm',
+        ];
+
+        $maleNames = [
+            'Minh Anh', 'Hoàng Nam', 'Gia Huy', 'Thành Đạt', 'Quốc Bảo',
+            'Đức Anh', 'Minh Quân', 'Nhật Hào', 'Thanh Tùng', 'Hoàng Phúc',
+            'Anh Tuấn', 'Gia Hưng', 'Quốc Khánh', 'Thành Công', 'Minh Đức',
+            'Nhật Minh', 'Anh Khoa', 'Gia Bảo', 'Minh Triết', 'Bảo Long',
+            'Trọng Nghĩa', 'Hữu Phước', 'Tiến Đạt', 'Khải Sơn', 'Hoài Nam',
+            'Văn Khánh', 'Phong Vũ', 'Nhật Tuấn', 'Minh Duy', 'Anh Khang',
+        ];
+
+        $femaleNames = [
+            'Thị Mai', 'Ngọc Anh', 'Thảo Vy', 'Quỳnh Như', 'Khánh Linh',
+            'Mỹ Duyên', 'Thanh Trúc', 'Ngọc Hân', 'Bảo Ngọc', 'Minh Thư',
+            'Hải Yến', 'Phương Anh', 'Ngọc Mai', 'Thu Hà', 'Kim Ngân',
+            'Diệu Linh', 'Thùy Dung', 'Thuý Vy', 'Hồng Nhung', 'Trúc Mai',
+            'Phương Thảo', 'Ánh Nguyệt', 'Nhật Hạ', 'Linh Chi', 'Bảo Trâm',
+            'Mỹ Linh', 'Thuỳ An', 'Diễm My', 'Ngọc Thảo', 'Thanh Hà',
+        ];
+
+        $ethnicities = [
+            'Kinh', 'Tày', 'Thái', 'Mường', 'Khmer', 'Hoa', 'Nùng', 'Chăm', 'Dao',
+        ];
+
+        $religions = ['Không', 'Phật giáo', 'Thiên Chúa giáo'];
+
+        $rows = [];
+        $courseCounts = [17, 17, 17, 17, 16, 16];
+        // Đếm sĩ số theo mã lớp (năm nhập học + khoa + số lớp) để không vượt quá 100
+        // SV/lớp khi random số lớp — key là chính class_name sinh ra.
+        $classCounts = [];
+
+        for ($i = 0; $i < 100; $i++) {
+            $provinceIndex = $i % count($provinces);
+            [$provinceCode, $provinceName] = $provinces[$provinceIndex];
+            $facultyIndex = $i % count($faculties);
+            $gender = $i % 2 === 0 ? 'male' : 'female';
+            $givenName = $gender === 'male'
+                ? $maleNames[$i % count($maleNames)]
+                : $femaleNames[$i % count($femaleNames)];
+            $surname = $surnames[$i % count($surnames)];
+            $remaining = $i;
+            $courseIndex = 0;
+            foreach ($courseCounts as $index => $count) {
+                if ($remaining < $count) {
+                    $courseIndex = $index;
+                    break;
+                }
+                $remaining -= $count;
+            }
+            // course_year lưu khoảng năm học (hệ 4 năm), tách biệt hoàn toàn với class_name.
+            $admissionYear = 2020 + $courseIndex;
+            $courseYear = $admissionYear . '-' . ($admissionYear + 4);
+            $admissionYearShort = substr((string) $admissionYear, -2);
+            $birthYear = 2002 + $courseIndex;
+            // Phần lớn studying (86 sinh viên), các trạng thái khác phân bổ 2 sinh viên/trạng thái
+            if ($i < 86) {
+                $academicStatus = 'studying';
+            } else {
+                $otherStatuses = ['temporary_leave', 'dropped_out', 'suspended', 'waiting_graduation', 'graduated', 'overtime_training', 'transferred'];
+                $statusIndex = (($i - 86) / 2) % count($otherStatuses);
+                $academicStatus = $otherStatuses[(int)$statusIndex];
+            }
+            $ethnicity = $i % 10 < 7
+                ? 'Kinh'
+                : $ethnicities[1 + (($i - 7) % (count($ethnicities) - 1))];
+            $religion = $i % 10 < 8
+                ? 'Không'
+                : $religions[1 + (($i - 8) % (count($religions) - 1))];
+            $day = str_pad((string) (($i % 28) + 1), 2, '0', STR_PAD_LEFT);
+            $month = str_pad((string) ((($i % 12) + 1)), 2, '0', STR_PAD_LEFT);
+            $currentYear = $academicStatus === 'studying'
+                ? (($i % 4) + 1)
+                : 4;
+
+            // Số khoa tra theo faculty (config/faculties.php) — mặc định 5 (CNTT) nếu không khớp
+            // được bảng ánh xạ, tránh sinh MSSV rỗng/lỗi cho seeder demo.
+            $departmentNumber = FacultyHelper::resolveDepartmentNumber($faculties[$facultyIndex]) ?? 5;
+            $studentCode = 'DH' . $departmentNumber . $admissionYearShort . str_pad((string) ($i + 1), 5, '0', STR_PAD_LEFT);
+
+            // class_name = D[năm nhập học 2 số]_[mã khoa viết tắt][số lớp 01-14 ngẫu nhiên].
+            // Lớp đại học không cố định sĩ số nên không cần logic "đầy mới sang lớp mới" —
+            // chỉ random lại nếu rơi trúng mã lớp đã đủ 100 SV.
+            do {
+                $classNumber = str_pad((string) random_int(1, 14), 2, '0', STR_PAD_LEFT);
+                $className = "D{$admissionYearShort}_{$facultyCodes[$facultyIndex]}{$classNumber}";
+            } while (($classCounts[$className] ?? 0) >= 100);
+            $classCounts[$className] = ($classCounts[$className] ?? 0) + 1;
+
+            $rows[] = [
+                'student_code' => $studentCode,
+                'full_name' => $surname . ' ' . $givenName,
+                'date_of_birth' => "{$birthYear}-{$month}-{$day}",
+                'gender' => $gender,
+                'class_name' => $className,
+                'faculty' => $faculties[$facultyIndex],
+                'course_year' => $courseYear,
+                'phone' => '09' . str_pad((string) (10000000 + $i), 8, '0', STR_PAD_LEFT),
+                'email' => null,
+                'cccd' => str_pad((string) $provinceCode, 3, '0', STR_PAD_LEFT) . str_pad((string) (100000000 + $i), 9, '0', STR_PAD_LEFT),
+                'cccd_issued_date' => '2022-01-01',
+                'cccd_issued_place' => 'Cục Cảnh sát QLHC về TTXH',
+                'nationality' => 'Việt Nam',
+                'ethnicity' => $ethnicity,
+                'religion' => $religion,
+                'permanent_address' => 'Số ' . ($i + 1) . ' Phường Trung Hòa, ' . $provinceName,
+                'province_code' => $provinceCode,
+                'avatar' => null,
+                'status' => 'active',
+                'academic_status' => $academicStatus,
+                'current_year' => $currentYear,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+
+        // Khớp theo cccd (suy từ province_code + thứ tự $i, không đổi qua các lần sửa
+        // công thức student_code) thay vì student_code — để chạy lại seeder này sau khi
+        // đổi logic sinh MSSV (vd. đổi số khoa) không bị đụng unique constraint cccd/email
+        // với chính các dòng demo cũ do lần seed trước để lại.
+        foreach ($rows as $row) {
+            DB::table('students')->updateOrInsert(
+                ['cccd' => $row['cccd']],
+                $row
+            );
+        }
     }
 }

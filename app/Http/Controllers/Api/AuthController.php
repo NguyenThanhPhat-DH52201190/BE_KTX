@@ -6,9 +6,10 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 use App\Models\Account;
@@ -21,39 +22,82 @@ use App\Http\Requests\Auth\SendResetLinkRequest;
 use App\Http\Requests\Auth\SendOtpRequest;
 use App\Http\Requests\Auth\CheckEmailRequest;
 use App\Http\Requests\Auth\CheckStudentCodeRequest;
+use Laravel\Sanctum\PersonalAccessToken;
 
 
 class AuthController extends Controller
 {
+    // Đăng xuất: thu hồi toàn bộ token Sanctum của tài khoản đang giữ token này.
+    // Xác định tài khoản thủ công qua bearer token (chưa gắn middleware auth:sanctum
+    // cho route này — nằm ngoài phạm vi hạ tầng của bước hiện tại).
+    public function logout(Request $request)
+    {
+        $token = $request->bearerToken();
+
+        if (!$token) {
+            return response()->json(['message' => 'Không tìm thấy token.'], 401);
+        }
+
+        $accessToken = PersonalAccessToken::findToken($token);
+
+        if (!$accessToken) {
+            return response()->json(['message' => 'Token không hợp lệ.'], 401);
+        }
+
+        $accessToken->tokenable->tokens()->delete();
+
+        return response()->json(['message' => 'Đăng xuất thành công.']);
+    }
+
+    // Đổi mật khẩu cho tài khoản đang đăng nhập (student hoặc admin).
+    // Route được bảo vệ bằng auth:sanctum nên $request->user() là Account thật sự
+    // đang giữ token, không nhận email/id từ client.
+    public function changePassword(Request $request)
+    {
+        $request->validate([
+            'current_password' => 'required|string',
+            // Đồng bộ rule với RegisterRequest/ResetPasswordRequest (min:6 + confirmed).
+            'new_password' => 'required|min:6|confirmed',
+        ]);
+
+        $account = $request->user();
+
+        if (!Hash::check($request->current_password, $account->password)) {
+            return response()->json(['message' => 'Mật khẩu hiện tại không đúng.'], 422);
+        }
+
+        if (Hash::check($request->new_password, $account->password)) {
+            return response()->json(['message' => 'Mật khẩu mới không được trùng mật khẩu hiện tại.'], 422);
+        }
+
+        $account->password = Hash::make($request->new_password);
+        $account->save();
+
+        // Thu hồi toàn bộ token hiện có, bắt buộc đăng nhập lại ở mọi phiên.
+        $account->tokens()->delete();
+
+        return response()->json(['message' => 'Đổi mật khẩu thành công.']);
+    }
+
     public function register(RegisterRequest $request)
     {
+        // Lấy sinh viên theo MSSV (RegisterRequest đã xác thực tồn tại trong students)
+        $student = Student::where('student_code', $request->student_code)->first();
+
+        if (!$student) {
+            return response()->json(['message' => 'MSSV không tồn tại'], 400);
+        }
+
+        // Kiểm tra xem đã có account cho student này chưa
+        if (Account::where('student_id', $student->id)->exists()) {
+            return response()->json(['message' => 'Tài khoản cho MSSV này đã tồn tại.'], 400);
+        }
+
         $payload = [
-            'email' => $request->email,
             'password' => Hash::make($request->password),
             'role' => 'student',
-            'is_active' => 1,
+            'student_id' => $student->id,
         ];
-
-        if ($request->filled('student_code')) {
-            $payload['student_code'] = $request->input('student_code');
-        }
-
-        if ($request->filled('full_name')) {
-            $payload['full_name'] = $request->input('full_name');
-        }
-
-        // Nếu đã có bản ghi sinh viên cùng email thì liên kết vào đó.
-        $student = Student::where('email', $request->email)->first();
-        if ($student) {
-            $payload['student_id'] = $student->id;
-            // Nếu payload thiếu student_code/full_name thì thử sao chép từ sinh viên (nếu có).
-            if (empty($payload['student_code']) && isset($student->student_code)) {
-                $payload['student_code'] = $student->student_code;
-            }
-            if (empty($payload['full_name']) && isset($student->full_name)) {
-                $payload['full_name'] = $student->full_name;
-            }
-        }
 
         $account = Account::create($payload);
 
@@ -65,57 +109,61 @@ class AuthController extends Controller
 
     public function login(LoginRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = null;
+        $account = null;
 
-        if (!$account || !Hash::check($request->password, $account->password)) {
-            return response()->json([
-                'message' => 'Sai email hoặc mật khẩu'
-            ], 401);
+        // Ưu tiên luồng sinh viên hiện có để giữ tương thích dữ liệu hiện tại.
+        if ($request->filled('student_code')) {
+            $student = Student::where('student_code', $request->student_code)->first();
+            $account = $student?->account;
+        } else {
+            // Email chỉ dùng cho tài khoản quản trị. Sinh viên đăng nhập bằng MSSV.
+            if (!$account && Schema::hasColumn('accounts', 'email')) {
+                $account = Account::where('email', $request->email)->where('role', 'admin')->first();
+            }
+
+            if (!$account) {
+                $adminLoginEmail = config('auth.admin_login_email');
+
+                if (!empty($adminLoginEmail) && strcasecmp((string) $request->email, (string) $adminLoginEmail) === 0) {
+                    $account = Account::where('role', 'admin')->orderBy('id')->first();
+                }
+            }
         }
 
-        if (!$account->is_active) {
-            return response()->json([
-                'message' => 'Tài khoản bị khóa'
-            ], 403);
+        if (!$student && $account?->student_id) {
+            $student = Student::find($account->student_id);
+        }
+
+        if (!$account || !Hash::check($request->password, $account->password)) {
+            return response()->json(['message' => 'Sai thông tin đăng nhập hoặc mật khẩu'], 401);
         }
 
         $token = $account->createToken('auth_token')->plainTextToken;
+        $isAdmin = $account->role === 'admin';
+        $accountEmail = Schema::hasColumn('accounts', 'email') ? ($account->email ?? null) : null;
+        $adminEmail = $isAdmin
+            ? ($accountEmail ?? config('auth.admin_login_email') ?? $request->email)
+            : null;
 
         return response()->json([
             'token' => $token,
             'user' => [
                 'id' => $account->id,
-                'email' => $account->email,
+                'email' => $adminEmail ?? $student?->email ?? ($request->email ?? null),
                 'role' => $account->role,
-                'student_id' => $account->student_id,
-                // Trả về cả biến thể snake_case và camelCase để tương thích với frontend.
-                'student_code' => $account->student_code,
-                'studentCode' => $account->student_code,
-                'full_name' => $account->full_name,
-                'fullName' => $account->full_name,
+                'student_id' => $isAdmin ? null : $account->student_id,
+                'student_code' => $isAdmin ? null : $student?->student_code,
+                'studentCode' => $isAdmin ? null : $student?->student_code,
+                'full_name' => $isAdmin ? null : $student?->full_name,
+                'fullName' => $isAdmin ? null : $student?->full_name,
             ]
-        ]);
-    }
-
-    // Quên mật khẩu
-    public function forgotPassword(Request $request)
-    {
-        $request->validate([
-            'email' => 'required|email',
-        ]);
-
-        $status = Password::sendResetLink(
-            $request->only('email')
-        );
-
-        return response()->json([
-            'message' => __($status)
         ]);
     }
 
     public function checkEmail(CheckEmailRequest $request)
     {
-        $exists = Account::where('email', $request->email)->exists();
+        $exists = Student::where('email', $request->email)->exists();
 
         return response()->json([
             'exists' => $exists
@@ -124,12 +172,13 @@ class AuthController extends Controller
 
     public function checkStudentCode(CheckStudentCodeRequest $request)
     {
-        // student_code hiện được lưu trong bảng accounts
-        $exists = \App\Models\Account::where('student_code', $request->student_code)->exists();
+        // Route công khai (chưa đăng nhập) — chỉ trả về việc MSSV có tồn tại hay không.
+        // Không trả thông tin sinh viên (CCCD, SĐT, ngày sinh, địa chỉ...) ở đây vì bất kỳ
+        // ai biết/đoán được MSSV cũng gọi được route này. Client đã đăng nhập cần dữ liệu
+        // đầy đủ của chính mình thì gọi GET /student/profile (xác thực qua token).
+        $exists = Student::where('student_code', $request->student_code)->exists();
 
-        return response()->json([
-            'exists' => $exists
-        ]);
+        return response()->json(['exists' => $exists]);
     }
 
     
@@ -146,8 +195,13 @@ class AuthController extends Controller
             ], 400);
         }
 
-        // Cập nhật mật khẩu
-        Account::where('email', $request->email)->update([
+        $student = Student::where('email', $request->email)->first();
+
+        if (!$student || !$student->account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
+
+        $student->account->update([
             'password' => Hash::make($request->password)
         ]);
 
@@ -161,7 +215,12 @@ class AuthController extends Controller
 
     public function sendOtp(SendOtpRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
+
+        if (!$account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
 
         $otp = random_int(100000, 999999);
 
@@ -169,42 +228,57 @@ class AuthController extends Controller
         $account->otp_expire = now()->addMinutes(5);
         $account->save();
 
-        Mail::send([], [], function ($message) use ($request, $otp) {
-            $message->to($request->email)
-                ->subject('TRƯỜNG ĐH CÔNG NGHỆ SÀI GÒN - ĐỔI MẬT KHẨU')
-                ->html("
-                <div style='font-family: Arial; max-width:600px; margin:auto; border:1px solid #ddd; padding:20px; background:#f9fafc'>
-                    
-                    <h2 style='color:#1f2a44;'>TRƯỜNG ĐH CÔNG NGHỆ SÀI GÒN</h2>
+        try {
+            Mail::send([], [], function ($message) use ($request, $otp) {
+                $message->to($request->email)
+                    ->subject('TRƯỜNG ĐH CÔNG NGHỆ SÀI GÒN - ĐỔI MẬT KHẨU')
+                    ->html("
+                    <div style='font-family: Arial; max-width:600px; margin:auto; border:1px solid #ddd; padding:20px; background:#f9fafc'>
 
-                    <p>Bạn vừa yêu cầu đổi mật khẩu.</p>
+                        <h2 style='color:#1f2a44;'>TRƯỜNG ĐH CÔNG NGHỆ SÀI GÒN</h2>
 
-                    <p>Mã xác minh:</p>
+                        <p>Bạn vừa yêu cầu đổi mật khẩu.</p>
 
-                    <div style='font-size:34px; font-weight:bold; color:#e53935; letter-spacing:6px;
-                        background:#fff3f3; padding:10px 16px; border-radius:8px; display:inline-block'>
-                        {$otp}
+                        <p>Mã xác minh:</p>
+
+                        <div style='font-size:34px; font-weight:bold; color:#e53935; letter-spacing:6px;
+                            background:#fff3f3; padding:10px 16px; border-radius:8px; display:inline-block'>
+                            {$otp}
+                        </div>
+
+                        <p style='font-size:13px; color:#666'>
+                            Mã có hiệu lực trong 5 phút.
+                        </p>
+
+                        <hr>
+
+                        <p style='font-size:12px; color:#999'>
+                            Đây là email tự động. Vui lòng không trả lời.
+                        </p>
                     </div>
-
-                    <p style='font-size:13px; color:#666'>
-                        Mã có hiệu lực trong 5 phút.
-                    </p>
-
-                    <hr>
-
-                    <p style='font-size:12px; color:#999'>
-                        Đây là email tự động. Vui lòng không trả lời.
-                    </p>
-                </div>
-            ");
-        });
+                ");
+            });
+        } catch (\Throwable $e) {
+            Log::error('Gửi email thông báo thất bại', [
+                'type'       => 'otp_password_change',
+                'student_id' => $student->id,
+                'email'      => $request->email,
+                'error'      => $e->getMessage(),
+            ]);
+            throw $e;
+        }
 
         return response()->json(['message' => 'Đã gửi OTP']);
     }
 
     public function resetWithOtp(ResetPasswordOtpRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        $student = Student::where('email', $request->email)->first();
+        $account = $student?->account;
+
+        if (!$account) {
+            return response()->json(['message' => 'Không tìm thấy tài khoản'], 404);
+        }
 
         if ($account->otp_code != $request->otp) {
             return response()->json(['message' => 'OTP sai'], 400);

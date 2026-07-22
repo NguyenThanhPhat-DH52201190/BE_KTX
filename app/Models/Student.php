@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -27,8 +28,24 @@ class Student extends Model
         'ethnicity',
         'religion',
         'permanent_address',
+        'province_code',
         'avatar',
+        'aws_face_id',
         'status',
+        'academic_status',
+        'current_year',
+        'father_name',
+        'father_birth_year',
+        'father_job',
+        'father_phone',
+        'mother_name',
+        'mother_birth_year',
+        'mother_job',
+        'mother_phone',
+        'parent_address',
+        'emergency_contact_name',
+        'emergency_contact_phone',
+        'emergency_contact_relationship',
     ];
 
     
@@ -38,8 +55,18 @@ class Student extends Model
         return $this->hasMany(Registration::class);
     }
 
+    public function priorities(): HasMany
+    {
+        return $this->hasMany(StudentPriority::class);
+    }
+
     public function account(): HasOne
     {
         return $this->hasOne(Account::class, 'student_id');
+    }
+
+    public function province(): BelongsTo
+    {
+        return $this->belongsTo(Province::class, 'province_code', 'code');
     }
 }

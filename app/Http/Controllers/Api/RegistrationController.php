@@ -4,71 +4,587 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Registration\StoreRegistrationRequest;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use App\Models\Registration;
+use App\Models\RegistrationPeriod;
+use App\Models\DormReservation;
+use App\Models\Occupancy;
+use App\Models\CheckoutRequest;
+use App\Models\OccupancyExtension;
+use App\Models\AdminNotification;
 use App\Models\Account;
 use App\Models\Student;
 use App\Models\Room;
 use App\Models\Bed;
+use App\Models\Floor;
+use App\Models\StudentPriority;
+use App\Models\Blacklist;
+use App\Models\ElectricityBill;
+use App\Models\RoomFeeBill;
 use App\Helpers\StorageHelper;
+use App\Jobs\ProcessPriorityEvidenceJob;
+use App\Services\AutoReviewService;
+use App\Services\DormCapacityService;
+use App\Services\RoomFeeBillingService;
+use App\Services\StudentNotificationService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class RegistrationController extends Controller
 {
+    /**
+     * Helper to get the correct URL based on environment
+     */
+    private function getImageUrl($path)
+    {
+        if (empty($path)) {
+            return null;
+        }
+        
+        // If it's already a full URL, return as-is
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
+
+        // Some records (e.g. registrations converted from a tân sinh viên
+        // dorm reservation) already have a storage prefix baked into the
+        // stored path — strip it so it isn't duplicated below.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
+        
+        // Check if we're in production (Railway)
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+        
+        if ($isProduction) {
+            // Railway: use /api/storage/
+            return url('/api/storage/' . $cleanPath);
+        }
+        
+        // Local development: use /storage/
+        return url('/storage/' . $cleanPath);
+    }
+
+    private function formatRegistration(Registration $registration, ?string $emailFallback = null): array
+    {
+        $registration->loadMissing('period');
+        $student = $registration->student;
+        $blacklist = $student
+            ? Blacklist::where('student_id', $student->id)->latest('id')->first()
+            : null;
+        $formData = [
+            'mssv' => $student?->student_code,
+            'fullName' => $student?->full_name,
+            'birthDate' => $student?->date_of_birth,
+            'gender' => $student?->gender,
+            'class' => $student?->class_name,
+            'department' => $student?->faculty,
+            'nationality' => $student?->nationality,
+            'ethnicity' => $student?->ethnicity,
+            'religion' => $student?->religion,
+            'phone' => $student?->phone,
+            'cccd' => $student?->cccd,
+            'cccdIssueDate' => $student?->cccd_issued_date,
+            'cccdIssuePlace' => $student?->cccd_issued_place,
+            'address' => $student?->permanent_address,
+            'father_name' => $registration->father_name,
+            'father_birth_year' => $registration->father_birth_year,
+            'father_phone' => $registration->father_phone,
+            'father_job' => $registration->father_job,
+            'mother_name' => $registration->mother_name,
+            'mother_birth_year' => $registration->mother_birth_year,
+            'mother_phone' => $registration->mother_phone,
+            'mother_job' => $registration->mother_job,
+            'familyContactAddress' => $registration->parent_address,
+            'emergency_contact_name' => $registration->emergency_contact_name,
+            'emergency_contact_phone' => $registration->emergency_contact_phone,
+            'emergency_contact_relationship' => $registration->emergency_contact_relationship,
+        ];
+
+        return [
+            'id' => $registration->id,
+            'student_id' => $registration->student_id,
+            'email' => $registration->student?->email ?? $emailFallback ?? '',
+            'formData' => $formData,
+            'status' => $registration->status,
+            'registration_type' => $registration->registration_type,
+            'semester' => $registration->semester,
+            'cccd_front_url' => $this->getImageUrl($registration->cccd_front_url),
+            'cccd_back_url' => $this->getImageUrl($registration->cccd_back_url),
+            'avatarUrl' => $this->getImageUrl($registration->avatar_url ?? $registration->student?->avatar),
+            'father_name' => $registration->father_name,
+            'father_birth_year' => $registration->father_birth_year,
+            'father_phone' => $registration->father_phone,
+            'father_job' => $registration->father_job,
+            'mother_name' => $registration->mother_name,
+            'mother_birth_year' => $registration->mother_birth_year,
+            'mother_phone' => $registration->mother_phone,
+            'mother_job' => $registration->mother_job,
+            'parent_address' => $registration->parent_address,
+            'emergency_contact_name' => $registration->emergency_contact_name,
+            'emergency_contact_phone' => $registration->emergency_contact_phone,
+            'emergency_contact_relationship' => $registration->emergency_contact_relationship,
+            'stay_from_date' => $registration->stay_from_date,
+            'stay_to_date' => $registration->stay_to_date,
+            'commitment_confirm' => $registration->commitment_confirm,
+            'reason' => $registration->rejection_reason,
+            'rejection_reason' => $registration->rejection_reason,
+            'auto_decision' => $registration->auto_decision,
+            'auto_decision_reason' => $registration->auto_decision_reason,
+            'source_dorm_reservation_id' => $registration->source_dorm_reservation_id,
+            'registration_period_id' => $registration->registration_period_id,
+            'channel' => $registration->period?->channel,
+            'period_name' => $registration->period?->name,
+            'period_status' => $registration->period?->status,
+            'approved_at' => $registration->approved_at?->toDateString(),
+            'cancelled_at' => $registration->cancelled_at?->toISOString(),
+            'cancellation_reason' => $registration->cancellation_reason,
+            'cancelled_by' => $registration->cancelled_by,
+            'bed_selection_deadline' => $this->bedSelectionDeadline($registration)?->toDateTimeString(),
+            'occupancy_id' => $registration->occupancy?->id,
+            'assigned_room_id' => $registration->occupancy?->room_id,
+            'assigned_bed_id' => $registration->occupancy?->bed_id,
+            'bed_approval_status' => $registration->occupancy?->bed_approval_status,
+            'occupancy_status' => $this->mapOccupancyStatus($registration->occupancy),
+            'checkout_requested' => (bool) ($registration->occupancy?->pendingCheckoutRequest),
+            'checkout_request' => $registration->occupancy?->pendingCheckoutRequest ? [
+                'id' => $registration->occupancy->pendingCheckoutRequest->id,
+                'reason' => $registration->occupancy->pendingCheckoutRequest->reason,
+                'expected_leave_date' => $registration->occupancy->pendingCheckoutRequest->expected_leave_date?->toDateString(),
+                'created_at' => $registration->occupancy->pendingCheckoutRequest->created_at,
+            ] : null,
+            'occupancy_reason' => $registration->occupancy?->reason,
+            'check_in_date' => $registration->occupancy?->check_in_date,
+            'check_out_date' => $registration->occupancy?->check_out_date,
+            'room_assigned_at' => $registration->occupancy?->created_at,
+            'blacklist' => $blacklist ? [
+                'reason' => $blacklist->reason,
+                'source' => $blacklist->source,
+                'created_at' => $blacklist->created_at,
+            ] : null,
+            'note' => $registration->note,
+            'created_at' => $registration->created_at,
+            'student' => $registration->student,
+            'priority_criteria' => StudentPriority::with(['criteria', 'evidences'])
+                    ->where('registration_id', $registration->id)
+                    ->get()
+                    ->map(function ($p) {
+                        $urls = $p->evidences
+                            ->map(fn($e) => $this->getImageUrl($e->file_url))
+                            ->values()
+                            ->all();
+                        // Tương thích ngược: đơn cũ lưu 1 ảnh ở evidence_url
+                        if (empty($urls) && $p->evidence_url) {
+                            $urls = [$this->getImageUrl($p->evidence_url)];
+                        }
+                        return [
+                            'id' => $p->id,
+                            'criteria_id' => $p->priority_criteria_id,
+                            'code' => $p->criteria?->code,
+                            'name' => $p->criteria?->name,
+                            'evidence_urls' => $urls,
+                            'status' => $p->status,
+                        ];
+                    })
+                    ->all(),
+        ];
+    }
+
+    private function recordRoomChange(?Occupancy $occupancy, ?int $oldRoomId, ?int $oldBedId, ?int $newRoomId, ?int $newBedId, ?string $reason = null): void
+    {
+        if (!$occupancy || ($oldRoomId === $newRoomId && $oldBedId === $newBedId)) {
+            return;
+        }
+
+        $changeType = $reason === 'assign_room' ? 'ADMIN_TRANSFER' : 'PERMANENT';
+
+        DB::table('room_change_log')->insert([
+            'occupancy_id' => $occupancy->id,
+            'old_room_id' => $oldRoomId,
+            'old_bed_id' => $oldBedId,
+            'new_room_id' => $newRoomId,
+            'new_bed_id' => $newBedId,
+            'transfer_reason' => $reason,
+            'change_type' => $changeType,
+            'status' => null,
+            'transferred_at' => now(),
+        ]);
+    }
+
+    private function notifyRoomAssignmentChange(
+        Registration $registration,
+        ?int $oldRoomId,
+        ?int $oldBedId,
+        ?int $newRoomId,
+        ?int $newBedId,
+    ): void {
+        $student = $registration->student;
+
+        if (! $student || ! $newRoomId || $oldRoomId === $newRoomId) {
+            return;
+        }
+
+        $oldRoom = $oldRoomId ? Room::with('floor')->find($oldRoomId) : null;
+        $newRoom = Room::with('floor')->find($newRoomId);
+        $oldBed = $oldBedId ? Bed::find($oldBedId) : null;
+        $newBed = $newBedId ? Bed::find($newBedId) : null;
+
+        $oldRoomCode = $oldRoom ? (($oldRoom->floor?->building_code ?? '') . ($oldRoom->room_number ?? '')) : null;
+        $newRoomCode = $newRoom ? (($newRoom->floor?->building_code ?? '') . ($newRoom->room_number ?? '')) : null;
+
+        if (! $newRoomCode) {
+            return;
+        }
+
+        $isRoomChange = ! empty($oldRoomCode);
+        if (! $isRoomChange) {
+            $this->notifier()->notifyRoomAssigned(
+                $student,
+                $newRoomCode,
+                $this->bedSelectionDeadline($registration),
+                $registration->id,
+            );
+            return;
+        }
+
+        $title = $isRoomChange ? 'Thông báo đổi phòng lưu trú' : 'Thông báo phân phòng lưu trú';
+        $type = $isRoomChange ? 'room_assignment_changed' : 'room_assigned';
+        $oldLabel = $oldRoomCode
+            ? "Phòng {$oldRoomCode}" . ($oldBed ? ", Giường {$oldBed->bed_number}" : '')
+            : null;
+        $newLabel = "Phòng {$newRoomCode}" . ($newBed ? ", Giường {$newBed->bed_number}" : '');
+
+        $content = $isRoomChange
+            ? "Ban quản lý đã đổi phòng lưu trú của bạn từ {$oldLabel} sang {$newLabel}."
+            : "Ban quản lý đã phân phòng lưu trú cho bạn: {$newLabel}.";
+
+        if (! $newBed) {
+            $content .= ' Vui lòng đăng nhập hệ thống để chọn giường trong phòng mới.';
+
+            $deadline = $this->bedSelectionDeadline($registration);
+            if ($deadline) {
+                $content .= " Hạn chót chọn giường: {$deadline->format('d/m/Y')}."
+                    . ' Nếu quá hạn, hồ sơ đăng ký sẽ tự động bị huỷ và giường sẽ không được giữ lại — bạn sẽ cần đăng ký lại nếu vẫn muốn ở KTX.';
+            }
+        }
+
+        $this->notifier()->notifyStudent($student, $title, $content, $type);
+    }
+
+    /**
+     * Hạn chọn giường = ngày đơn được duyệt + registration_periods.bed_selection_days.
+     * Cùng công thức với SendBedSelectionRemindersCommand/ExpireBedSelectionCommand
+     * để nội dung thông báo luôn khớp với thời điểm hệ thống thực sự huỷ hồ sơ.
+     */
+    private function bedSelectionDeadline(Registration $registration): ?Carbon
+    {
+        return $registration->bedSelectionDeadline();
+    }
+
+    private function notifier(): StudentNotificationService
+    {
+        return app(StudentNotificationService::class);
+    }
+
+    /**
+     * @param bool $queue Bật khi gọi trong vòng lặp duyệt hàng loạt (confirmBatch), tránh
+     *                    chặn request chờ gửi email lần lượt từng đơn trong đợt.
+     */
+    private function notifyRegistrationDecision(Registration $registration, bool $queue = false): void
+    {
+        if ($registration->status === 'approved') {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đơn đăng ký nội trú đã được duyệt',
+                'Đơn đăng ký nội trú KTX của bạn đã được duyệt. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
+                'registration_approved',
+                $registration->id,
+                queue: $queue,
+            );
+        } elseif ($registration->status === 'rejected') {
+            $reason = $registration->rejection_reason ? " Lý do: {$registration->rejection_reason}" : '';
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đơn đăng ký nội trú bị từ chối',
+                "Đơn đăng ký nội trú KTX của bạn đã bị từ chối.{$reason}",
+                'registration_rejected',
+                $registration->id,
+                queue: $queue,
+            );
+        }
+    }
+
+
+    public function eligibility(Request $request): \Illuminate\Http\JsonResponse
+    {
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh xem tình trạng đủ điều kiện của sinh viên khác.
+        $account = $request->user();
+        $student = Student::find($account->student_id);
+
+        if (!$student) {
+            return response()->json(['message' => 'Không tìm thấy sinh viên'], 404);
+        }
+
+        // Check 1: Đã có đơn đang chờ xét duyệt TRONG ĐỢT ĐANG MỞ
+        // Chỉ chặn khi status='submitted' trong period đang active.
+        // Đơn từ đợt cũ đã đóng (submitted/rejected) không chặn sinh viên đăng ký đợt mới.
+        $activePeriodId = RegistrationPeriod::where('status', 'active')->value('id');
+
+        $hasSubmittedInActivePeriod = $activePeriodId !== null
+            && Registration::where('student_id', $student->id)
+                ->where('registration_period_id', $activePeriodId)
+                ->where('status', 'submitted')
+                ->exists();
+
+        if ($hasSubmittedInActivePeriod) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'has_active_application',
+                'reason_message' => 'Đơn của bạn đã được ghi nhận, kết quả sẽ thông báo sau',
+            ]);
+        }
+
+        // Check 1b: Đã có đơn được duyệt — không cho gửi đơn mới
+        $hasApproved = Registration::where('student_id', $student->id)
+            ->where('status', 'approved')
+            ->exists();
+
+        if ($hasApproved) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'already_approved',
+                'reason_message' => 'Đơn đăng ký của bạn đã được duyệt',
+                'redirect'       => '/student/room-status',
+            ]);
+        }
+
+        // Check 2: Đang lưu trú (occupancy ACTIVE)
+        $activeOccupancy = Occupancy::where('student_id', $student->id)
+            ->where('status', 'ACTIVE')
+            ->with('room')
+            ->first();
+
+        if ($activeOccupancy) {
+            $room     = $activeOccupancy->room;
+            $roomName = $room ? ($room->building_code . $room->room_number) : 'phòng hiện tại';
+
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'already_residing',
+                'reason_message' => "Bạn đang ở phòng {$roomName}, muốn ở tiếp dùng chức năng Gia hạn",
+                'redirect'       => '/student/extension',
+            ]);
+        }
+
+        // Check 3: Tình trạng học tập không hợp lệ
+        $allowedAcademicStatuses = ['studying', 'overtime_training'];
+
+        if (!in_array($student->academic_status, $allowedAcademicStatuses, true)) {
+            $message = match ($student->academic_status) {
+                'graduated'       => 'Bạn đã tốt nghiệp, không thuộc diện được ở KTX.',
+                'transferred'     => 'Bạn đã chuyển trường.',
+                'suspended'       => 'Tài khoản đang bị đình chỉ học tập.',
+                'temporary_leave' => 'Bạn đang trong thời gian bảo lưu học tập.',
+                'dropped_out'     => 'Bạn đã thôi học.',
+                default           => 'Bạn không trong tình trạng đang học.',
+            };
+
+            return response()->json([
+                'eligible'        => false,
+                'reason_code'     => 'not_studying',
+                'academic_status' => $student->academic_status,
+                'reason_message'  => $message,
+            ]);
+        }
+
+        // Check 4: Thuộc blacklist
+        if (Blacklist::isBanned($student->id)) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'blacklisted',
+                'reason_message' => 'Bạn thuộc danh sách không được đăng ký ở KTX',
+            ]);
+        }
+
+        // Check 5: Quá năm học tối đa
+        $maxStudyYear = config('ktx.max_study_year', 6);
+
+        if ($student->current_year !== null && $student->current_year > $maxStudyYear) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'not_eligible_year',
+                'reason_message' => 'Bạn đã quá thời hạn đào tạo tối đa, không thuộc diện ở KTX',
+            ]);
+        }
+
+        // Check 6: Còn nợ hóa đơn
+        $unpaidStatuses = ['unpaid', 'overdue'];
+
+        $hasUnpaidBills = ElectricityBill::where('student_id', $student->id)
+                ->whereIn('status', $unpaidStatuses)
+                ->exists()
+            || RoomFeeBill::where('student_id', $student->id)
+                ->whereIn('status', $unpaidStatuses)
+                ->exists();
+
+        if ($hasUnpaidBills) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'unpaid_bills',
+                'reason_message' => 'Bạn còn hóa đơn chưa thanh toán',
+                'redirect'       => '/student/payment',
+            ]);
+        }
+
+        // Check 7: Không có đợt đăng ký nào đang mở (kiểm tra sau khi đã xác nhận sv đủ điều kiện)
+        // Ưu tiên 1: đợt active (đang mở nhận đơn)
+        $activePeriod = RegistrationPeriod::where('status', 'active')
+            ->orderBy('start_date', 'asc')
+            ->first();
+
+        // Ưu tiên 2: đợt pending gần nhất (sắp mở)
+        if (!$activePeriod) {
+            $activePeriod = RegistrationPeriod::where('status', 'pending')
+                ->orderBy('start_date', 'asc')
+                ->first();
+        }
+
+        // Không có active lẫn pending
+        if (!$activePeriod) {
+            $processingMain = RegistrationPeriod::where('channel', 'main')
+                ->where('status', 'processing')
+                ->exists();
+
+            $message = $processingMain
+                ? 'Đang xử lý đợt đăng ký, vui lòng quay lại sau'
+                : 'Hiện chưa có đợt đăng ký nào đang mở, vui lòng theo dõi thông báo từ Ban quản lý';
+
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => 'no_open_channel',
+                'reason_message' => $message,
+            ]);
+        }
+
+        // Check 7b: giới hạn theo nhóm đối tượng cấu hình trên đợt đăng ký.
+        if ($targetError = $this->registrationPeriodTargetError($activePeriod, $student)) {
+            return response()->json([
+                'eligible'       => false,
+                'reason_code'    => $targetError['reason_code'],
+                'reason_message' => $targetError['message'],
+            ]);
+        }
+
+        // Check 8: Đủ điều kiện (active hoặc pending)
+        return response()->json([
+            'eligible'     => true,
+            'channel_info' => [
+                'channel'         => $activePeriod->channel,
+                'period_name'     => $activePeriod->name,
+                'school_year'     => $activePeriod->school_year,
+                'semester'        => $activePeriod->semester,
+                'start_date'      => $activePeriod->start_date?->toDateString(),
+                'end_date'        => $activePeriod->end_date?->toDateString(),
+                'stay_start_date' => $activePeriod->stay_start_date?->toDateString(),
+                'stay_end_date'   => $activePeriod->stay_end_date?->toDateString(),
+                'status'          => $activePeriod->status,
+            ],
+        ]);
+    }
+
     public function index()
     {
-        $registrations = Registration::with(['student', 'student.account'])->get();
-        
-        return $registrations->map(function ($registration) {
-            $formData = null;
-            if (!empty($registration->form_data)) {
-                $decoded = json_decode($registration->form_data, true);
-                if (is_array($decoded)) {
-                    $formData = $decoded;
-                }
+        // Dùng request() thay vì injectRequest qua tham số method — index() cũng được gọi
+        // nội bộ (không qua HTTP) từ StudentFaceSearchController::getStudentIdsListedInOccupancyManagement()
+        // dưới dạng app(RegistrationController::class)->index(), request() vẫn resolve đúng
+        // Request/Account của route hiện tại (khi đó luôn là admin) nên không ảnh hưởng.
+        $account = request()->user();
+
+        $query = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest', 'period']);
+
+        // Route dùng chung role:admin,student. Sinh viên chỉ được xem danh sách đăng ký
+        // trong CÙNG PHÒNG với mình (để hiển thị bạn cùng phòng ở "Phòng của tôi"),
+        // không được xem toàn bộ danh sách đăng ký như admin.
+        if ($account && $account->role === 'student') {
+            $myRegistration = Registration::with('occupancy')
+                ->where('student_id', $account->student_id)
+                ->whereHas('occupancy', fn ($q) => $q->whereNotNull('room_id'))
+                ->latest('id')
+                ->first();
+
+            $roomId = $myRegistration?->occupancy?->room_id;
+
+            if (!$roomId) {
+                return collect();
             }
 
-            return [
-                'id' => $registration->id,
-                'student_id' => $registration->student_id,
-                'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
-                'formData' => $formData,
-                'status' => $registration->status,
-                'semester' => $registration->semester,
-                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-                'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
-                'father_name' => $registration->father_name,
-                'father_phone' => $registration->father_phone,
-                'father_job' => $registration->father_job,
-                'mother_name' => $registration->mother_name,
-                'mother_phone' => $registration->mother_phone,
-                'mother_job' => $registration->mother_job,
-                'parent_address' => $registration->parent_address,
-                'stay_from_date' => $registration->stay_from_date,
-                'stay_to_date' => $registration->stay_to_date,
-                'commitment_confirm' => $registration->commitment_confirm,
-                'reason' => $registration->reason,
-                'assigned_room_id' => $registration->assigned_room_id,
-                'assigned_bed_id' => $registration->assigned_bed_id,
-                'note' => $registration->note,
-                'created_at' => $registration->created_at,
-                'student' => $registration->student,
-            ];
+            $query->whereHas('occupancy', fn ($q) => $q->where('room_id', $roomId));
+        }
+
+        // KHÔNG dedupe ở đây (đã thử rồi bỏ) — tab "Lịch sử" ở FE (AdminRegistrationsPage)
+        // group các lần nộp trùng email từ CHÍNH mảng requests này (client-side, không gọi
+        // API riêng), nên nếu lọc bớt ở đây thì lịch sử cũng mất luôn lần nộp cũ. Việc dedupe
+        // hiển thị (chỉ hiện lần nộp mới nhất ở danh sách chính) được làm ở FE thay vì đây,
+        // xem allMainItems/allRollingItems trong AdminRegistrationsPage.tsx.
+        $registrations = $query->get();
+
+        return $registrations->map(function ($registration) {
+            return $this->formatRegistration($registration);
         });
     }
 
     public function store(StoreRegistrationRequest $request)
     {
-        $account = Account::where('email', $request->email)->first();
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh nộp/ghi đè đơn đăng ký thay sinh viên khác.
+        $account = $request->user();
+        $student = Student::find($account->student_id);
 
-        if (!$account) {
+        if (!$student) {
             return response()->json(['message' => 'Không tìm thấy user'], 404);
         }
 
-        $currentStudent = $account->student_id ? Student::find($account->student_id) : null;
+        // Re-check điều kiện sinh viên để tránh race condition sau khi eligibility GET đã trả eligible=true
+        $allowedAcademicStatuses = ['studying', 'overtime_training'];
+        if (!in_array($student->academic_status, $allowedAcademicStatuses, true)) {
+            return response()->json(['message' => 'Bạn không đủ điều kiện đăng ký nội trú', 'reason_code' => 'not_studying'], 422);
+        }
+        if (Blacklist::isBanned($student->id)) {
+            return response()->json(['message' => 'Bạn thuộc danh sách không được đăng ký ở KTX', 'reason_code' => 'blacklisted'], 422);
+        }
+        $maxStudyYear = config('ktx.max_study_year', 6);
+        if ($student->current_year !== null && $student->current_year > $maxStudyYear) {
+            return response()->json(['message' => 'Bạn đã quá thời hạn đào tạo tối đa', 'reason_code' => 'not_eligible_year'], 422);
+        }
+        $unpaidStatuses = ['unpaid', 'overdue'];
+        if (ElectricityBill::where('student_id', $student->id)->whereIn('status', $unpaidStatuses)->exists()
+            || RoomFeeBill::where('student_id', $student->id)->whereIn('status', $unpaidStatuses)->exists()) {
+            return response()->json(['message' => 'Bạn còn hóa đơn chưa thanh toán', 'reason_code' => 'unpaid_bills'], 422);
+        }
+        // Chặn nếu đã có đơn được duyệt (1 sinh viên chỉ có 1 đơn approved tại một thời điểm)
+        $hasApproved = Registration::where('student_id', $student->id)
+            ->where('status', 'approved')
+            ->exists();
+        if ($hasApproved) {
+            return response()->json(['message' => 'Bạn đã có đơn được duyệt. Không thể gửi đơn mới.', 'reason_code' => 'already_approved'], 422);
+        }
+
+        $activePeriod = RegistrationPeriod::where('status', 'active')->first();
+        if (!$activePeriod) {
+            return response()->json(['message' => 'Hiện không có đợt đăng ký nào đang mở', 'reason_code' => 'no_open_channel'], 422);
+        }
+
+        // Re-check giới hạn năm học theo cấu hình đợt — xem giải thích ở eligibility() Check 7b.
+        if ($targetError = $this->registrationPeriodTargetError($activePeriod, $student)) {
+            return response()->json([
+                'message'     => $targetError['message'],
+                'reason_code' => $targetError['reason_code'],
+            ], 422);
+        }
+
+        $currentStudent = $student;
         $data = $request->validated();
 
         // Handle file uploads with Railway volume support
@@ -132,8 +648,24 @@ class RegistrationController extends Controller
             }
         }
 
+        $rawCriteriaIds = $request->input('priority_criteria_ids');
+        $criteriaIds = [];
+        if ($rawCriteriaIds) {
+            $parsed = is_array($rawCriteriaIds) ? $rawCriteriaIds : json_decode($rawCriteriaIds, true);
+            $criteriaIds = is_array($parsed) ? array_map('intval', $parsed) : [];
+        }
+
+        // Đã chọn diện ưu tiên thì bắt buộc phải có ít nhất 1 ảnh minh chứng
+        foreach ($criteriaIds as $criteriaId) {
+            if (!$request->hasFile('priority_evidence_' . $criteriaId)) {
+                return response()->json([
+                    'message' => 'Vui lòng tải lên minh chứng cho các diện ưu tiên đã chọn.',
+                ], 422);
+            }
+        }
+
         try {
-            $result = DB::transaction(function () use ($account, $currentStudent, $data) {
+            $result = DB::transaction(function () use ($account, $currentStudent, $data, $criteriaIds, $activePeriod) {
                 // Clean existing avatar if it's a full URL
                 $existingAvatar = null;
                 if ($currentStudent && $currentStudent->avatar) {
@@ -143,7 +675,7 @@ class RegistrationController extends Controller
                         $existingAvatar = $parts[1] ?? $existingAvatar;
                     }
                 }
-                
+
                 $studentPayload = [
                     'student_code' => $data['student_code'],
                     'avatar' => $data['avatar'] ?? $existingAvatar,
@@ -154,7 +686,7 @@ class RegistrationController extends Controller
                     'faculty' => $data['faculty'],
                     'course_year' => $data['course_year'],
                     'phone' => $data['phone'],
-                    'email' => $account->email,
+                    'email' => $data['email'],
                     'cccd' => $data['cccd'],
                     'cccd_issued_date' => $data['cccd_issued_date'],
                     'cccd_issued_place' => $data['cccd_issued_place'],
@@ -163,6 +695,21 @@ class RegistrationController extends Controller
                     'religion' => $data['religion'],
                     'permanent_address' => $data['permanent_address'],
                     'status' => 'active',
+                    // Cha/mẹ + liên hệ khẩn cấp là dữ liệu tĩnh gắn với con người, không phải
+                    // gắn với từng lần đăng ký — ghi (upsert) vào students mỗi lần nộp đơn để
+                    // các lần đăng ký sau tự động điền sẵn (FE đọc qua /student/profile).
+                    'father_name'       => $data['father_name'] ?? null,
+                    'father_birth_year' => $data['father_birth_year'] ?? null,
+                    'father_job'        => $data['father_job'] ?? null,
+                    'father_phone'      => $data['father_phone'] ?? null,
+                    'mother_name'       => $data['mother_name'] ?? null,
+                    'mother_birth_year' => $data['mother_birth_year'] ?? null,
+                    'mother_job'        => $data['mother_job'] ?? null,
+                    'mother_phone'      => $data['mother_phone'] ?? null,
+                    'parent_address'    => $data['parent_address'] ?? null,
+                    'emergency_contact_name'         => $data['emergency_contact_name'] ?? null,
+                    'emergency_contact_phone'        => $data['emergency_contact_phone'] ?? null,
+                    'emergency_contact_relationship' => $data['emergency_contact_relationship'] ?? null,
                 ];
 
                 if ($currentStudent) {
@@ -174,81 +721,59 @@ class RegistrationController extends Controller
                     $account->save();
                 }
 
-                $account->student_code = $data['student_code'];
-                $account->save();
-
-                $hasPendingSameSemester = Registration::where('student_id', $student->id)
-                    ->where('semester', $data['semester'])
-                    ->where('status', 'pending')
+                // Unique constraint: mỗi sinh viên chỉ có 1 đơn submitted trong 1 đợt
+                $hasPendingInPeriod = Registration::where('student_id', $student->id)
+                    ->where('registration_period_id', $activePeriod->id)
+                    ->where('status', 'submitted')
                     ->lockForUpdate()
                     ->exists();
 
-                if ($hasPendingSameSemester) {
+                if ($hasPendingInPeriod) {
                     throw new RuntimeException('DUPLICATE_PENDING_REGISTRATION');
                 }
 
-                $existingRejected = Registration::where('student_id', $student->id)
-                    ->where('semester', $data['semester'])
-                    ->where('status', 'rejected')
-                    ->lockForUpdate()
-                    ->latest('id')
-                    ->first();
-
                 $registrationPayload = [
-                    'student_id' => $student->id,
-                    'cccd_front_url' => $data['cccd_front_url'] ?? null,
-                    'cccd_back_url' => $data['cccd_back_url'] ?? null,
-                    'semester' => $data['semester'],
-                    'form_data' => json_encode([
-                        'mssv' => $data['student_code'] ?? null,
-                        'fullName' => $data['full_name'] ?? null,
-                        'birthDate' => $data['date_of_birth'] ?? null,
-                        'gender' => $data['gender'] ?? null,
-                        'class' => $data['class_name'] ?? null,
-                        'department' => $data['faculty'] ?? null,
-                        'nationality' => $data['nationality'] ?? null,
-                        'ethnicity' => $data['ethnicity'] ?? null,
-                        'religion' => $data['religion'] ?? null,
-                        'phone' => $data['phone'] ?? null,
-                        'cccd' => $data['cccd'] ?? null,
-                        'cccdIssueDate' => $data['cccd_issued_date'] ?? null,
-                        'cccdIssuePlace' => $data['cccd_issued_place'] ?? null,
-                        'address' => $data['permanent_address'] ?? null,
-                        'father_name' => $data['father_name'] ?? null,
-                        'father_phone' => $data['father_phone'] ?? null,
-                        'father_job' => $data['father_job'] ?? null,
-                        'mother_name' => $data['mother_name'] ?? null,
-                        'mother_phone' => $data['mother_phone'] ?? null,
-                        'mother_job' => $data['mother_job'] ?? null,
-                        'familyContactAddress' => $data['parent_address'] ?? null,
-                    ]),
-                    'status' => 'pending',
-                    'father_name' => $data['father_name'] ?? ($data['parent_name'] ?? ''),
-                    'father_birth_year' => $data['father_birth_year'] ?? '',
-                    'father_job' => $data['father_job'] ?? '',
-                    'father_phone' => $data['father_phone'] ?? ($data['parent_phone'] ?? ''),
-                    'mother_name' => $data['mother_name'] ?? '',
-                    'mother_birth_year' => $data['mother_birth_year'] ?? '',
-                    'mother_job' => $data['mother_job'] ?? '',
-                    'mother_phone' => $data['mother_phone'] ?? '',
-                    'parent_address' => $data['parent_address'] ?? ($data['permanent_address'] ?? ''),
-                    'stay_from_date' => $data['stay_from_date'] ?? now()->toDateString(),
-                    'stay_to_date' => $data['stay_to_date'] ?? now()->toDateString(),
-                    'commitment_confirm' => $data['commitment_confirm'] ?? false,
+                    'student_id'             => $student->id,
+                    'registration_period_id' => $activePeriod->id,
+                    'registration_type'      => 'new',
+                    'avatar_url'             => $data['avatar'] ?? $existingAvatar,
+                    'cccd_front_url'         => $data['cccd_front_url'] ?? null,
+                    'cccd_back_url'          => $data['cccd_back_url'] ?? null,
+                    'semester'               => $activePeriod->semester,
+                    'school_year'            => $activePeriod->school_year,
+                    'status'                 => 'submitted',
+                    // Snapshot lịch sử tại thời điểm nộp đơn — ĐỌC LẠI từ $student (vừa
+                    // update() ở trên) thay vì tin thẳng $data do FE gửi lên, vì input dù
+                    // đã set readonly ở FE vẫn có thể bị sửa value qua devtools rồi gửi lên.
+                    'father_name'            => $student->father_name,
+                    'father_birth_year'      => $student->father_birth_year,
+                    'father_job'             => $student->father_job,
+                    'father_phone'           => $student->father_phone,
+                    'mother_name'            => $student->mother_name,
+                    'mother_birth_year'      => $student->mother_birth_year,
+                    'mother_job'             => $student->mother_job,
+                    'mother_phone'           => $student->mother_phone,
+                    'parent_address'         => $student->parent_address,
+                    'emergency_contact_name'         => $student->emergency_contact_name,
+                    'emergency_contact_phone'        => $student->emergency_contact_phone,
+                    'emergency_contact_relationship' => $student->emergency_contact_relationship,
+                    'stay_from_date'         => $activePeriod->stay_start_date?->toDateString(),
+                    'stay_to_date'           => $activePeriod->stay_end_date?->toDateString(),
+                    'commitment_confirm'     => $data['commitment_confirm'] ?? false,
                 ];
 
-                if ($existingRejected) {
-                    if (isset($data['cccd_front_url'])) {
-                        $registrationPayload['cccd_front_url'] = $data['cccd_front_url'];
-                    }
+                $registration = Registration::create($registrationPayload);
 
-                    if (isset($data['cccd_back_url'])) {
-                        $registrationPayload['cccd_back_url'] = $data['cccd_back_url'];
+                // Lưu tiêu chí ưu tiên nếu sinh viên chọn — gắn với đơn này
+                if (!empty($criteriaIds)) {
+                    foreach ($criteriaIds as $criteriaId) {
+                        StudentPriority::create([
+                            'student_id' => $student->id,
+                            'registration_id' => $registration->id,
+                            'priority_criteria_id' => $criteriaId,
+                            'status' => 'pending',
+                        ]);
                     }
-
-                    $registration = Registration::create($registrationPayload);
-                } else {
-                    $registration = Registration::create($registrationPayload);
                 }
 
                 return [
@@ -266,6 +791,39 @@ class RegistrationController extends Controller
             throw $exception;
         }
 
+        // Minh chứng ưu tiên (tối đa 6 ảnh / tiêu chí): chỉ chuyển file vào disk 'local'
+        // (staging, luôn ghi nhanh vì không phải Railway volume) rồi đẩy việc lưu vào vị
+        // trí lưu trữ cuối + tạo bản ghi evidence ra queue, để sinh viên không phải chờ
+        // bước này mới thấy đơn "đã gửi thành công".
+        if (!empty($criteriaIds)) {
+            $registrationId = $result['registration']->id;
+            foreach ($criteriaIds as $criteriaId) {
+                $evidenceKey = 'priority_evidence_' . $criteriaId;
+                if (!$request->hasFile($evidenceKey)) {
+                    continue;
+                }
+
+                $files = $request->file($evidenceKey);
+                if (!is_array($files)) {
+                    $files = [$files];
+                }
+                $files = array_slice($files, 0, 6);
+
+                $stagingDir = 'temp_evidence/' . $registrationId . '_' . $criteriaId;
+                $stagedFilenames = [];
+                foreach ($files as $index => $file) {
+                    $stagedName = 'evidence_' . $index . '.' . $file->getClientOriginalExtension();
+                    $file->storeAs($stagingDir, $stagedName, 'local');
+                    $stagedFilenames[] = $stagedName;
+                }
+
+                ProcessPriorityEvidenceJob::dispatch($registrationId, $criteriaId, $stagingDir, $stagedFilenames);
+            }
+        }
+
+        $autoReview = new AutoReviewService();
+        $autoReview->handleAfterSubmission($result['registration']);
+
         return response()->json([
             'message' => 'Đăng ký thành công',
             'data' => $result
@@ -274,22 +832,24 @@ class RegistrationController extends Controller
 
     public function getMyRegistration(Request $request)
     {
-        $email = $request->query('email');
-        $semester = $request->query('semester', '2024-2025');
+        $semester = $request->query('semester');
 
-        $account = Account::where('email', $email)->first();
-
-        if (!$account) {
-            return response()->json(['message' => 'Không tìm thấy user'], 404);
-        }
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh xem đơn đăng ký của sinh viên khác.
+        $account = $request->user();
 
         if (!$account->student_id) {
             return response()->json(null);
         }
 
-        $registration = Registration::with(['student', 'student.account'])
+        $student = Student::find($account->student_id);
+
+        // Chỉ lọc theo semester khi FE truyền vào; mặc định lấy đơn mới nhất
+        // của sinh viên ở bất kỳ học kỳ nào để trạng thái (submitted/approved/
+        // rejected) luôn hiển thị đúng.
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])
             ->where('student_id', $account->student_id)
-            ->where('semester', $semester)
+            ->when($semester, fn ($query) => $query->where('semester', $semester))
             ->latest('id')
             ->first();
 
@@ -297,45 +857,89 @@ class RegistrationController extends Controller
             return response()->json(null);
         }
 
-        return response()->json([
-            'id' => $registration->id,
-            'student_id' => $registration->student_id,
-            'formData' => (!empty($registration->form_data) ? json_decode($registration->form_data, true) : null),
-            'email' => $registration->student?->email ?? $email ?? '',
-            'status' => $registration->status,
-            'semester' => $registration->semester,
-            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
-            'father_name' => $registration->father_name,
-            'father_phone' => $registration->father_phone,
-            'father_job' => $registration->father_job,
-            'mother_name' => $registration->mother_name,
-            'mother_phone' => $registration->mother_phone,
-            'mother_job' => $registration->mother_job,
-            'parent_address' => $registration->parent_address,
-            'stay_from_date' => $registration->stay_from_date,
-            'stay_to_date' => $registration->stay_to_date,
-            'commitment_confirm' => $registration->commitment_confirm,
-            'reason' => $registration->reason,
-            'assigned_room_id' => $registration->assigned_room_id,
-            'assigned_bed_id' => $registration->assigned_bed_id,
-            'note' => $registration->note,
-            'created_at' => $registration->created_at,
-            'student' => $registration->student,
-        ]);
+        return response()->json($this->formatRegistration($registration, $student?->email));
     }
+
+    /** Message lỗi capacity dùng chung — nhất quán giữa các endpoint duyệt (BUG-2/RR-2/RR-3). */
+    private const CAPACITY_CONFLICT_MESSAGE = 'Không thể duyệt hồ sơ vì sức chứa KTX đã thay đổi hoặc không còn suất trống. Vui lòng tải lại dữ liệu.';
 
     public function approve($id, Request $request)
     {
-        $registration = Registration::find($id);
+        // Lock order thống nhất: RegistrationPeriod trước, rồi Registration.
+        $result = DB::transaction(function () use ($id) {
+            $registration = Registration::with('student')->lockForUpdate()->find($id);
 
-        if (!$registration) {
-            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+            if (!$registration) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đơn']];
+            }
+
+            $period = $registration->registration_period_id
+                ? RegistrationPeriod::where('id', $registration->registration_period_id)->lockForUpdate()->first()
+                : null;
+
+            // Re-check trạng thái SAU khi đã lock — không cho duyệt lại đơn đã cancelled/
+            // rejected (idempotent: trả lỗi rõ, không âm thầm đổi trạng thái).
+            if ($registration->status === 'cancelled') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đơn đã bị hủy, không thể duyệt.']];
+            }
+            if ($registration->status === 'rejected') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đơn đã bị từ chối, không thể duyệt.']];
+            }
+
+            // Minh chứng ưu tiên bị từ chối — không được duyệt (thường status đã tự chuyển
+            // 'rejected' ngay khi admin từ chối minh chứng; check này phòng vệ thêm với dữ
+            // liệu cũ chưa cascade).
+            if ($registration->hasRejectedPriorityEvidence()) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.']];
+            }
+
+            // Registration nguồn giữ chỗ (tân sinh viên) — suất đã được DormReservation
+            // approved giữ từ trước, KHÔNG tính đây là chiếm thêm suất mới nên bỏ qua check
+            // capacity thường. Thay vào đó phải lock + xác nhận DormReservation nguồn vẫn
+            // còn approved.
+            $sourceReservation = null;
+            if ($registration->status !== 'approved' && $registration->source_dorm_reservation_id) {
+                $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Hồ sơ giữ chỗ nguồn không còn ở trạng thái approved (có thể đã bị thay đổi bởi thao tác khác). Vui lòng tải lại dữ liệu.']];
+                }
+            } elseif ($registration->status !== 'approved') {
+                // submitted -> approved là hành động thật sự chiếm thêm 1 suất committed nên cần
+                // check capacity; nếu đã approved sẵn (double-click/gọi lại) thì đây là no-op, không
+                // chiếm thêm suất nào nên không cần re-check.
+                $capacity = app(DormCapacityService::class)
+                    ->summarizeForRegistrationPeriod($period ?? $registration->registration_period_id);
+                if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity]];
+                }
+            }
+
+            $registration->status = 'approved';
+            $registration->approved_at = now();
+            $registration->save();
+
+            if ($sourceReservation) {
+                $sourceReservation->update([
+                    'status'                    => 'converted',
+                    'converted_registration_id' => $registration->id,
+                ]);
+            }
+
+            return ['ok' => true, 'registration' => $registration];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
 
-        $registration->status = 'approved';
-        $registration->save();
+        // Gửi thông báo SAU khi transaction đã commit.
+        $registration = $result['registration'];
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
 
         return response()->json([
             'message' => 'Đã duyệt'
@@ -344,15 +948,23 @@ class RegistrationController extends Controller
 
     public function getRooms()
     {
-        $rooms = Room::with('beds')->get();
+        $rooms = Room::with(['beds', 'floor'])->get();
 
         return $rooms->map(function ($room) {
             $totalBeds = $room->beds->count();
-            $availableBeds = $room->beds->where('status', 'empty')->count();
+            $maintenanceBeds = $room->beds
+                ->filter(fn (Bed $bed) => strtolower((string) $bed->status) === 'maintenance')
+                ->count();
+            $occupiedBeds = Occupancy::occupiedBedsQuery()
+                ->where('room_id', $room->id)
+                ->count();
+            $availableBeds = max($totalBeds - $maintenanceBeds - $occupiedBeds, 0);
 
             return [
                 'id' => $room->id,
-                'building_code' => $room->building_code,
+                'building_code' => $room->floor?->building_code,
+                'floor_id' => $room->floor_id,
+                'floor_number' => $room->floor?->floor_number,
                 'room_number' => $room->room_number,
                 'totalBeds' => $totalBeds,
                 'availableBeds' => $availableBeds,
@@ -367,14 +979,65 @@ class RegistrationController extends Controller
             'room_id' => 'required|integer|exists:rooms,id',
         ]);
 
-        $registration = Registration::find($id);
+        $registration = Registration::with(['occupancy', 'period', 'student'])->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
-        $registration->assigned_room_id = $request->room_id;
-        $registration->save();
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể phân phòng.'], 422);
+        }
+
+        $occupancy = Occupancy::firstOrNew([
+            'student_id'      => $registration->student_id,
+            'registration_id' => $registration->id,
+        ]);
+
+        $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
+        $oldBedId = $occupancy->exists ? $occupancy->bed_id : null;
+
+        if ($occupancy->exists && $occupancy->bed_id) {
+            $currentBed = Bed::find($occupancy->bed_id);
+            if (!$currentBed || (int) $currentBed->room_id !== (int) $request->room_id) {
+                if ($currentBed) {
+                    $currentBed->status = 'active';
+                    $currentBed->save();
+                }
+
+                $occupancy->bed_id = null;
+            }
+        }
+
+        $period = $registration->period;
+
+        $occupancy->registration_id = $registration->id;
+        $occupancy->room_id = $request->room_id;
+        $occupancy->bed_id = null;
+        $occupancy->check_in_date = $period?->stay_start_date?->toDateString();
+        $occupancy->check_out_date = $period?->stay_end_date?->toDateString();
+        // Admin confirmed the room; student must still pick a bed.
+        $occupancy->status = 'ROOM_CONFIRMED';
+        $occupancy->bed_approval_status = null;
+
+        $occupancy->save();
+
+        $this->recordRoomChange(
+            $occupancy,
+            $oldRoomId,
+            $oldBedId,
+            (int) $request->room_id,
+            $occupancy->bed_id,
+            'assign_room'
+        );
+
+        $this->notifyRoomAssignmentChange(
+            $registration,
+            $oldRoomId,
+            $oldBedId,
+            (int) $request->room_id,
+            $occupancy->bed_id,
+        );
 
         return response()->json(['message' => 'Đã phân phòng']);
     }
@@ -382,18 +1045,19 @@ class RegistrationController extends Controller
     public function selectBed(Request $request)
     {
         $request->validate([
-            'email' => 'required|email',
             'bed_id' => 'required|integer|exists:beds,id',
         ]);
 
-        $account = Account::where('email', $request->email)->first();
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh chọn giường thay sinh viên khác.
+        $account = $request->user();
 
-        if (!$account || !$account->student_id) {
+        if (!$account->student_id) {
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
-        $registration = Registration::where('student_id', $account->student_id)
-            ->where('status', 'pending')
+        $registration = Registration::with(['occupancy', 'period'])->where('student_id', $account->student_id)
+            ->where('status', 'approved')
             ->latest('id')
             ->first();
 
@@ -401,19 +1065,429 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn đăng ký'], 404);
         }
 
-        $bed = Bed::find($request->bed_id);
-        if (!$bed) {
-            return response()->json(['message' => 'Giường không tồn tại'], 404);
+        $deadline = $this->bedSelectionDeadline($registration);
+        if ($deadline && now()->greaterThanOrEqualTo($deadline)) {
+            return response()->json(['message' => 'Đã quá hạn chọn giường. Vui lòng liên hệ ban quản lý KTX.'], 422);
         }
 
-        $bed->status = 'occupied';
-        $bed->save();
+        // 1. Tìm giường — phải tồn tại trước khi check bất cứ điều gì
+        $bed = Bed::find($request->bed_id);
+        if (!$bed) {
+            return response()->json(['message' => 'Giường không tồn tại.'], 404);
+        }
 
-        $registration->assigned_bed_id = $bed->id;
-        $registration->assigned_room_id = $bed->room_id;
-        $registration->save();
+        // 2. Giường phải thuộc đúng phòng được phân — luôn validate, không bypass dù occupancy null
+        $assignedRoomId = $registration->occupancy?->room_id;
+        if (!$assignedRoomId || (int) $assignedRoomId !== (int) $bed->room_id) {
+            return response()->json(['message' => 'Giường không thuộc phòng của bạn.'], 403);
+        }
 
-        return response()->json(['message' => 'Đã chọn giường']);
+        // 3. Giường không được đang bảo trì
+        if (strtolower((string) $bed->status) === 'maintenance') {
+            return response()->json(['message' => 'Giường đang bảo trì, vui lòng chọn giường khác.'], 422);
+        }
+
+        // 4. Giường chưa được sinh viên khác giữ chỗ hoặc đang ở.
+        $isOccupiedByAnotherStudent = Occupancy::query()
+            ->occupiedBeds()
+            ->where('bed_id', $bed->id)
+            ->where('student_id', '!=', $registration->student_id)
+            ->exists();
+
+        if ($isOccupiedByAnotherStudent) {
+            return response()->json(['message' => 'Giường vừa được chọn bởi người khác, vui lòng chọn giường khác.'], 422);
+        }
+
+        $occupancy = Occupancy::firstOrNew([
+            'student_id'      => $registration->student_id,
+            'registration_id' => $registration->id,
+        ]);
+
+        $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
+        $oldBedId = $occupancy->exists ? $occupancy->bed_id : null;
+
+        if ($occupancy->exists && $occupancy->bed_id && (int) $occupancy->bed_id !== (int) $bed->id) {
+            $previousBed = Bed::find($occupancy->bed_id);
+            if ($previousBed) {
+                $previousBed->status = 'active';
+                $previousBed->save();
+            }
+        }
+
+        $period = $registration->period;
+
+        $occupancy->registration_id    = $registration->id;
+        $occupancy->room_id            = $bed->room_id;
+        $occupancy->bed_id             = $bed->id;
+        $occupancy->status             = 'PENDING_PAYMENT';
+        $occupancy->bed_approval_status = 'approved';
+        $occupancy->check_in_date  = $occupancy->check_in_date  ?? $period?->stay_start_date?->toDateString();
+        $occupancy->check_out_date = $occupancy->check_out_date ?? $period?->stay_end_date?->toDateString();
+        $occupancy->save();
+
+        $this->recordRoomChange(
+            $occupancy,
+            $oldRoomId,
+            $oldBedId,
+            (int) $bed->room_id,
+            (int) $bed->id,
+            'select_bed'
+        );
+
+        // Sinh hóa đơn tháng đầu để sinh viên thanh toán trước khi ACTIVE
+        $billingService = app(RoomFeeBillingService::class);
+        $bill = $billingService->createInitialBill($occupancy);
+
+        return response()->json([
+            'message' => 'Đã chọn giường. Vui lòng thanh toán hóa đơn để hoàn tất lưu trú.',
+            'bill_id' => $bill?->id,
+        ]);
+    }
+
+    public function approveBed($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể kích hoạt lưu trú.'], 422);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        if (!$occupancy || !$occupancy->bed_id || $occupancy->status === 'CANCELLED') {
+            return response()->json(['message' => 'Sinh viên chưa chọn giường.'], 422);
+        }
+
+        $isOccupiedByAnotherStudent = Occupancy::query()
+            ->occupiedBeds()
+            ->where('bed_id', $occupancy->bed_id)
+            ->where('student_id', '!=', $registration->student_id)
+            ->exists();
+
+        if ($isOccupiedByAnotherStudent) {
+            return response()->json(['message' => 'Giường đã có sinh viên ở.'], 422);
+        }
+
+        $hasPaidInitialBill = RoomFeeBill::query()
+            ->where('occupancy_id', $occupancy->id)
+            ->where('status', 'paid')
+            ->exists();
+
+        if (! $hasPaidInitialBill) {
+            return response()->json([
+                'message' => 'Sinh viên chưa thanh toán hóa đơn đầu. Chưa thể kích hoạt lưu trú.',
+            ], 422);
+        }
+
+        $period = $registration->period;
+
+        $occupancy->status = 'ACTIVE';
+        $occupancy->bed_approval_status = 'approved';
+        $occupancy->check_in_date  = $occupancy->check_in_date  ?? $period?->stay_start_date?->toDateString() ?? now()->toDateString();
+        $occupancy->check_out_date = $occupancy->check_out_date ?? $period?->stay_end_date?->toDateString();
+        $occupancy->save();
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'active';
+            $bed->save();
+        }
+
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Lưu trú đã được kích hoạt',
+                'Chỗ ở của bạn tại KTX đã được kích hoạt. Chúc bạn có thời gian lưu trú thoải mái.',
+                'occupancy_activated',
+                $registration->id,
+            );
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function rejectBed($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể từ chối giường.'], 422);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        if (!$occupancy || !$occupancy->bed_id) {
+            return response()->json(['message' => 'Sinh viên chưa chọn giường.'], 422);
+        }
+
+        $bed = Bed::find($occupancy->bed_id);
+        if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+            $bed->status = 'active';
+            $bed->save();
+        }
+
+        // Bed rejected; student returns to the bed-selection step.
+        $occupancy->status = 'ROOM_CONFIRMED';
+        $occupancy->bed_approval_status = 'rejected';
+        $occupancy->check_in_date = null;
+        $occupancy->check_out_date = null;
+        $occupancy->save();
+
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Giường đã chọn bị từ chối',
+                'Giường bạn vừa chọn không được chấp nhận. Vui lòng đăng nhập hệ thống để chọn lại giường khác.',
+                'bed_rejected',
+                $registration->id,
+            );
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function requestCheckout(Request $request)
+    {
+        $request->validate([
+            'reason' => 'required|string|max:1000',
+            'expected_leave_date' => 'required|date|after_or_equal:today',
+        ]);
+
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ client — tránh gửi yêu cầu thôi ở thay sinh viên khác.
+        $account = $request->user();
+
+        if (!$account->student_id) {
+            return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
+        }
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])
+            ->where('student_id', $account->student_id)
+            ->where('status', 'approved')
+            ->latest('id')
+            ->first();
+
+        if (!$registration || !$registration->occupancy || !$registration->occupancy->bed_id) {
+            return response()->json(['message' => 'Sinh viên chưa có thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        // Ngày dự kiến rời phải trước ngày kết thúc lưu trú hiện tại (hạn hợp đồng gốc).
+        if ($occupancy->check_out_date
+            && !Carbon::parse($request->expected_leave_date)->lt(Carbon::parse($occupancy->check_out_date))) {
+            return response()->json([
+                'message' => 'Ngày rời phải trước ngày kết thúc lưu trú dự kiến (' . Carbon::parse($occupancy->check_out_date)->format('d/m/Y') . ').',
+            ], 422);
+        }
+
+        // Mỗi occupancy chỉ có 1 yêu cầu thôi ở đang chờ duyệt.
+        $hasPending = CheckoutRequest::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->exists();
+        if ($hasPending) {
+            return response()->json(['message' => 'Đã có yêu cầu thôi ở đang chờ duyệt.'], 422);
+        }
+
+        // Không cho gửi yêu cầu thôi ở khi đang có yêu cầu gia hạn lưu trú chờ duyệt.
+        $hasPendingExtension = OccupancyExtension::where('occupancy_id', $occupancy->id)
+            ->where('status', 'pending')
+            ->exists();
+        if ($hasPendingExtension) {
+            return response()->json(['message' => 'Bạn đang có yêu cầu gia hạn lưu trú đang chờ duyệt, vui lòng xử lý xong yêu cầu đó trước.'], 422);
+        }
+
+        // Student requested checkout; occupancy stays ACTIVE (kể cả check_out_date) cho tới khi admin confirm.
+        CheckoutRequest::create([
+            'occupancy_id' => $occupancy->id,
+            'student_id' => $occupancy->student_id ?? $account->student_id,
+            'reason' => $request->reason,
+            'expected_leave_date' => $request->expected_leave_date,
+            'status' => 'pending',
+        ]);
+
+        if ($registration->student) {
+            AdminNotification::create([
+                'title' => 'Yêu cầu thôi ở mới',
+                'content' => "Sinh viên {$registration->student->full_name} ({$registration->student->student_code}) vừa gửi yêu cầu thôi ở.",
+                'type' => 'checkout_requested',
+                'related_id' => $occupancy->id,
+                'created_at' => now(),
+            ]);
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])));
+    }
+
+    public function cancelCheckout(Request $request)
+    {
+        $account = $request->user();
+
+        if (!$account->student_id) {
+            return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
+        }
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])
+            ->where('student_id', $account->student_id)
+            ->where('status', 'approved')
+            ->latest('id')
+            ->first();
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Sinh viên chưa có thông tin lưu trú.'], 404);
+        }
+
+        $checkoutRequest = CheckoutRequest::where('occupancy_id', $registration->occupancy->id)
+            ->where('status', 'pending')
+            ->first();
+
+        if (!$checkoutRequest) {
+            return response()->json(['message' => 'Không có yêu cầu thôi ở nào đang chờ duyệt.'], 404);
+        }
+
+        $checkoutRequest->update(['status' => 'cancelled', 'processed_at' => now()]);
+
+        if ($registration->student) {
+            AdminNotification::create([
+                'title' => 'Sinh viên đã hủy yêu cầu thôi ở',
+                'content' => "Sinh viên {$registration->student->full_name} ({$registration->student->student_code}) đã hủy yêu cầu thôi ở trước đó.",
+                'type' => 'checkout_requested',
+                'related_id' => $registration->occupancy->id,
+                'created_at' => now(),
+            ]);
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])));
+    }
+
+    public function confirmCheckout($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Không tìm thấy thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        DB::transaction(function () use ($occupancy) {
+            $now          = Carbon::now();
+            $currentMonth = $now->month;
+            $currentYear  = $now->year;
+
+            // Hủy tất cả hóa đơn CHƯA thanh toán của các quý SAU tháng hiện tại.
+            // Hóa đơn quý hiện tại (bill.month <= currentMonth trong cùng năm) được giữ lại —
+            // sinh viên không hoàn tiền dù rời đi trước khi hết quý.
+            RoomFeeBill::where('occupancy_id', $occupancy->id)
+                ->where('status', 'unpaid')
+                ->where(function ($q) use ($currentMonth, $currentYear) {
+                    $q->where('year', '>', $currentYear)
+                      ->orWhere(function ($q2) use ($currentMonth, $currentYear) {
+                          $q2->where('year', $currentYear)->where('month', '>', $currentMonth);
+                      });
+                })
+                ->delete();
+
+            // Ngày rời thực tế = ngày sinh viên đã đề nghị trong yêu cầu thôi ở (nếu có),
+            // vì check_out_date của occupancy không còn bị ghi đè lúc gửi yêu cầu nữa.
+            $pendingCheckout = CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->first();
+
+            $occupancy->status         = 'COMPLETED';
+            $occupancy->check_out_date = $pendingCheckout?->expected_leave_date?->toDateString() ?? now()->toDateString();
+            $occupancy->save();
+
+            // Chốt yêu cầu thôi ở đang chờ (nếu có).
+            if ($pendingCheckout) {
+                $pendingCheckout->update(['status' => 'approved', 'processed_at' => now()]);
+            }
+
+            $bed = Bed::find($occupancy->bed_id);
+            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+                $bed->status = 'active';
+                $bed->save();
+            }
+        });
+
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đã hoàn tất thủ tục thôi ở',
+                'Yêu cầu thôi ở của bạn tại KTX đã được xác nhận hoàn tất.',
+                'checkout_completed',
+                $registration->id,
+            );
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
+    }
+
+    public function forceCheckout(Request $request, $id)
+    {
+        $request->validate([
+            'reason' => 'required|string|max:1000',
+        ]);
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
+        if (!$registration || !$registration->occupancy) {
+            return response()->json(['message' => 'Không tìm thấy thông tin lưu trú.'], 404);
+        }
+
+        $occupancy = $registration->occupancy;
+
+        DB::transaction(function () use ($occupancy, $request) {
+            $now          = Carbon::now();
+            $currentMonth = $now->month;
+            $currentYear  = $now->year;
+
+            // Hủy hóa đơn chưa trả của các quý sau (áp dụng chính sách không hoàn tiền)
+            RoomFeeBill::where('occupancy_id', $occupancy->id)
+                ->where('status', 'unpaid')
+                ->where(function ($q) use ($currentMonth, $currentYear) {
+                    $q->where('year', '>', $currentYear)
+                      ->orWhere(function ($q2) use ($currentMonth, $currentYear) {
+                          $q2->where('year', $currentYear)->where('month', '>', $currentMonth);
+                      });
+                })
+                ->delete();
+
+            $occupancy->status         = 'TERMINATED';
+            $occupancy->reason         = $request->reason;
+            $occupancy->check_out_date = now()->toDateString();
+            $occupancy->save();
+
+            CheckoutRequest::where('occupancy_id', $occupancy->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'approved', 'processed_at' => now()]);
+
+            $bed = Bed::find($occupancy->bed_id);
+            if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
+                $bed->status = 'active';
+                $bed->save();
+            }
+        });
+
+        if ($registration->student) {
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Buộc thôi ở tại KTX',
+                'Bạn đã bị buộc thôi ở tại KTX. Lý do: ' . $request->input('reason'),
+                'force_checkout',
+                $registration->id,
+            );
+        }
+
+        return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy'])));
     }
 
     public function reject($id, Request $request)
@@ -422,27 +1496,43 @@ class RegistrationController extends Controller
             'rejectionReason' => 'required|string|max:500',
         ]);
 
-        $registration = Registration::find($id);
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
 
         if (!$registration) {
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể từ chối.'], 422);
+        }
+
+        // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
+        // giữ sẵn — từ chối thẳng ở đây sẽ để lại DormReservation vẫn approved trong khi
+        // Registration đã rejected (mâu thuẫn dữ liệu, suất bị kẹt không giải phóng được cho
+        // waitlist). Tạm chặn, chờ nghiệp vụ hủy giữ chỗ + giải phóng suất + promotion riêng.
+        if ($registration->source_dorm_reservation_id && $registration->status === 'submitted') {
+            return response()->json([
+                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể từ chối qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
+            ], 422);
+        }
+
         $registration->status = 'rejected';
-        $registration->reason = $request->rejectionReason;
+        $registration->rejection_reason = $request->input('rejectionReason');
         $registration->save();
 
-        return response()->json([
-            'message' => 'Đã từ chối'
-        ]);
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
+
+        return response()->json($this->formatRegistration($registration));
     }
 
     public function show($id)
     {
         Log::info("RegistrationController.show($id) - fetching registration with id: $id");
-        
-        $registration = Registration::with(['student', 'student.account'])->find($id);
-        
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy'])->find($id);
+
         Log::info("RegistrationController.show($id) - found registration", [
             'id' => $registration?->id,
             'status' => $registration?->status,
@@ -453,58 +1543,34 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy'], 404);
         }
 
-        $formData = null;
-        if (!empty($registration->form_data)) {
-            $decoded = json_decode($registration->form_data, true);
-            if (is_array($decoded)) {
-                $formData = $decoded;
-            }
+        // Route dùng chung role:admin,student. Admin xem được mọi đơn; sinh viên chỉ được
+        // xem đúng đơn của chính mình — tránh xem đơn đăng ký của sinh viên khác qua ID.
+        $account = request()->user();
+        if ($account && $account->role === 'student' && (int) $registration->student_id !== (int) $account->student_id) {
+            return response()->json(['message' => 'Bạn không có quyền xem đơn đăng ký này.'], 403);
         }
 
-        return response()->json([
-            'id' => $registration->id,
-            'student_id' => $registration->student_id,
-            'formData' => $formData,
-            'email' => $registration->student?->email ?? $registration->student?->account?->email ?? '',
-            'status' => $registration->status,
-            'semester' => $registration->semester,
-            'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-            'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-            'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
-            'father_name' => $registration->father_name,
-            'father_phone' => $registration->father_phone,
-            'father_job' => $registration->father_job,
-            'mother_name' => $registration->mother_name,
-            'mother_phone' => $registration->mother_phone,
-            'mother_job' => $registration->mother_job,
-            'parent_address' => $registration->parent_address,
-            'stay_from_date' => $registration->stay_from_date,
-            'stay_to_date' => $registration->stay_to_date,
-            'commitment_confirm' => $registration->commitment_confirm,
-            'reason' => $registration->reason,
-            'assigned_room_id' => $registration->assigned_room_id,
-            'assigned_bed_id' => $registration->assigned_bed_id,
-            'note' => $registration->note,
-            'created_at' => $registration->created_at,
-            'student' => $registration->student,
-        ]);
+        return response()->json($this->formatRegistration($registration));
     }
 
-    public function getRegistrationHistory($email, $semester)
+    public function getRegistrationHistory(Request $request, $email, $semester = null)
     {
-        Log::info("RegistrationController.getRegistrationHistory - email: $email, semester: $semester");
-        
-        $account = Account::where('email', $email)->first();
+        // Danh tính lấy từ $request->user() (route đã bảo vệ auth:sanctum + role:student),
+        // không nhận email từ URL — {email} giữ nguyên trên route để không đổi URL, nhưng
+        // không còn dùng để tra cứu, tránh xem lịch sử đăng ký của sinh viên khác.
+        $account = $request->user();
 
-        if (!$account || !$account->student_id) {
+        if (!$account->student_id) {
             Log::info("RegistrationController.getRegistrationHistory - student not found");
             return response()->json([]);
         }
 
-        $registrations = Registration::with(['student', 'student.account'])
+        // Không truyền {semester} → trả toàn bộ lịch sử đăng ký (mọi kỳ) của sinh viên, mới nhất trước.
+        $registrations = Registration::with(['student', 'student.account', 'occupancy', 'occupancy.pendingCheckoutRequest'])
             ->where('student_id', $account->student_id)
-            ->where('semester', $semester)
-            ->orderBy('id', 'asc')
+            ->when($semester !== null, fn ($q) => $q->where('semester', $semester))
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->get();
 
         Log::info("RegistrationController.getRegistrationHistory - found registrations", [
@@ -513,41 +1579,378 @@ class RegistrationController extends Controller
         ]);
 
         return $registrations->map(function ($registration) {
-            $formData = null;
-            if (!empty($registration->form_data)) {
-                $decoded = json_decode($registration->form_data, true);
-                if (is_array($decoded)) {
-                    $formData = $decoded;
+            return $this->formatRegistration($registration);
+        });
+    }
+
+    public function patchAutoDecision($id, Request $request)
+    {
+        $request->validate([
+            'decision' => 'required|in:approve,reject,review',
+            'reason'   => 'nullable|string|max:1000',
+        ]);
+
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể đổi quyết định tự động.'], 422);
+        }
+
+        // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
+        // giữ sẵn — không cho đổi đề xuất rời khỏi 'approve' qua dropdown thường (reject/review
+        // đều để lại DormReservation approved dở dang, suất bị kẹt). Tạm chặn, chờ nghiệp vụ
+        // hủy giữ chỗ + giải phóng suất + promotion riêng.
+        if ($registration->source_dorm_reservation_id
+            && $registration->auto_decision === 'approve'
+            && $request->input('decision') !== 'approve'
+        ) {
+            return response()->json([
+                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể đổi đề xuất qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
+            ], 422);
+        }
+
+        if ($request->input('decision') === 'approve' && $registration->hasRejectedPriorityEvidence()) {
+            return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
+        }
+
+        if ($request->input('decision') === 'approve' && $registration->auto_decision !== 'approve') {
+            $proposedApprovedCount = Registration::where('registration_period_id', $registration->registration_period_id)
+                ->where('status', 'submitted')
+                ->where('auto_decision', 'approve')
+                ->count() + 1;
+
+            $capacity = app(DormCapacityService::class)
+                ->summarizeForRegistrationPeriod($registration->registration_period_id, $proposedApprovedCount);
+
+            if (($capacity['capacity_exceeded'] ?? false) === true) {
+                return response()->json([
+                    'message'  => 'Không thể chọn duyệt thêm vì đã đạt giới hạn sức chứa của đợt.',
+                    'capacity' => $capacity,
+                ], 422);
+            }
+        }
+
+        $registration->auto_decision = $request->input('decision');
+        $registration->auto_decision_reason = $request->input('reason');
+        $registration->save();
+
+        return response()->json($this->formatRegistration($registration));
+    }
+
+    public function confirmSingle($id)
+    {
+        $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])->find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status === 'cancelled') {
+            return response()->json(['message' => 'Đơn đã bị hủy, không thể xác nhận quyết định tự động.'], 422);
+        }
+
+        if (!in_array($registration->auto_decision, ['approve', 'reject'])) {
+            return response()->json(['message' => 'Đơn chưa có quyết định tự động (auto_decision phải là approve hoặc reject)'], 422);
+        }
+
+        $result = DB::transaction(function () use ($id) {
+            $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])
+                ->whereKey($id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$registration) {
+                return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+            }
+
+            RegistrationPeriod::whereKey($registration->registration_period_id)->lockForUpdate()->first();
+
+            if ($registration->auto_decision === 'approve' && $registration->hasRejectedPriorityEvidence()) {
+                return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
+            }
+
+            // Registration nguồn giữ chỗ (tân sinh viên) — suất đã được DormReservation
+            // approved giữ từ trước (xem DormCapacityService::approved_dorm_reservations),
+            // KHÔNG tính đây là 1 suất mới nên bỏ qua check capacity thường. Thay vào đó
+            // phải lock + xác nhận DormReservation nguồn vẫn còn approved rồi mới cho qua.
+            $sourceReservation = null;
+            if ($registration->auto_decision === 'approve' && $registration->source_dorm_reservation_id) {
+                $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                    return response()->json([
+                        'message' => 'Hồ sơ giữ chỗ nguồn không còn ở trạng thái approved (có thể đã bị thay đổi bởi thao tác khác). Vui lòng tải lại dữ liệu.',
+                    ], 422);
+                }
+            } elseif ($registration->auto_decision === 'approve' && $registration->status !== 'approved') {
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($registration->registration_period_id);
+                if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                    return response()->json([
+                        'message'  => 'Sức chứa KTX đã thay đổi. Hiện không còn suất để duyệt thêm đơn này. Vui lòng xếp hạng hoặc điều chỉnh lại.',
+                        'capacity' => $capacity,
+                    ], 422);
                 }
             }
 
+            $registration->status = $registration->auto_decision === 'approve' ? 'approved' : 'rejected';
+            if ($registration->status === 'approved') {
+                $registration->approved_at = now();
+            }
+            if ($registration->status === 'rejected' && $registration->auto_decision_reason) {
+                $registration->rejection_reason = $registration->auto_decision_reason;
+            }
+            $registration->save();
+
+            // Chính thức chuyển DormReservation nguồn sang converted NGAY LÚC NÀY (không
+            // phải lúc tạo Registration) — suất chuyển từ counter approved_dorm_reservations
+            // sang approved_unassigned_registrations, tổng available_approval_slots không đổi.
+            if ($sourceReservation) {
+                $sourceReservation->update([
+                    'status'                    => 'converted',
+                    'converted_registration_id' => $registration->id,
+                ]);
+            }
+
+            return $registration;
+        });
+
+        if ($result instanceof JsonResponse) {
+            return $result;
+        }
+
+        $registration = $result;
+
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
+
+        return response()->json($this->formatRegistration($registration));
+    }
+
+    public function confirmBatch($periodId)
+    {
+        // Lock order thống nhất: RegistrationPeriod trước, rồi tới tập Registration (theo id
+        // tăng dần) — toàn bộ batch trong 1 transaction, không save() rời rạc ngoài transaction.
+        try {
+        $result = DB::transaction(function () use ($periodId) {
+            $period = RegistrationPeriod::where('id', $periodId)->lockForUpdate()->first();
+
+            if (!$period) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đợt đăng ký']];
+            }
+
+            if ($period->channel !== 'main') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Chỉ áp dụng cho đợt kênh chính (main)']];
+            }
+
+            if ($period->status !== 'processing') {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt phải đang ở trạng thái processing']];
+            }
+
+            // Lock đúng tập registration còn 'submitted' TẠI THỜI ĐIỂM lock (1 query, không
+            // tách bước) — registration nào đã bị xử lý/hủy bởi request khác trước khi lock
+            // được cấp sẽ tự động không nằm trong tập này, không có chuyện "xác nhận âm thầm"
+            // một registration đã cancelled.
+            $registrations = Registration::with('student')
+                ->where('registration_period_id', $periodId)
+                ->whereIn('status', ['submitted'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            // Lock luôn tập DormReservation nguồn (nếu có Registration nào là nguồn giữ chỗ
+            // tân sinh viên) trong CÙNG transaction, theo đúng thứ tự id tăng dần — nhất
+            // quán lock order chung của hệ thống (RegistrationPeriod trước, rồi tới
+            // DormReservation/Registration theo id).
+            $sourceReservationIds = $registrations->pluck('source_dorm_reservation_id')->filter()->unique()->sort()->values();
+            $sourceReservations = $sourceReservationIds->isEmpty()
+                ? collect()
+                : DormReservation::whereIn('id', $sourceReservationIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+
+            // Minh chứng ưu tiên bị từ chối — không được nằm trong đề xuất duyệt, dù
+            // auto_decision đang là 'approve' (1 query, không N+1 theo từng registration).
+            $rejectedEvidenceRegIds = StudentPriority::whereIn('registration_id', $registrations->pluck('id'))
+                ->where('status', 'rejected')
+                ->distinct()
+                ->pluck('registration_id');
+
+            // Registration nguồn giữ chỗ KHÔNG tính vào approveProposalCount — suất của
+            // chúng đã được DormReservation approved giữ từ trước (đếm ở
+            // approved_dorm_reservations), không phải suất mới cần capacity thường cấp.
+            $approveProposalCount = $registrations
+                ->where('auto_decision', 'approve')
+                ->reject(fn ($r) => $rejectedEvidenceRegIds->contains($r->id))
+                ->reject(fn ($r) => $r->source_dorm_reservation_id !== null)
+                ->count();
+            if ($approveProposalCount > 0) {
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period, $approveProposalCount);
+                if (($capacity['capacity_exceeded'] ?? false) === true) {
+                    return [
+                        'ok'      => false,
+                        'status'  => 422,
+                        'payload' => [
+                            'message'  => "Sức chứa KTX đã thay đổi. Hiện chỉ có thể duyệt {$capacity['available_approval_slots']} hồ sơ nhưng đang chọn {$approveProposalCount} hồ sơ. Vui lòng điều chỉnh lại.",
+                            'capacity' => $capacity,
+                        ],
+                    ];
+                }
+            }
+
+            $confirmed = 0;
+            $skippedReview = 0;
+            $skippedNull = 0;
+            $skippedRejectedEvidence = 0;
+            $toNotify = [];
+
+            foreach ($registrations as $reg) {
+                if ($rejectedEvidenceRegIds->contains($reg->id)) {
+                    // Minh chứng ưu tiên không hợp lệ — không được confirm batch/single dù
+                    // auto_decision đề xuất gì. Ép thẳng sang rejected, không giữ nguyên
+                    // submitted (tránh còn xuất hiện ở "Chờ xác nhận" cho đợt đã đóng).
+                    $reg->status = 'rejected';
+                    $reg->rejection_reason = 'Minh chứng ưu tiên không hợp lệ.';
+                    $reg->auto_decision = 'reject';
+                    $reg->auto_decision_reason = 'Minh chứng ưu tiên không hợp lệ.';
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $skippedRejectedEvidence++;
+                    continue;
+                }
+
+                if ($reg->auto_decision === 'approve') {
+                    $reg->status = 'approved';
+                    $reg->approved_at = now();
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $confirmed++;
+
+                    // Registration nguồn giữ chỗ — chuyển luôn DormReservation nguồn sang
+                    // converted trong CÙNG transaction. DormReservation không còn approved
+                    // (bất thường, ví dụ bị admin đổi tay ở nơi khác giữa lúc chờ xác nhận)
+                    // thì throw để rollback TOÀN BỘ batch — không để 1 phần Registration đã
+                    // approved còn phần DormReservation dở dang.
+                    if ($reg->source_dorm_reservation_id) {
+                        $sourceReservation = $sourceReservations->get($reg->source_dorm_reservation_id);
+                        if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                            throw new RuntimeException("CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:{$reg->id}");
+                        }
+                        $sourceReservation->update([
+                            'status' => 'converted',
+                            'converted_registration_id' => $reg->id,
+                        ]);
+                    }
+                } elseif ($reg->auto_decision === 'reject') {
+                    $reg->status = 'rejected';
+                    if ($reg->auto_decision_reason) {
+                        $reg->rejection_reason = $reg->auto_decision_reason;
+                    }
+                    $reg->save();
+                    $toNotify[] = $reg;
+                    $confirmed++;
+                } elseif ($reg->auto_decision === 'review') {
+                    $skippedReview++;
+                } else {
+                    $skippedNull++;
+                }
+            }
+
+            $period->status = 'closed';
+            $period->save();
+
             return [
-                'id' => $registration->id,
-                'student_id' => $registration->student_id,
-                'email' => $registration->student?->email ?? '',
-                'formData' => $formData,
-                'status' => $registration->status,
-                'semester' => $registration->semester,
-                'cccd_front_url' => StorageHelper::getPublicUrl($registration->cccd_front_url),
-                'cccd_back_url' => StorageHelper::getPublicUrl($registration->cccd_back_url),
-                'avatarUrl' => StorageHelper::getPublicUrl($registration->student?->avatar),
-                'father_name' => $registration->father_name,
-                'father_phone' => $registration->father_phone,
-                'father_job' => $registration->father_job,
-                'mother_name' => $registration->mother_name,
-                'mother_phone' => $registration->mother_phone,
-                'mother_job' => $registration->mother_job,
-                'parent_address' => $registration->parent_address,
-                'stay_from_date' => $registration->stay_from_date,
-                'stay_to_date' => $registration->stay_to_date,
-                'commitment_confirm' => $registration->commitment_confirm,
-                'reason' => $registration->reason,
-                'assigned_room_id' => $registration->assigned_room_id,
-                'assigned_bed_id' => $registration->assigned_bed_id,
-                'note' => $registration->note,
-                'created_at' => $registration->created_at,
-                'student' => $registration->student,
+                'ok'                       => true,
+                'confirmed'                => $confirmed,
+                'skippedReview'            => $skippedReview,
+                'skippedNull'              => $skippedNull,
+                'skippedRejectedEvidence'  => $skippedRejectedEvidence,
+                'toNotify'                 => $toNotify,
             ];
         });
+        } catch (RuntimeException $exception) {
+            if (str_starts_with($exception->getMessage(), 'CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:')) {
+                $failedRegId = substr($exception->getMessage(), strlen('CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:'));
+
+                return response()->json([
+                    'message' => "Hồ sơ giữ chỗ nguồn của đơn #{$failedRegId} không còn ở trạng thái approved. Toàn bộ thao tác xác nhận hàng loạt đã được hủy, vui lòng tải lại dữ liệu.",
+                ], 422);
+            }
+
+            throw $exception;
+        }
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
+        }
+
+        // Gửi thông báo SAU khi transaction đã commit (vẫn queue:true như hành vi cũ).
+        foreach ($result['toNotify'] as $reg) {
+            if ($reg->student) {
+                $this->notifyRegistrationDecision($reg, queue: true);
+            }
+        }
+
+        return response()->json([
+            'confirmed'                  => $result['confirmed'],
+            'skipped_review'             => $result['skippedReview'],
+            'skipped_null'               => $result['skippedNull'],
+            'skipped_rejected_evidence'  => $result['skippedRejectedEvidence'],
+        ]);
+    }
+
+    /**
+     * Kiểm tra nhóm đối tượng của đợt đăng ký, thuần theo channel — không còn đọc
+     * allow_admission_candidates/requires_student_code (2 cờ này giờ luôn true, chỉ còn
+     * ý nghĩa cho luồng giữ chỗ tân sinh viên ở nơi khác, xem DormReservationController).
+     *
+     * Đợt chính ('main'): chỉ tân sinh viên (qua giữ chỗ) + sinh viên năm nhất đã có MSSV.
+     * Sinh viên năm 2 trở lên ở tiếp phải qua Gia hạn (OccupancyExtensionController —
+     * hoàn toàn tách biệt, không liên quan hàm này).
+     * Quanh năm ('rolling'): mọi sinh viên đang học, vẫn qua đủ các check khác ở
+     * eligibility() (tốt nghiệp/thôi học/blacklist/quá năm).
+     *
+     * @return array{reason_code: string, message: string}|null
+     */
+    private function registrationPeriodTargetError(RegistrationPeriod $period, Student $student): ?array
+    {
+        if ($period->channel !== 'main') {
+            return null;
+        }
+
+        if ((int) ($student->current_year ?? 0) !== 1) {
+            return [
+                'reason_code' => 'not_first_year',
+                'message'     => 'Đợt chính chỉ dành cho tân sinh viên và sinh viên năm nhất đã có MSSV.',
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Nguồn chân lý cho "trạng thái lưu trú" của 1 registration — dùng bởi index()
+     * (trang Quản lý lưu trú) và tái sử dụng ở nơi khác (vd. StudentFaceSearchController)
+     * để tránh lệch logic khi xác định ai đang được tính là "có lưu trú".
+     */
+    public function mapOccupancyStatus(?Occupancy $occupancy): ?string
+    {
+        if (! $occupancy) {
+            return null;
+        }
+
+        if ($occupancy->pendingCheckoutRequest) {
+            return 'checkout_requested';
+        }
+
+        return match ($occupancy->status) {
+            'COMPLETED' => $occupancy->reason === 'FORCE_EVICTED' ? 'forced_checkout' : 'checked_out',
+            'TERMINATED' => 'forced_checkout',
+            default     => $occupancy->status,
+        };
     }
 }

@@ -1,0 +1,86 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+
+class RegistrationPeriod extends Model
+{
+    protected $table = 'registration_periods';
+
+    protected $fillable = [
+        'name',
+        'start_date',
+        'end_date',
+        'stay_start_date',
+        'stay_end_date',
+        'status',
+        'channel',
+        'school_year',
+        'semester',
+        'bed_selection_days',
+        'processing_days',
+        'initial_payment_due_days',
+        'round_number',
+        'allow_admission_candidates',
+        'requires_student_code',
+    ];
+
+    protected $casts = [
+        'start_date'      => 'date:Y-m-d',
+        'end_date'        => 'date:Y-m-d',
+        'stay_start_date' => 'date:Y-m-d',
+        'stay_end_date'   => 'date:Y-m-d',
+        'bed_selection_days'         => 'integer',
+        'processing_days'            => 'integer',
+        'initial_payment_due_days'   => 'integer',
+        'round_number'               => 'integer',
+        'allow_admission_candidates' => 'boolean',
+        'requires_student_code'      => 'boolean',
+    ];
+
+    public function registrations(): HasMany
+    {
+        return $this->hasMany(Registration::class);
+    }
+
+    public function waitlist(): HasMany
+    {
+        return $this->hasMany(Waitlist::class);
+    }
+
+    public function dormReservations(): HasMany
+    {
+        return $this->hasMany(DormReservation::class);
+    }
+
+    /**
+     * Ngày kết thúc lưu trú thật của lứa sinh viên hiện tại — nguồn duy nhất để xác định
+     * occupancy nào đủ điều kiện gia hạn (KHÔNG dùng OccupancyPeriod::end_date, vì field đó
+     * chỉ là hạn chót nhận đơn, không nhất thiết trùng ngày dọn ra thật).
+     */
+    public static function currentStayEndDate(): ?string
+    {
+        $stayEndDate = static::orderByDesc('stay_end_date')->value('stay_end_date');
+
+        return $stayEndDate ? \Carbon\Carbon::parse($stayEndDate)->toDateString() : null;
+    }
+
+    /**
+     * Hạn cuối xác nhận nhập học cho hồ sơ giữ chỗ tân sinh viên — LUÔN là 17:00 của
+     * end_date, không phải 23:59:59/00:00. Đây là mốc đóng đợt THẬT (không cần admin xác
+     * nhận tay) — quá mốc này, verify()/store()/bulkEnroll() tự chặn ngay lập tức, và
+     * command registration-periods:auto-close-admission (chạy mỗi 5 phút) sẽ tự chuyển
+     * hồ sơ chưa converted sang expired + đóng đợt.
+     */
+    public function admissionDeadline(): ?\Carbon\Carbon
+    {
+        if (!$this->end_date) {
+            return null;
+        }
+
+        return \Carbon\Carbon::parse($this->end_date)->setTime(17, 0, 0);
+    }
+}

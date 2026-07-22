@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use App\Models\Floor;
 
 class Room extends Model
 {
@@ -13,12 +14,17 @@ class Room extends Model
     public $timestamps = false;
 
     protected $fillable = [
-        'building_code',
+        'floor_id',
         'room_number',
         'capacity',
-        'price_per_quarter',
+        'price_per_month',
         'status',
     ];
+
+    public function floor(): BelongsTo
+    {
+        return $this->belongsTo(Floor::class, 'floor_id');
+    }
 
     public function beds(): HasMany
     {

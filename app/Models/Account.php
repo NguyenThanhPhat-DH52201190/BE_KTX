@@ -13,8 +13,7 @@ class Account extends Model
 
     protected $fillable = [
         'student_id',
-        'student_code',
-        'email',
+        'username',
         'password',
         'role',
         'is_active',
@@ -27,7 +26,9 @@ class Account extends Model
         'otp_code',
     ];
 
-    
+    protected $casts = [
+        'is_active' => 'boolean',
+    ];
 
     public function student(): BelongsTo
     {
