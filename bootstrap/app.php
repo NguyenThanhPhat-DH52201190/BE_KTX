@@ -19,7 +19,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
 
         // thêm dòng này
-        $middleware->append(HandleCors::class);
+        $middleware->prepend(HandleCors::class);
 
         $middleware->api(append: [
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
