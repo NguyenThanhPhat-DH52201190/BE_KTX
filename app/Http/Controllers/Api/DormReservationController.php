@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\StorageHelper;
 use App\Http\Controllers\Controller;
 use App\Models\AdmissionCandidate;
 use App\Models\Bed;
@@ -1378,8 +1379,25 @@ class DormReservationController extends Controller
             ->where('reservation_code', $request->input('reservation_code'))
             ->firstOrFail();
 
-        $path = $request->file('file')->store('reservation-documents', 'public');
-        $url  = '/api/storage/' . $path;
+        $file = $request->file('file');
+        $dir  = 'reservation-documents';
+
+        if (StorageHelper::isRailwayWithVolume()) {
+            $filename = $request->input('type') . '_' . time() . '_' . Str::uuid() . '.' . $file->getClientOriginalExtension();
+            $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+            $fullDir = $volumePath . '/' . $dir;
+
+            if (!file_exists($fullDir)) {
+                mkdir($fullDir, 0755, true);
+            }
+
+            $file->move($fullDir, $filename);
+            $path = $dir . '/' . $filename;
+        } else {
+            $path = $file->store($dir, 'public');
+        }
+
+        $url = '/api/storage/' . $path;
 
         $column = match ($request->input('type')) {
             'avatar'     => 'avatar_url',

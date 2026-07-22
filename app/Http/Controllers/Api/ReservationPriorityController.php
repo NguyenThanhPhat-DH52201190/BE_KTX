@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\StorageHelper;
 use App\Http\Controllers\Controller;
 use App\Models\DormReservation;
 use App\Models\PriorityCriteria;
@@ -127,9 +128,25 @@ class ReservationPriorityController extends Controller
             return response()->json(['message' => 'Không thể upload minh chứng cho tiêu chí đã được xử lý.'], 422);
         }
 
-        $file     = $request->file('file');
-        $path     = $file->store('reservation-evidences', 'public');
-        $fileUrl  = '/api/storage/' . $path;
+        $file = $request->file('file');
+        $dir  = 'reservation-evidences';
+
+        if (StorageHelper::isRailwayWithVolume()) {
+            $filename = 'evidence_' . $id . '_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
+            $fullDir = $volumePath . '/' . $dir;
+
+            if (!file_exists($fullDir)) {
+                mkdir($fullDir, 0755, true);
+            }
+
+            $file->move($fullDir, $filename);
+            $path = $dir . '/' . $filename;
+        } else {
+            $path = $file->store($dir, 'public');
+        }
+
+        $fileUrl = '/api/storage/' . $path;
 
         $evidence = ReservationPriorityEvidence::create([
             'reservation_priority_id' => $id,
