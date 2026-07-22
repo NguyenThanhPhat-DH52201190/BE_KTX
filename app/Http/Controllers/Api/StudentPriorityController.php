@@ -117,6 +117,7 @@ class StudentPriorityController extends Controller
             'top_priority_tier'    => $registration?->top_priority_tier,
             'total_priority_score' => $registration?->total_priority_score,
             'registration_status'  => $registration?->status,
+            'rejection_reason'     => $registration?->rejection_reason,
         ]);
     }
 }

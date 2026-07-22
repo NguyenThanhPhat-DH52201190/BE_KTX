@@ -48,6 +48,7 @@ class DormReservation extends Model
         'admin_note',
         'submitted_at',
         'approved_at',
+        'approve_proposed_at',
         'expires_at',
         'converted_registration_id',
         'top_priority_tier',
@@ -55,10 +56,11 @@ class DormReservation extends Model
     ];
 
     protected $casts = [
-        'submitted_at' => 'datetime',
-        'approved_at'  => 'datetime',
-        'expires_at'   => 'datetime',
-        'cancelled_at' => 'datetime',
+        'submitted_at'         => 'datetime',
+        'approved_at'          => 'datetime',
+        'approve_proposed_at'  => 'datetime',
+        'expires_at'           => 'datetime',
+        'cancelled_at'         => 'datetime',
     ];
 
     public function candidate(): BelongsTo

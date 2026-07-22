@@ -650,7 +650,11 @@ class DormReservationController extends Controller
         // đúng thứ tự ưu tiên pending > verified > rejected như transform bên dưới, để filter
         // và badge luôn khớp nhau. Các cột priority_*_count là subquery scalar từ withCount ở
         // trên nên HAVING dùng được mà không cần GROUP BY.
+        // Chỉ áp dụng cho hồ sơ còn submitted/waitlisted — hồ sơ đã rejected/approved/... thì
+        // tình trạng minh chứng không còn ý nghĩa (không còn ai xử lý được nữa), khớp với badge
+        // ở FE cũng chỉ hiện cho 2 trạng thái này.
         if ($priorityEvidenceStatus = $request->input('priority_evidence_status')) {
+            $query->whereIn('status', ['submitted', 'waitlisted']);
             match ($priorityEvidenceStatus) {
                 'pending' => $query->having('priority_pending_count', '>', 0),
                 'verified' => $query->having('priority_pending_count', 0)
@@ -796,24 +800,19 @@ class DormReservationController extends Controller
                 ];
             }
 
+            // CHỈ đề xuất duyệt — KHÔNG đổi status ngay, để hồ sơ vẫn nằm trong tập
+            // submitted/waitlisted và được PriorityRankingService xếp hạng công bằng cùng
+            // các hồ sơ khác (tránh chiếm suất trước hồ sơ ưu tiên cao hơn nộp sau). Status
+            // chỉ thực sự chuyển approved/waitlisted khi chạy "Xếp hạng" cho đợt
+            // (xem rankReservations()).
             $reservation->update([
-                'status'      => 'approved',
-                'approved_at' => now(),
-                'admin_note'  => $adminNoteInput ?? $reservation->admin_note,
+                'approve_proposed_at' => now(),
+                'admin_note'          => $adminNoteInput ?? $reservation->admin_note,
             ]);
-
-            $converted = null;
-            // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
-            // Registration, không cần đợi import lại Excel. convert() tự mở transaction lồng
-            // (savepoint) — giữ nguyên logic hiện có, không đổi hành vi.
-            if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
-                $converted = app(DormReservationConversionService::class)->convert($reservation);
-            }
 
             return [
                 'ok'          => true,
                 'reservation' => $reservation->fresh(['candidate', 'period']),
-                'converted'   => $converted,
             ];
         });
 
@@ -821,15 +820,10 @@ class DormReservationController extends Controller
             return response()->json($result['payload'], $result['status']);
         }
 
-        // Gửi thông báo SAU khi transaction đã commit — không giữ lock trong lúc gửi mail.
-        $reservation = $result['reservation'];
-        $this->notifyCandidate(
-            $reservation->candidate,
-            'Hồ sơ giữ chỗ KTX đã được duyệt',
-            $this->approvedNotificationContent($reservation),
-        );
-
-        return response()->json(['message' => 'Đã duyệt hồ sơ giữ chỗ.', 'reservation' => $reservation]);
+        return response()->json([
+            'message'     => 'Đã đề xuất duyệt hồ sơ này. Hồ sơ sẽ được duyệt chính thức khi chạy Xếp hạng cho đợt.',
+            'reservation' => $result['reservation'],
+        ]);
     }
 
     public function reject(Request $request, int $id): JsonResponse
@@ -1123,7 +1117,7 @@ class DormReservationController extends Controller
             $toNotifyWaitlist  = [];
 
             foreach ($rankResult['approved'] as $reservation) {
-                $reservation->update(['status' => 'approved', 'approved_at' => now()]);
+                $reservation->update(['status' => 'approved', 'approved_at' => now(), 'approve_proposed_at' => null]);
                 $toNotifyApproved[] = $reservation;
 
                 // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
@@ -1134,7 +1128,7 @@ class DormReservationController extends Controller
                 }
             }
             foreach ($rankResult['waitlist'] as $reservation) {
-                $reservation->update(['status' => 'waitlisted']);
+                $reservation->update(['status' => 'waitlisted', 'approve_proposed_at' => null]);
                 $toNotifyWaitlist[] = $reservation;
             }
 

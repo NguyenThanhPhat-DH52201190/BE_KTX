@@ -523,6 +523,11 @@ class RegistrationController extends Controller
             $query->whereHas('occupancy', fn ($q) => $q->where('room_id', $roomId));
         }
 
+        // KHÔNG dedupe ở đây (đã thử rồi bỏ) — tab "Lịch sử" ở FE (AdminRegistrationsPage)
+        // group các lần nộp trùng email từ CHÍNH mảng requests này (client-side, không gọi
+        // API riêng), nên nếu lọc bớt ở đây thì lịch sử cũng mất luôn lần nộp cũ. Việc dedupe
+        // hiển thị (chỉ hiện lần nộp mới nhất ở danh sách chính) được làm ở FE thay vì đây,
+        // xem allMainItems/allRollingItems trong AdminRegistrationsPage.tsx.
         $registrations = $query->get();
 
         return $registrations->map(function ($registration) {
@@ -1899,34 +1904,28 @@ class RegistrationController extends Controller
     }
 
     /**
-     * Kiểm tra sinh viên đã có MSSV theo nhóm đối tượng của đợt đăng ký.
-     * allow_admission_candidates: tân sinh viên.
-     * requires_student_code: sinh viên đang học có MSSV, năm 1-4.
+     * Kiểm tra nhóm đối tượng của đợt đăng ký, thuần theo channel — không còn đọc
+     * allow_admission_candidates/requires_student_code (2 cờ này giờ luôn true, chỉ còn
+     * ý nghĩa cho luồng giữ chỗ tân sinh viên ở nơi khác, xem DormReservationController).
+     *
+     * Đợt chính ('main'): chỉ tân sinh viên (qua giữ chỗ) + sinh viên năm nhất đã có MSSV.
+     * Sinh viên năm 2 trở lên ở tiếp phải qua Gia hạn (OccupancyExtensionController —
+     * hoàn toàn tách biệt, không liên quan hàm này).
+     * Quanh năm ('rolling'): mọi sinh viên đang học, vẫn qua đủ các check khác ở
+     * eligibility() (tốt nghiệp/thôi học/blacklist/quá năm).
      *
      * @return array{reason_code: string, message: string}|null
      */
     private function registrationPeriodTargetError(RegistrationPeriod $period, Student $student): ?array
     {
-        $allowFirstYear = (bool) $period->allow_admission_candidates;
-        $allowStudyingStudents = (bool) $period->requires_student_code;
-
-        if (! $allowFirstYear && ! $allowStudyingStudents) {
+        if ($period->channel !== 'main') {
             return null;
         }
 
-        $currentYear = (int) ($student->current_year ?? 0);
-
-        if ($allowFirstYear && ! $allowStudyingStudents && $currentYear !== 1) {
+        if ((int) ($student->current_year ?? 0) !== 1) {
             return [
                 'reason_code' => 'not_first_year',
-                'message'     => 'Đợt đăng ký này chỉ dành cho tân sinh viên.',
-            ];
-        }
-
-        if ($allowStudyingStudents && ($currentYear < 1 || $currentYear > 4)) {
-            return [
-                'reason_code' => 'not_studying_year_1_4',
-                'message'     => 'Đợt đăng ký này chỉ dành cho sinh viên đang học từ năm 1 đến năm 4.',
+                'message'     => 'Đợt chính chỉ dành cho tân sinh viên và sinh viên năm nhất đã có MSSV.',
             ];
         }
 
