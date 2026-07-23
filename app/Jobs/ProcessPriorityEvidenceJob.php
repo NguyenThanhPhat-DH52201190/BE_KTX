@@ -14,10 +14,11 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 /**
- * Lưu ảnh minh chứng diện ưu tiên nền, sau khi request đăng ký đã trả response —
- * controller chỉ di chuyển file vào disk 'local' (staging, luôn nhanh vì không phải
- * Railway volume) trước khi dispatch job này, để sinh viên không phải chờ ghi file
- * vào vị trí lưu trữ cuối (có thể chậm nếu là network volume).
+ * Lưu ảnh minh chứng diện ưu tiên vào vị trí lưu trữ cuối (Railway volume hoặc disk
+ * 'public'). Được gọi qua dispatchSync() ngay trong request nộp đơn — KHÔNG chạy qua
+ * queue worker, vì cần ghi vào Railway volume mà chỉ service web mới mount được.
+ * Implements ShouldQueue để vẫn dùng chung được các cơ chế retry/backoff/failed() của
+ * job, dù thực thi đồng bộ.
  */
 class ProcessPriorityEvidenceJob implements ShouldQueue
 {
