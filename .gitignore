@@ -24,7 +24,6 @@ Homestead.json
 Homestead.yaml
 Thumbs.db
 
-!/public/storage
 !/storage/app/public/registrations/
 !/storage/app/public/registrations/cccd/
 !/storage/app/public/registrations/cccd/*
