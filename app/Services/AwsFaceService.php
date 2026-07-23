@@ -2,9 +2,9 @@
 
 namespace App\Services;
 
-use App\Helpers\StorageHelper;
 use Aws\Rekognition\Exception\RekognitionException;
 use Aws\Rekognition\RekognitionClient;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class AwsFaceService
@@ -44,12 +44,26 @@ class AwsFaceService
 
     public function indexFace(string $avatarRelativePath, int $studentId): ?string
     {
-        $absolutePath = StorageHelper::getFullPath($avatarRelativePath);
+        // Tải ảnh qua route /api/storage/{path} bằng HTTP thay vì đọc file cục bộ — job
+        // này chạy trên service worker riêng (queue:work), không mount Railway volume như
+        // service web, nên đọc file trực tiếp trên đĩa sẽ luôn "not found". Dùng thẳng route
+        // API thay vì StorageHelper::getPublicUrl() vì hàm đó tự đoán disk theo môi trường
+        // của chính process gọi (sai với worker) — StorageController::serveImage() tự xử lý
+        // đúng disk ở phía server bất kể request tới từ đâu.
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($avatarRelativePath, '/'));
+        $url = url('/api/storage/' . $cleanPath);
+        $imageBytes = null;
 
-        if (! $absolutePath || ! file_exists($absolutePath)) {
+        $response = Http::timeout(10)->get($url);
+        if ($response->successful()) {
+            $imageBytes = $response->body();
+        }
+
+        if (! $imageBytes) {
             Log::warning('AwsFaceService: avatar file not found for indexing', [
                 'student_id' => $studentId,
                 'path' => $avatarRelativePath,
+                'url' => $url,
             ]);
 
             return null;
@@ -58,7 +72,7 @@ class AwsFaceService
         try {
             $result = $this->client->indexFaces([
                 'CollectionId' => $this->collectionId,
-                'Image' => ['Bytes' => file_get_contents($absolutePath)],
+                'Image' => ['Bytes' => $imageBytes],
                 'ExternalImageId' => (string) $studentId,
                 'MaxFaces' => 1,
                 'QualityFilter' => 'AUTO',

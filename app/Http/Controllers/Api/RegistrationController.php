@@ -792,9 +792,11 @@ class RegistrationController extends Controller
         }
 
         // Minh chứng ưu tiên (tối đa 6 ảnh / tiêu chí): chỉ chuyển file vào disk 'local'
-        // (staging, luôn ghi nhanh vì không phải Railway volume) rồi đẩy việc lưu vào vị
-        // trí lưu trữ cuối + tạo bản ghi evidence ra queue, để sinh viên không phải chờ
-        // bước này mới thấy đơn "đã gửi thành công".
+        // (staging, luôn ghi nhanh) rồi xử lý lưu vào vị trí lưu trữ cuối + tạo bản ghi
+        // evidence NGAY (dispatchSync) — job này không dùng queue worker vì cần ghi vào
+        // Railway volume, chỉ service web (nơi có mount volume) mới truy cập được. Việc
+        // này nhẹ (1-6 ảnh) nên chạy đồng bộ không đáng kể, không giống các job khác
+        // (gửi mail hàng loạt, đồng bộ Rekognition) chạy qua queue worker riêng.
         if (!empty($criteriaIds)) {
             $registrationId = $result['registration']->id;
             foreach ($criteriaIds as $criteriaId) {
@@ -817,7 +819,25 @@ class RegistrationController extends Controller
                     $stagedFilenames[] = $stagedName;
                 }
 
-                ProcessPriorityEvidenceJob::dispatch($registrationId, $criteriaId, $stagingDir, $stagedFilenames);
+                // Đơn đăng ký đã tạo thành công (transaction ở trên đã commit) — lỗi lưu
+                // minh chứng ở bước này (vd. volume tạm gián đoạn) không được làm hỏng
+                // response, chỉ log + báo sinh viên vào lại trang để tải lại minh chứng.
+                try {
+                    ProcessPriorityEvidenceJob::dispatchSync($registrationId, $criteriaId, $stagingDir, $stagedFilenames);
+                } catch (\Throwable $exception) {
+                    Log::error('Lưu minh chứng ưu tiên thất bại ngay sau khi nộp đơn', [
+                        'registration_id' => $registrationId,
+                        'priority_criteria_id' => $criteriaId,
+                        'error' => $exception->getMessage(),
+                    ]);
+                    $this->notifier()->notifyStudent(
+                        $result['student'],
+                        'Lỗi tải ảnh minh chứng ưu tiên',
+                        'Hệ thống chưa thể lưu một hoặc nhiều ảnh minh chứng cho diện ưu tiên bạn đã đăng ký. Vui lòng vào lại trang đăng ký nội trú để kiểm tra và tải lại ảnh minh chứng.',
+                        'priority_evidence_failed',
+                        $registrationId
+                    );
+                }
             }
         }
 
