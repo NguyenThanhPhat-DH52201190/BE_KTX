@@ -16,6 +16,16 @@ return new class extends Migration
             return;
         }
 
+        // Migration này chỉ backfill dữ liệu lịch sử + thêm FK cho DB MySQL thật đã tồn tại
+        // sẵn student_id/room_id trên violations — không có ý nghĩa gì trên DB test SQLite
+        // tạo mới hoàn toàn (bảng luôn rỗng). Dùng raw SQL kiểu MySQL (UPDATE...INNER JOIN,
+        // information_schema.KEY_COLUMN_USAGE) không chạy được trên SQLite, khiến toàn bộ
+        // test suite fail ngay ở bước migrate (báo cáo 28/07). Bỏ qua an toàn trên non-MySQL,
+        // không ảnh hưởng gì tới hành vi migration thật trên MySQL.
+        if (DB::connection()->getDriverName() !== 'mysql') {
+            return;
+        }
+
         $hasStudentId = Schema::hasColumn('violations', 'student_id');
         $hasRoomId = Schema::hasColumn('violations', 'room_id');
         $hasOccupancyId = Schema::hasColumn('violations', 'occupancy_id');
@@ -65,6 +75,10 @@ return new class extends Migration
     public function down(): void
     {
         if (!Schema::hasTable('violations')) {
+            return;
+        }
+
+        if (DB::connection()->getDriverName() !== 'mysql') {
             return;
         }
 

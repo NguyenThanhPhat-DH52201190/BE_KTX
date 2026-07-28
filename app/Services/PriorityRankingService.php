@@ -121,24 +121,38 @@ class PriorityRankingService
     }
 
     /**
-     * Recalculate all submitted/waitlisted reservations in a period.
+     * Recalculate submitted reservations that have not received a proposal yet.
      */
     public function recalculateReservationPeriod(int $periodId): void
     {
         DormReservation::where('registration_period_id', $periodId)
-            ->whereIn('status', ['submitted', 'waitlisted'])
+            ->where('status', 'submitted')
+            ->whereNull('auto_decision')
             ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->get()
             ->each(fn (DormReservation $r) => $this->calculateForReservation($r));
     }
 
     /**
-     * Rank submitted+waitlisted reservations for a period and split into
+     * Rank submitted reservations without proposals for a period and split into
      * approved (top N) and waitlist (remainder).
      *
-     * @return array{ranked: Collection<int, DormReservation>, approved: Collection<int, DormReservation>, waitlist: Collection<int, DormReservation>}
+     * Giường tách riêng theo giới tính (xem rankPeriod()) — xếp hạng ở đây cũng phải tách
+     * riêng nam/nữ, dùng đúng suất trống riêng từng giới. Candidate CHƯA có giới tính
+     * (`admission_candidates.gender` nullable, khác Student.gender bắt buộc) không tự suy
+     * đoán được thuộc nhóm nào — người gọi (controller) phải tự kiểm tra và chặn xếp hạng
+     * cả đợt nếu còn candidate thiếu giới tính, GIỐNG CÁCH đang chặn khi còn minh chứng ưu
+     * tiên pending, trước khi gọi hàm này.
+     *
+     * @param array{male: int, female: int} $availableBedsByGender
+     * @return array{
+     *   ranked: Collection<int, DormReservation>,
+     *   approved: Collection<int, DormReservation>,
+     *   waitlist: Collection<int, DormReservation>,
+     *   byGender: array<string, array{ranked: Collection<int, DormReservation>, approved: Collection<int, DormReservation>, waitlist: Collection<int, DormReservation>}>
+     * }
      */
-    public function rankReservationPeriod(int $periodId, int $availableBeds, bool $recalculate = true): array
+    public function rankReservationPeriod(int $periodId, array $availableBedsByGender, bool $recalculate = true): array
     {
         if ($recalculate) {
             $this->recalculateReservationPeriod($periodId);
@@ -149,20 +163,42 @@ class PriorityRankingService
         // nữa (đã chuyển rejected ngay khi admin từ chối minh chứng, filter này chỉ để
         // phòng vệ thêm với dữ liệu cũ/race, không đổi thuật toán tính điểm/thứ tự).
         $ranked = DormReservation::where('registration_period_id', $periodId)
-            ->whereIn('status', ['submitted', 'waitlisted'])
+            ->where('status', 'submitted')
+            ->whereNull('auto_decision')
             ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
+            ->with('candidate:id,gender')
             ->orderBy('top_priority_tier', 'asc')
             ->orderByDesc('total_priority_score')
             ->orderBy('created_at', 'asc')
             ->orderBy('id', 'asc')
             ->get();
 
-        $availableBeds = max(0, $availableBeds);
+        $approved = collect();
+        $waitlist = collect();
+        $byGender = [];
+
+        foreach (['male', 'female'] as $gender) {
+            $bucket = $ranked->filter(
+                fn (DormReservation $r) => strtolower($r->candidate->gender ?? '') === $gender
+            )->values();
+            $beds = max(0, $availableBedsByGender[$gender] ?? 0);
+            $genderApproved = $bucket->take($beds)->values();
+            $genderWaitlist = $bucket->slice($beds)->values();
+
+            $byGender[$gender] = [
+                'ranked' => $bucket,
+                'approved' => $genderApproved,
+                'waitlist' => $genderWaitlist,
+            ];
+            $approved = $approved->concat($genderApproved);
+            $waitlist = $waitlist->concat($genderWaitlist);
+        }
 
         return [
             'ranked'   => $ranked,
-            'approved' => $ranked->take($availableBeds)->values(),
-            'waitlist' => $ranked->slice($availableBeds)->values(),
+            'approved' => $approved->values(),
+            'waitlist' => $waitlist->values(),
+            'byGender' => $byGender,
         ];
     }
 
@@ -178,34 +214,223 @@ class PriorityRankingService
      * Equivalent SQL ordering:
      *   ORDER BY top_priority_tier ASC, total_priority_score DESC, created_at ASC
      *
-     * @return array{ranked: Collection<int, Registration>, approved: Collection<int, Registration>, waitlist: Collection<int, Registration>}
+     * QUAN TRỌNG: giường KTX tách riêng theo giới tính ở cấp Floor (không phải 1 hồ chung) —
+     * xếp hạng/cắt suất PHẢI làm riêng cho từng giới, nếu gộp chung 1 số suất sẽ duyệt lố 1
+     * giới trong khi giới kia còn dư (báo cáo 27/07: 3 nữ được duyệt dù chỉ có 2 giường nữ,
+     * vì trước đây cắt theo 1 tổng số suất chung không phân biệt giới). `$availableBedsByGender`
+     * phải có đủ 2 khóa 'male'/'female' (số suất trống riêng của giới đó, lấy từ
+     * DormCapacityService::summarizeForRegistrationPeriod(..., gender: 'male'/'female')).
+     *
+     * @param array{male: int, female: int} $availableBedsByGender
+     * @return array{
+     *   ranked: Collection<int, Registration>,
+     *   approved: Collection<int, Registration>,
+     *   waitlist: Collection<int, Registration>,
+     *   byGender: array<string, array{ranked: Collection<int, Registration>, approved: Collection<int, Registration>, waitlist: Collection<int, Registration>}>
+     * }
      */
-    public function rankPeriod(int $periodId, int $availableBeds, bool $recalculate = true): array
+    public function rankPeriod(int $periodId, array $availableBedsByGender, bool $recalculate = true): array
     {
         if ($recalculate) {
             $this->recalculatePeriod($periodId);
         }
 
-        // Loại hoàn toàn hồ sơ có minh chứng ưu tiên bị từ chối khỏi tập eligible — xem
-        // ghi chú tương tự ở rankReservationPeriod(). Loại luôn Registration nguồn giữ chỗ
-        // (source_dorm_reservation_id NOT NULL) — suất của chúng đã được cam kết từ
-        // DormReservation approved trước đó (không nằm trong $availableBeds truyền vào), xếp
-        // hạng lại có thể đổi auto_decision approve→reject và làm mất suất đã giữ.
+        // Gộp CHUNG đăng ký thường và Registration nguồn giữ chỗ tân sinh viên
+        // (source_dorm_reservation_id NOT NULL) vào 1 bảng xếp hạng duy nhất — trước đây tách
+        // riêng khiến hồ sơ giữ chỗ (kể cả tier 99/điểm 0) luôn giữ auto_decision='approve'
+        // mặc định, "vượt mặt" hồ sơ đăng ký thường có điểm ưu tiên cao hơn nhiều (báo cáo
+        // 24/07: 2 hồ sơ giữ chỗ điểm 0 được duyệt trong khi hồ sơ điểm 100 bị từ chối, chỉ vì
+        // suất đã bị nhóm giữ chỗ trừ trước theo kênh riêng). Giờ đây một hồ sơ giữ chỗ có thể
+        // bị đổi từ approve -> reject nếu thua điểm — xem RegistrationController::
+        // confirmSingle()/confirmBatch() để biết reservation nguồn được chuyển về 'waitlisted'
+        // + báo cho sinh viên khi việc này xảy ra lúc admin xác nhận.
+        //
+        // Loại hoàn toàn hồ sơ có minh chứng ưu tiên bị từ chối khỏi tập eligible — xem ghi
+        // chú tương tự ở rankReservationPeriod().
+        //
+        // Loại 'cancelled' khỏi bảng xếp hạng — đây là đơn sinh viên đã TỰ RÚT, không còn
+        // cạnh tranh suất nào nữa. Trước đây không lọc status nên 1 đơn đã cancelled vẫn
+        // chiếm 1 vị trí trong bucket theo giới, đẩy người xếp hạng thấp hơn ra khỏi chỉ
+        // tiêu dù suất của người đã rút thực chất đang bỏ trống (báo cáo 28/07: Hoàng Khánh
+        // Lan tự hủy nhưng vẫn tính vào "3/3" khiến Trần Thị Bích bị từ chối oan dù còn suất).
         $ranked = Registration::where('registration_period_id', $periodId)
-            ->whereNull('source_dorm_reservation_id')
+            ->where('status', '!=', 'cancelled')
             ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
+            ->with(['sourceDormReservation:id,submitted_at,created_at', 'student:id,gender'])
             ->orderBy('top_priority_tier', 'asc')
             ->orderByDesc('total_priority_score')
-            ->orderBy('created_at', 'asc')
-            ->orderBy('id', 'asc') // deterministic final tie-break only
-            ->get();
+            ->get()
+            ->sort(function (Registration $a, Registration $b) {
+                if ($a->top_priority_tier !== $b->top_priority_tier) {
+                    return $a->top_priority_tier <=> $b->top_priority_tier;
+                }
+                if ($a->total_priority_score !== $b->total_priority_score) {
+                    return $b->total_priority_score <=> $a->total_priority_score;
+                }
+                $timeDiff = $this->originalSubmittedAt($a)->timestamp <=> $this->originalSubmittedAt($b)->timestamp;
 
-        $availableBeds = max(0, $availableBeds);
+                return $timeDiff !== 0 ? $timeDiff : ($a->id <=> $b->id); // id: tie-break cuối, ổn định
+            })
+            ->values();
+
+        $approved = collect();
+        $waitlist = collect();
+        $byGender = [];
+
+        foreach (['male', 'female'] as $gender) {
+            $bucket = $ranked->filter(
+                fn (Registration $r) => strtolower($r->student->gender ?? '') === $gender
+            )->values();
+            $beds = max(0, $availableBedsByGender[$gender] ?? 0);
+            $genderApproved = $bucket->take($beds)->values();
+            $genderWaitlist = $bucket->slice($beds)->values();
+
+            $byGender[$gender] = [
+                'ranked' => $bucket,
+                'approved' => $genderApproved,
+                'waitlist' => $genderWaitlist,
+            ];
+            $approved = $approved->concat($genderApproved);
+            $waitlist = $waitlist->concat($genderWaitlist);
+        }
 
         return [
             'ranked' => $ranked,
-            'approved' => $ranked->take($availableBeds)->values(),
-            'waitlist' => $ranked->slice($availableBeds)->values(),
+            'approved' => $approved->values(),
+            'waitlist' => $waitlist->values(),
+            'byGender' => $byGender,
         ];
+    }
+
+    /**
+     * Xếp hạng suất DƯ (còn lại sau khi rankPeriod() đã chốt xong bên Đơn đăng ký) cho hồ sơ
+     * giữ chỗ đang WAITLISTED mà candidate chưa nhập học (chưa có Registration thật) — theo
+     * đúng thứ tự thống nhất ngày 24/07: nhóm chưa nhập học KHÔNG được cạnh tranh trực tiếp
+     * với Đơn đăng ký (chưa có "đơn" nào để mà cạnh tranh), chỉ được xét đôn lên suất DƯ sau
+     * cùng, ưu tiên luôn dành cho người đã có Registration thật trước.
+     *
+     * Suất dư cũng tách riêng theo giới (xem rankPeriod()) — nhận `$leftoverBedsByGender`
+     * thay vì 1 số chung, đôn riêng từng giới rồi gộp kết quả lại thành 1 danh sách như cũ.
+     *
+     * @param array{male: int, female: int} $leftoverBedsByGender
+     * @return Collection<int, DormReservation>
+     */
+    public function rankLeftoverForWaitlistedReservations(int $periodId, array $leftoverBedsByGender): Collection
+    {
+        if (max($leftoverBedsByGender['male'] ?? 0, $leftoverBedsByGender['female'] ?? 0) <= 0) {
+            return collect();
+        }
+
+        $waitlisted = DormReservation::where('registration_period_id', $periodId)
+            ->where('status', 'waitlisted')
+            ->whereDoesntHave('convertedIntoRegistration')
+            ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
+            ->with('candidate:id,gender')
+            ->get()
+            ->each(fn (DormReservation $r) => $this->calculateForReservation($r));
+
+        $sorted = $waitlisted->sort(function (DormReservation $a, DormReservation $b) {
+            if ($a->top_priority_tier !== $b->top_priority_tier) {
+                return $a->top_priority_tier <=> $b->top_priority_tier;
+            }
+            if ($a->total_priority_score !== $b->total_priority_score) {
+                return $b->total_priority_score <=> $a->total_priority_score;
+            }
+            $timeA = $a->submitted_at ?? $a->created_at;
+            $timeB = $b->submitted_at ?? $b->created_at;
+            $timeDiff = $timeA->timestamp <=> $timeB->timestamp;
+
+            return $timeDiff !== 0 ? $timeDiff : ($a->id <=> $b->id);
+        })->values();
+
+        $promoted = collect();
+        foreach (['male', 'female'] as $gender) {
+            $leftoverBeds = max(0, $leftoverBedsByGender[$gender] ?? 0);
+            if ($leftoverBeds === 0) {
+                continue;
+            }
+            $bucket = $sorted->filter(
+                fn (DormReservation $r) => strtolower($r->candidate->gender ?? '') === $gender
+            )->values();
+            $promoted = $promoted->concat($bucket->take($leftoverBeds));
+        }
+
+        return $promoted->values();
+    }
+
+    /**
+     * Xếp hạng lại danh sách Registration bị TỪ CHỐI VÌ HẾT CHỈ TIÊU (không phải vì minh
+     * chứng ưu tiên không hợp lệ hay lý do khác) trong đợt, để đôn lên `approve` khi có suất
+     * giữ chỗ được giải phóng (ví dụ hồ sơ giữ chỗ approved-chưa-nhập-học bị hết hạn/expire
+     * — xem AutoCloseAdmissionPeriodsCommand). Lấy đúng số lượng bằng số suất vừa giải phóng,
+     * theo đúng thứ tự tier/điểm/mốc nộp gốc — người xếp hạng cao nhất trong nhóm bị từ chối
+     * được đôn lên trước, đúng tinh thần "suất giải phóng phải về tay người xứng đáng nhất
+     * còn lại, không lãng phí" (báo cáo 25/07).
+     *
+     * Chỉ nhận diện đúng nhóm bị từ chối vì hết chỉ tiêu qua `rejection_reason` do
+     * RegistrationPeriodController::process() tự sinh ("Không đủ chỉ tiêu — xếp hạng thứ
+     * X/Y...") — không đôn nhầm người bị từ chối vì lý do khác (minh chứng không hợp lệ,
+     * admin từ chối tay với lý do riêng...).
+     *
+     * Suất giải phóng thuộc về đúng 1 giới (chính giới của candidate vừa hết hạn/expire) —
+     * nhận `$freedSlotsByGender` thay vì 1 số chung để không đôn nhầm người khác giới lên
+     * thế chỗ (xem rankPeriod() về lý do phải tách theo giới).
+     *
+     * @param array{male: int, female: int} $freedSlotsByGender
+     * @return Collection<int, Registration>
+     */
+    public function rankRejectedRegistrationsForFreedSlots(int $periodId, array $freedSlotsByGender): Collection
+    {
+        if (max($freedSlotsByGender['male'] ?? 0, $freedSlotsByGender['female'] ?? 0) <= 0) {
+            return collect();
+        }
+
+        $rejected = Registration::where('registration_period_id', $periodId)
+            ->where('status', 'rejected')
+            ->where('rejection_reason', 'like', 'Không đủ chỉ tiêu%')
+            ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
+            ->with(['sourceDormReservation:id,submitted_at,created_at', 'student:id,gender'])
+            ->get();
+
+        $sorted = $rejected->sort(function (Registration $a, Registration $b) {
+            if ($a->top_priority_tier !== $b->top_priority_tier) {
+                return $a->top_priority_tier <=> $b->top_priority_tier;
+            }
+            if ($a->total_priority_score !== $b->total_priority_score) {
+                return $b->total_priority_score <=> $a->total_priority_score;
+            }
+            $timeDiff = $this->originalSubmittedAt($a)->timestamp <=> $this->originalSubmittedAt($b)->timestamp;
+
+            return $timeDiff !== 0 ? $timeDiff : ($a->id <=> $b->id);
+        })->values();
+
+        $promoted = collect();
+        foreach (['male', 'female'] as $gender) {
+            $freedSlots = max(0, $freedSlotsByGender[$gender] ?? 0);
+            if ($freedSlots === 0) {
+                continue;
+            }
+            $bucket = $sorted->filter(
+                fn (Registration $r) => strtolower($r->student->gender ?? '') === $gender
+            )->values();
+            $promoted = $promoted->concat($bucket->take($freedSlots));
+        }
+
+        return $promoted->values();
+    }
+
+    /** Mốc "nộp hồ sơ" thật để tie-break công bằng giữa 2 nguồn: Registration nguồn giữ chỗ
+     *  lấy submitted_at GỐC của DormReservation (lúc thí sinh nộp giữ chỗ), KHÔNG lấy
+     *  Registration.created_at (lúc DormReservationConversionService::convert() chạy — luôn
+     *  trễ hơn nhiều vì chỉ xảy ra sau khi thí sinh đã nhập học). */
+    private function originalSubmittedAt(Registration $registration): \Carbon\Carbon
+    {
+        if ($registration->source_dorm_reservation_id && $registration->sourceDormReservation) {
+            return $registration->sourceDormReservation->submitted_at
+                ?? $registration->sourceDormReservation->created_at
+                ?? $registration->created_at;
+        }
+
+        return $registration->created_at;
     }
 }

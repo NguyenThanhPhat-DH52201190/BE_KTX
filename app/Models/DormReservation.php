@@ -5,18 +5,18 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class DormReservation extends Model
 {
     protected $table = 'dorm_reservations';
 
     // Lý do cụ thể khi status chuyển 'expired' — do AutoCloseAdmissionPeriodsCommand ghi,
-    // KHÔNG dùng cancellation_reason/rejection_reason/admin_note (3 cột đó do người nhập,
-    // mang ý nghĩa khác). Việc 5 chỉ theo dõi đúng nhóm EXPIRATION_APPROVED_NOT_CONVERTED —
+    // KHÔNG dùng rejection_reason/admin_note (2 cột đó do người nhập, mang ý nghĩa khác).
+    // Việc 5 chỉ theo dõi đúng nhóm EXPIRATION_APPROVED_NOT_CONVERTED —
     // KHÔNG dùng tên "not_enrolled" vì candidate.status=enrolled không còn đồng nghĩa
     // reservation đã converted (submitted/waitlisted cũng tạo Student được từ Import nhập
     // học + DormReservationConversionService).
-    public const EXPIRATION_PERIOD_CLOSED_SUBMITTED  = 'period_closed_while_submitted';
     public const EXPIRATION_PERIOD_CLOSED_WAITLISTED = 'period_closed_while_waitlisted';
     public const EXPIRATION_APPROVED_NOT_CONVERTED   = 'approved_not_converted';
 
@@ -26,6 +26,8 @@ class DormReservation extends Model
         'reservation_code',
         'student_code',
         'status',
+        'auto_decision',
+        'auto_decision_reason',
         'priority_note',
         'father_name',
         'father_birth_year',
@@ -41,9 +43,6 @@ class DormReservation extends Model
         'cccd_front_url',
         'cccd_back_url',
         'rejection_reason',
-        'cancellation_reason',
-        'cancelled_at',
-        'cancelled_by',
         'expiration_reason',
         'admin_note',
         'submitted_at',
@@ -58,7 +57,6 @@ class DormReservation extends Model
         'submitted_at' => 'datetime',
         'approved_at'  => 'datetime',
         'expires_at'   => 'datetime',
-        'cancelled_at' => 'datetime',
     ];
 
     public function candidate(): BelongsTo
@@ -74,6 +72,15 @@ class DormReservation extends Model
     public function convertedRegistration(): BelongsTo
     {
         return $this->belongsTo(Registration::class, 'converted_registration_id');
+    }
+
+    /** Registration đã được DormReservationConversionService tạo ra từ reservation này
+     *  (source_dorm_reservation_id) — khác convertedRegistration() (chỉ gán khi admin xác
+     *  nhận chính thức). Dùng để biết reservation đã "vào chung bàn xếp hạng" với đăng ký
+     *  thường hay chưa (xem RegistrationPeriodController::process()). */
+    public function convertedIntoRegistration(): HasOne
+    {
+        return $this->hasOne(Registration::class, 'source_dorm_reservation_id');
     }
 
     public function reservationPriorities(): HasMany

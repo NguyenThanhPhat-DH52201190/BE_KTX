@@ -2,25 +2,38 @@
 
 namespace App\Services;
 
-use App\Models\Bed;
 use App\Models\DormReservation;
-use App\Models\Occupancy;
 use App\Models\Registration;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 
 /**
- * Nguồn DUY NHẤT xử lý sinh viên/thí sinh tự hủy nhu cầu ở KTX trước deadline 17:00 của
- * đợt (4 nhánh submitted/waitlisted/approved/converted — xem DormReservationController::
- * cancelSelf()). Không đổi reservation converted về cancelled (giữ lịch sử) — chỉ hủy
- * Registration tương ứng nếu Occupancy chưa ACTIVE. Occupancy ACTIVE thì chặn hoàn toàn,
- * hướng người dùng sang luồng yêu cầu thôi ở (RegistrationController::requestCheckout()).
+ * Xử lý thí sinh/sinh viên tự hủy hồ sơ giữ chỗ trước deadline 17:00 của đợt.
+ *
+ * QUAN TRỌNG: reservation chỉ chuyển sang 'converted' ĐÚNG LÚC Registration nguồn được admin
+ * "Xác nhận" (approved) — 2 việc này luôn xảy ra CÙNG LÚC trong 1 transaction (xem
+ * RegistrationController::confirmSingle()/confirmBatch()/approve()), KHÔNG có giai đoạn trung
+ * gian nào mà reservation đã 'converted' trong khi Registration vẫn còn 'submitted'. Vì vậy
+ * "reservation đã converted" ĐỒNG NGHĨA với "đơn đã được admin xác nhận chính thức" — chặn
+ * tự hủy hoàn toàn ở giai đoạn này theo đúng yêu cầu, hướng sang "Yêu cầu thôi ở"
+ * (RegistrationController::requestCheckout()) hoặc liên hệ Ban quản lý.
+ *
+ * 3 trạng thái xử lý:
+ * 1. Reservation 'approved', CHƯA có Registration nào (chưa nhập học) — hủy thẳng trên
+ *    reservation, chuyển 'rejected' (không dùng 'cancelled' — trạng thái này đã bị gỡ khỏi
+ *    enum có chủ đích, xem migration 2026_07_23_000002_remove_cancelled_status_from_dorm_
+ *    reservations — gộp mọi hủy/từ chối hồ sơ giữ chỗ về chung 1 status 'rejected', chỉ khác
+ *    nhau ở nội dung rejection_reason).
+ * 2. Reservation 'approved', ĐÃ có Registration nguồn (đã nhập học, convert() đã tạo đơn)
+ *    nhưng Registration đó còn 'submitted' (chưa được admin xác nhận) — hủy CẢ HAI: Registration
+ *    chuyển 'cancelled', reservation chuyển 'rejected' (không để Registration mồ côi trỏ về 1
+ *    reservation đã hủy).
+ * 3. Reservation 'converted' (đã được admin xác nhận chính thức) — CHẶN, không cho tự hủy nữa.
  */
 class DormReservationCancellationService
 {
-    public const BLOCKED_ACTIVE_OCCUPANCY = 'active_occupancy';
-    public const BLOCKED_NOT_CANCELLABLE  = 'not_cancellable';
-    public const BLOCKED_PAST_DEADLINE    = 'past_deadline';
+    public const BLOCKED_ALREADY_CONFIRMED = 'already_confirmed';
+    public const BLOCKED_NOT_CANCELLABLE   = 'not_cancellable';
+    public const BLOCKED_PAST_DEADLINE     = 'past_deadline';
 
     /**
      * @return array{ok: bool, code?: string, message?: string, reservation?: DormReservation,
@@ -34,14 +47,6 @@ class DormReservationCancellationService
                 ->lockForUpdate()
                 ->findOrFail($reservationId);
 
-            if (in_array($reservation->status, ['expired', 'rejected', 'cancelled'], true)) {
-                return [
-                    'ok'      => false,
-                    'code'    => self::BLOCKED_NOT_CANCELLABLE,
-                    'message' => 'Hồ sơ hiện không ở trạng thái có thể hủy.',
-                ];
-            }
-
             $period   = $reservation->period;
             $deadline = $period?->admissionDeadline();
             if ($deadline && now()->greaterThan($deadline)) {
@@ -53,102 +58,61 @@ class DormReservationCancellationService
                 ];
             }
 
-            $previousStatus        = $reservation->status;
-            $releasedApprovedSlot  = false;
-            $cancelledRegistration = null;
-
             if ($reservation->status === 'converted') {
-                $registration = $reservation->converted_registration_id
-                    ? Registration::where('id', $reservation->converted_registration_id)->lockForUpdate()->first()
-                    : null;
-
-                if (!$registration || in_array($registration->status, ['cancelled', 'rejected'], true)) {
-                    return [
-                        'ok'      => false,
-                        'code'    => self::BLOCKED_NOT_CANCELLABLE,
-                        'message' => 'Hồ sơ hiện không ở trạng thái có thể hủy.',
-                    ];
-                }
-
-                $occupancy = Occupancy::where('registration_id', $registration->id)
-                    ->orderByDesc('id')
-                    ->lockForUpdate()
-                    ->first();
-
-                if ($occupancy && $occupancy->status === 'ACTIVE') {
-                    return [
-                        'ok'      => false,
-                        'code'    => self::BLOCKED_ACTIVE_OCCUPANCY,
-                        'message' => 'Bạn đã bắt đầu lưu trú. Vui lòng sử dụng chức năng yêu cầu thôi ở.',
-                    ];
-                }
-
-                // Giữ chỗ/giường tạm (PROPOSED/ROOM_CONFIRMED/PENDING_PAYMENT) nhưng chưa
-                // ACTIVE — giải phóng an toàn theo đúng quy ước đã dùng ở
-                // RegistrationController::rejectBed() (bed.status='active', occupancy
-                // chuyển 'CANCELLED', không xóa bản ghi để giữ lịch sử).
-                if ($occupancy && in_array($occupancy->status, ['PROPOSED', 'ROOM_CONFIRMED', 'PENDING_PAYMENT'], true)) {
-                    if ($occupancy->bed_id) {
-                        // Lock bed trước khi kiểm tra — chống race với selectBed()/assignRoom()
-                        // đang gán cùng bed cho người khác đúng lúc này.
-                        $bed = Bed::where('id', $occupancy->bed_id)->lockForUpdate()->first();
-
-                        // Chỉ trả bed về 'active' nếu KHÔNG còn occupancy hiệu lực nào khác
-                        // (ROOM_CONFIRMED/PENDING_PAYMENT/ACTIVE) đang giữ đúng bed_id này —
-                        // tránh giải phóng nhầm giường đã được chuyển cho người khác trong
-                        // lúc race, hoặc do dữ liệu có nhiều occupancy trỏ cùng 1 bed.
-                        $bedHeldByOther = $bed && Occupancy::where('bed_id', $bed->id)
-                            ->where('id', '!=', $occupancy->id)
-                            ->whereIn('status', Occupancy::OCCUPIED_BED_STATUSES)
-                            ->lockForUpdate()
-                            ->exists();
-
-                        if ($bed && !$bedHeldByOther && strtolower((string) $bed->status) !== 'maintenance') {
-                            $bed->status = 'active';
-                            $bed->save();
-                        } elseif ($bedHeldByOther) {
-                            Log::warning('[DormReservationCancellationService] Không giải phóng bed vì đang có occupancy hiệu lực khác giữ cùng bed (giữ nguyên bed.status để không ảnh hưởng người đang giữ)', [
-                                'bed_id'         => $bed->id,
-                                'occupancy_id'   => $occupancy->id,
-                                'registration_id' => $registration->id,
-                            ]);
-                        }
-                    }
-                    $occupancy->status = 'CANCELLED';
-                    $occupancy->save();
-                }
-
-                $registration->update([
-                    'status'              => 'cancelled',
-                    'cancelled_at'        => now(),
-                    'cancellation_reason' => $reason,
-                    'cancelled_by'        => $cancelledBy,
-                ]);
-
-                // Reservation GIỮ NGUYÊN status='converted' để bảo toàn lịch sử — chỉ
-                // Registration đổi sang cancelled.
-                $cancelledRegistration = $registration;
-                $releasedApprovedSlot  = true;
-            } else {
-                // submitted / waitlisted / approved: hủy thẳng reservation.
-                $reservation->update([
-                    'status'               => 'cancelled',
-                    'cancelled_at'         => now(),
-                    'cancellation_reason'  => $reason,
-                    'cancelled_by'         => $cancelledBy,
-                ]);
-
-                $releasedApprovedSlot = $previousStatus === 'approved';
+                return [
+                    'ok'      => false,
+                    'code'    => self::BLOCKED_ALREADY_CONFIRMED,
+                    'message' => 'Đơn đăng ký nội trú của bạn đã được Ban quản lý KTX xác nhận, không thể tự hủy trực tuyến nữa. Vui lòng dùng chức năng "Yêu cầu thôi ở" hoặc liên hệ Ban quản lý KTX nếu cần hỗ trợ.',
+                ];
             }
 
-            return [
-                'ok'                     => true,
-                'reservation'            => $reservation->fresh(['candidate', 'period']),
-                'cancelledRegistration'  => $cancelledRegistration,
-                'previousStatus'         => $previousStatus,
-                'releasedApprovedSlot'   => $releasedApprovedSlot,
-                'periodId'               => $reservation->registration_period_id,
-            ];
+            if ($reservation->status !== 'approved') {
+                return [
+                    'ok'      => false,
+                    'code'    => self::BLOCKED_NOT_CANCELLABLE,
+                    'message' => 'Hồ sơ hiện không ở trạng thái có thể hủy.',
+                ];
+            }
+
+            return $this->cancelApprovedReservation($reservation, $reason, $cancelledBy);
         });
+    }
+
+    /** Reservation đang 'approved' — có thể đã nhập học (có Registration nguồn 'submitted'
+     *  chờ xác nhận) hoặc chưa (không có Registration nào). Cả 2 trường hợp đều hủy được, chỉ
+     *  khác là trường hợp đầu phải hủy luôn Registration để không mồ côi dữ liệu. */
+    private function cancelApprovedReservation(DormReservation $reservation, string $reason, string $cancelledBy): array
+    {
+        $previousStatus = $reservation->status;
+
+        $pendingRegistration = Registration::where('source_dorm_reservation_id', $reservation->id)
+            ->whereNotIn('status', ['cancelled', 'rejected'])
+            ->lockForUpdate()
+            ->first();
+
+        if ($pendingRegistration) {
+            $pendingRegistration->update([
+                'status'              => 'cancelled',
+                'cancelled_at'        => now(),
+                'cancellation_reason' => $reason,
+                'cancelled_by'        => $cancelledBy,
+            ]);
+        }
+
+        $reservation->update([
+            'status'               => 'rejected',
+            'rejection_reason'     => "Tự hủy: {$reason}",
+            'auto_decision'        => null,
+            'auto_decision_reason' => null,
+        ]);
+
+        return [
+            'ok'                    => true,
+            'reservation'           => $reservation->fresh(['candidate', 'period']),
+            'cancelledRegistration' => $pendingRegistration,
+            'previousStatus'        => $previousStatus,
+            'releasedApprovedSlot'  => true,
+            'periodId'              => $reservation->registration_period_id,
+        ];
     }
 }
