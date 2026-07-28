@@ -83,6 +83,28 @@ class RoomController extends Controller
             return response()->json(['message' => 'Không thể giảm sức chứa thấp hơn số giường đang có sinh viên ở.'], 422);
         }
 
+        // syncBeds() giữ lại đúng $capacity giường có bed_number thấp nhất và xóa cứng
+        // phần dư — occupied bed không nhất thiết nằm ở bed_number thấp (sinh viên chọn
+        // giường tự do), nên tổng số occupied ở trên không đủ để chặn: cần kiểm tra đích
+        // danh những giường sẽ bị xóa. Bed.bed_id có FK cascadeOnDelete trên occupancy nên
+        // xóa nhầm giường đang ở sẽ xóa mất luôn bản ghi lưu trú của sinh viên đó.
+        $bedsToRemove = $room->beds->sortBy('bed_number')->values()->slice((int) $data['capacity']);
+        if ($bedsToRemove->isNotEmpty()) {
+            $occupiedBedNumbers = Occupancy::occupiedBedsQuery()
+                ->whereIn('bed_id', $bedsToRemove->pluck('id')->all())
+                ->get()
+                ->map(fn (Occupancy $occupancy) => $bedsToRemove->firstWhere('id', $occupancy->bed_id)?->bed_number)
+                ->filter()
+                ->sort()
+                ->values();
+
+            if ($occupiedBedNumbers->isNotEmpty()) {
+                return response()->json([
+                    'message' => 'Không thể giảm sức chứa: giường số ' . $occupiedBedNumbers->implode(', ') . ' sẽ bị xóa nhưng đang có sinh viên ở. Vui lòng chuyển sinh viên sang giường khác trước.',
+                ], 422);
+            }
+        }
+
         $room = DB::transaction(function () use ($room, $data, $roomNumber) {
             $room->update([
                 'floor_id' => (int) $data['floor_id'],
