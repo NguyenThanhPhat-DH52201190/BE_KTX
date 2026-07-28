@@ -1107,6 +1107,17 @@ class MaintenanceController extends Controller
         // prefix storage trong path lưu — phải strip trước, tránh double-prefix khiến ảnh 404.
         $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
 
+        // Production/Railway lưu file vào volume, chỉ phục vụ được qua route riêng
+        // /api/storage/{path} (StorageController::serveImage) — route /storage/{path} tĩnh
+        // (qua symlink storage:link) chỉ có ở local dev, không tồn tại/không có file trên
+        // Railway. Thiếu bước phân nhánh này khiến ảnh luôn vỡ trên host dù local vẫn đúng
+        // (báo cáo 28/07 — cùng lớp lỗi với RegistrationController::getImageUrl()).
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+
+        if ($isProduction) {
+            return url('/api/storage/' . $cleanPath);
+        }
+
         return url('/storage/' . $cleanPath);
     }
 }
