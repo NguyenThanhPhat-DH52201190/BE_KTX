@@ -9,7 +9,6 @@ use App\Models\OccupancyExtension;
 use App\Models\OccupancyPeriod;
 use App\Models\Registration;
 use App\Models\RegistrationPeriod;
-use Illuminate\Database\Eloquent\Builder;
 
 class DormCapacityService
 {
@@ -27,24 +26,49 @@ class DormCapacityService
      *               physically_occupied_or_reserved_beds: int, available_physical_beds: int,
      *               available_physical_bed_ids: \Illuminate\Support\Collection}
      */
-    public function summarizePhysicalBeds(): array
+    /**
+     * Lọc theo giới tính của TẦNG chứa phòng/giường — không phải Room/Bed (giới tính gán ở
+     * cấp Floor, xem BuildingController::normalizeGender()). Tầng KHÔNG gán giới tính
+     * (null/rỗng) được coi là "dùng chung", tính vào CẢ 2 giới — đúng quy ước đã có sẵn ở
+     * AutoRoomAssignmentService::pickRoom() (`info['gender'] === $gender || info['gender']
+     * === ''`), không tự bịa quy ước khác gây lệch với chỗ xếp phòng thật.
+     */
+    private function applyFloorGenderFilter($query, ?string $gender): void
     {
-        $usableBedIds = Bed::query()
+        if ($gender === null) {
+            return;
+        }
+
+        $query->whereHas('room.floor', function ($q) use ($gender) {
+            $q->where(function ($qq) use ($gender) {
+                $qq->whereNull('gender')->orWhere('gender', '')->orWhere('gender', $gender);
+            });
+        });
+    }
+
+    /**
+     * @param string|null $gender 'male'|'female' — lọc giường theo giới tính tầng (null = gộp
+     *                            chung toàn KTX, giữ hành vi cũ cho nơi chưa cần tách giới).
+     */
+    public function summarizePhysicalBeds(?string $gender = null): array
+    {
+        $usableBedsQuery = Bed::query()
             ->where('beds.status', 'active')
-            ->whereHas('room', fn ($q) => $q->where('status', 'active'))
-            ->pluck('id')
-            ->unique()
-            ->values();
+            ->whereHas('room', fn ($q) => $q->where('status', 'active'));
+        $this->applyFloorGenderFilter($usableBedsQuery, $gender);
+        $usableBedIds = $usableBedsQuery->pluck('id')->unique()->values();
 
-        $totalBeds = Bed::query()->count();
+        $totalBedsQuery = Bed::query();
+        $this->applyFloorGenderFilter($totalBedsQuery, $gender);
+        $totalBeds = $totalBedsQuery->count();
 
-        $maintenanceOrBlockedBeds = Bed::query()
+        $maintenanceOrBlockedQuery = Bed::query()
             ->where(function ($query) {
                 $query->where('beds.status', '!=', 'active')
                     ->orWhereHas('room', fn ($roomQuery) => $roomQuery->where('status', '!=', 'active'));
-            })
-            ->distinct('beds.id')
-            ->count('beds.id');
+            });
+        $this->applyFloorGenderFilter($maintenanceOrBlockedQuery, $gender);
+        $maintenanceOrBlockedBeds = $maintenanceOrBlockedQuery->distinct('beds.id')->count('beds.id');
 
         $occupiedBedIds = Occupancy::occupiedBedsQuery()
             ->whereIn('bed_id', $usableBedIds)
@@ -71,10 +95,32 @@ class DormCapacityService
         return $this->summarizePhysicalBeds()['available_physical_beds'];
     }
 
+    /**
+     * @param string|null $gender 'male'|'female' — tính suất trống RIÊNG cho giới tính này
+     *                            (giường, sinh viên gia hạn, đơn approved, hồ sơ giữ chỗ đều
+     *                            lọc theo đúng giới). null = gộp chung toàn KTX (hành vi cũ,
+     *                            chỉ còn dùng cho các nơi cố tình muốn xem tổng quan không
+     *                            phân biệt giới, KHÔNG dùng để quyết định duyệt/xác nhận nữa
+     *                            — xem báo cáo 27/07: duyệt theo tổng gộp gây vượt suất 1 giới
+     *                            trong khi giới kia còn dư, vì phòng/giường vốn tách theo giới
+     *                            tính ở cấp Floor).
+     * @param bool $excludeReservationsWithRegistration CHỈ dùng khi tính ngân sách cho BƯỚC
+     *             XẾP HẠNG (`RegistrationPeriodController::process()`). Hồ sơ giữ chỗ đã có
+     *             Registration nguồn (dù đang 'submitted' chờ xác nhận) chính là NGƯỜI ĐANG
+     *             ĐƯỢC XẾP HẠNG trong cùng bảng — KHÔNG được trừ suất họ trước rồi lại bắt họ
+     *             cạnh tranh phần còn lại, sẽ thành trừ 2 lần cùng 1 suất (báo cáo 28/07: suất
+     *             nữ tính ra 0 dù 2 người đang xếp hạng chính là 2 người giữ 2 giường nữ đó).
+     *             Chỉ hồ sơ CHƯA có Registration (chưa nhập học, đứng NGOÀI bảng xếp hạng, như
+     *             1 candidate approved-giữ-chỗ nhưng chưa từng nộp đơn) mới cần trừ trước ở
+     *             đây. Mặc định false — giữ hành vi "trừ đủ mọi approved reservation" cho các
+     *             chỗ duyệt/xác nhận 1 hồ sơ lẻ (không qua xếp hạng lại).
+     */
     public function summarizeForRegistrationPeriod(
         RegistrationPeriod|int|null $period = null,
         int $proposedApprovedCount = 0,
-        int $reservedBufferBeds = 0
+        int $reservedBufferBeds = 0,
+        ?string $gender = null,
+        bool $excludeReservationsWithRegistration = false
     ): array {
         $registrationPeriod = $period instanceof RegistrationPeriod
             ? $period
@@ -83,7 +129,7 @@ class DormCapacityService
         $periodId = $registrationPeriod?->id;
         $occupancyPeriodId = $this->resolveOccupancyPeriodId($registrationPeriod);
 
-        $physicalBeds = $this->summarizePhysicalBeds();
+        $physicalBeds = $this->summarizePhysicalBeds($gender);
         $totalBeds = $physicalBeds['total_beds'];
         $maintenanceOrBlockedBeds = $physicalBeds['maintenance_or_blocked_beds'];
         $physicallyOccupiedOrReservedBeds = $physicalBeds['physically_occupied_or_reserved_beds'];
@@ -101,6 +147,7 @@ class DormCapacityService
                 ->where('status', 'approved')
                 ->where('occupancy_period_id', $occupancyPeriodId)
                 ->whereNotIn('student_id', $occupiedStudentIds)
+                ->when($gender !== null, fn ($q) => $q->whereHas('student', fn ($sq) => $sq->where('gender', $gender)))
                 ->distinct('student_id')
                 ->count('student_id');
         }
@@ -111,31 +158,34 @@ class DormCapacityService
                 ->where('registration_period_id', $periodId)
                 ->where('status', 'approved')
                 ->whereNotIn('student_id', $occupiedStudentIds)
+                ->when($gender !== null, fn ($q) => $q->whereHas('student', fn ($sq) => $sq->where('gender', $gender)))
                 ->distinct('student_id')
                 ->count('student_id');
         }
 
         $approvedDormReservations = 0;
         if ($periodId) {
+            // Trừ suất của MỌI hồ sơ giữ chỗ đang 'approved' — bất kể candidate đã nhập học
+            // (có Registration nguồn) hay chưa. Trước đây có loại trừ hồ sơ đã có Registration
+            // qua whereDoesntHave('convertedIntoRegistration'), với lý do "suất của họ đã được
+            // đếm bên Registration rồi, trừ ở đây là trừ 2 lần". NHƯNG Registration chỉ thật
+            // sự được đếm ở approved_unassigned_registrations khi đã status='approved' — mà
+            // ngay khi Registration chuyển 'approved', DormReservation nguồn CŨNG đồng thời
+            // chuyển 'converted' trong CÙNG transaction (xem RegistrationController::
+            // confirmSingle()/confirmBatch()/approve()), nên đã tự động rời khỏi điều kiện
+            // where('status','approved') ở trên rồi — không cần loại trừ thêm nữa. Trong khi
+            // đó, hồ sơ đã có Registration nhưng Registration còn 'submitted' (CHỜ admin xác
+            // nhận) lại bị whereDoesntHave loại nhầm — không được đếm ở ĐÂY (loại vì có
+            // Registration) mà cũng không được đếm ở approved_unassigned_registrations (chỉ
+            // đếm status='approved', 'submitted' thì chưa) — suất của họ "biến mất" khỏi cả 2
+            // bộ đếm, hệ thống tưởng còn dư suất, cho duyệt vượt quá số giường thật (báo cáo
+            // 28/07: 3 hồ sơ nữ cùng 'approved' dù chỉ có 2 giường nữ). Bỏ hẳn điều kiện loại
+            // trừ để không còn khoảng trống này.
             $approvedDormReservations = DormReservation::query()
                 ->where('registration_period_id', $periodId)
                 ->where('status', 'approved')
-                ->whereNull('converted_registration_id')
-                ->whereDoesntHave('candidate', function (Builder $candidateQuery) use ($periodId) {
-                    // Chỉ loại DormReservation khỏi counter này khi candidate đã có Registration
-                    // THẬT SỰ approved (đã được đếm bên approved_unassigned_registrations) —
-                    // không dùng whereNotIn(['rejected','cancelled']) vì Registration đang
-                    // 'submitted' (kể cả nguồn giữ chỗ chờ admin xác nhận, hoặc đăng ký thường
-                    // chưa xử lý) KHÔNG tiêu tốn suất nào, loại sớm sẽ làm suất của
-                    // DormReservation approved "biến mất" khỏi mọi bộ đếm trong lúc chờ.
-                    $candidateQuery
-                        ->whereNotNull('student_id')
-                        ->whereHas('student.registrations', function (Builder $registrationQuery) use ($periodId) {
-                            $registrationQuery
-                                ->where('registration_period_id', $periodId)
-                                ->where('status', 'approved');
-                        });
-                })
+                ->when($excludeReservationsWithRegistration, fn ($q) => $q->whereDoesntHave('convertedIntoRegistration'))
+                ->when($gender !== null, fn ($q) => $q->whereHas('candidate', fn ($cq) => $cq->where('gender', $gender)))
                 ->distinct('admission_candidate_id')
                 ->count('admission_candidate_id');
         }

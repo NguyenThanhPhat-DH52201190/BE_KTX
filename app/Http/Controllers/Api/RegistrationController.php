@@ -35,6 +35,7 @@ use RuntimeException;
 
 class RegistrationController extends Controller
 {
+
     /**
      * Helper to get the correct URL based on environment
      */
@@ -288,6 +289,45 @@ class RegistrationController extends Controller
     }
 
     /**
+     * `auto_decision_reason` do PriorityRankingService/process() sinh ra để ADMIN xem (kèm
+     * thứ hạng, chỉ tiêu cụ thể — VD "Không đủ chỉ tiêu (nam) — xếp hạng thứ 3/3, chỉ tiêu 1
+     * suất.") vốn được copy y nguyên sang `rejection_reason` gửi thẳng cho sinh viên — quá kỹ
+     * thuật, lộ luôn thứ hạng/số liệu cạnh tranh nội bộ ra ngoài (báo cáo 28/07). Chỉ dịch lại
+     * đúng mẫu do ranking sinh ra; các lý do khác (minh chứng ưu tiên không hợp lệ, admin tự
+     * nhập tay...) vốn đã viết cho sinh viên đọc, giữ nguyên không đổi.
+     */
+    private function studentFacingRejectionReason(?string $autoDecisionReason): ?string
+    {
+        if ($autoDecisionReason && preg_match('/^Không đủ chỉ tiêu \((nam|nữ)\)/u', $autoDecisionReason, $m)) {
+            return "Rất tiếc, đợt này ký túc xá đã hết chỗ dành cho sinh viên {$m[1]} nên hồ sơ của bạn chưa được duyệt lần này.";
+        }
+
+        return $autoDecisionReason;
+    }
+
+    /**
+     * Đợt "đang mở nhận đơn" = status `active` HOẶC `processing` (mới xếp hạng thử để xem
+     * trước, chưa phải quyết định cuối) MÀ CHƯA QUA HẠN 17:00 ngày `end_date` — tách biệt
+     * "status" (nhãn nội bộ, đổi ngay khi admin bấm "Xếp hạng" dù chỉ để xem thử) khỏi "hạn
+     * nhận đơn thật" (mốc đã hứa với sinh viên). Trước đây chỉ check status='active', khiến
+     * sinh viên mất quyền nộp đơn ngay khi admin bấm Xếp hạng lần đầu — sớm hơn nhiều so với
+     * hạn thật đã thông báo, dù "Xếp hạng" vốn làm lại được nhiều lần, không phải hành động
+     * cuối (báo cáo 25/07). Đợt `closed` KHÔNG tính vào đây — mọi trường hợp closed hiện tại
+     * đều đã qua hạn thật hoặc đã được admin chốt hẳn.
+     */
+    private function findOpenSubmissionPeriod(): ?RegistrationPeriod
+    {
+        return RegistrationPeriod::whereIn('status', ['active', 'processing'])
+            ->orderBy('start_date', 'asc')
+            ->get()
+            ->first(function (RegistrationPeriod $period) {
+                $deadline = $period->admissionDeadline();
+
+                return $deadline === null || now()->lessThanOrEqualTo($deadline);
+            });
+    }
+
+    /**
      * @param bool $queue Bật khi gọi trong vòng lặp duyệt hàng loạt (confirmBatch), tránh
      *                    chặn request chờ gửi email lần lượt từng đơn trong đợt.
      */
@@ -327,10 +367,11 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy sinh viên'], 404);
         }
 
-        // Check 1: Đã có đơn đang chờ xét duyệt TRONG ĐỢT ĐANG MỞ
-        // Chỉ chặn khi status='submitted' trong period đang active.
-        // Đơn từ đợt cũ đã đóng (submitted/rejected) không chặn sinh viên đăng ký đợt mới.
-        $activePeriodId = RegistrationPeriod::where('status', 'active')->value('id');
+        // Check 1: Đã có đơn đang chờ xét duyệt TRONG ĐỢT ĐANG MỞ NHẬN ĐƠN
+        // Chỉ chặn khi status='submitted' trong period đang mở nhận đơn (xem
+        // findOpenSubmissionPeriod()). Đơn từ đợt cũ đã đóng (submitted/rejected) không
+        // chặn sinh viên đăng ký đợt mới.
+        $activePeriodId = $this->findOpenSubmissionPeriod()?->id;
 
         $hasSubmittedInActivePeriod = $activePeriodId !== null
             && Registration::where('student_id', $student->id)
@@ -439,10 +480,9 @@ class RegistrationController extends Controller
         }
 
         // Check 7: Không có đợt đăng ký nào đang mở (kiểm tra sau khi đã xác nhận sv đủ điều kiện)
-        // Ưu tiên 1: đợt active (đang mở nhận đơn)
-        $activePeriod = RegistrationPeriod::where('status', 'active')
-            ->orderBy('start_date', 'asc')
-            ->first();
+        // Ưu tiên 1: đợt đang mở nhận đơn thật (active/processing-chưa-qua-hạn — xem
+        // findOpenSubmissionPeriod()).
+        $activePeriod = $this->findOpenSubmissionPeriod();
 
         // Ưu tiên 2: đợt pending gần nhất (sắp mở)
         if (!$activePeriod) {
@@ -571,7 +611,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Bạn đã có đơn được duyệt. Không thể gửi đơn mới.', 'reason_code' => 'already_approved'], 422);
         }
 
-        $activePeriod = RegistrationPeriod::where('status', 'active')->first();
+        $activePeriod = $this->findOpenSubmissionPeriod();
         if (!$activePeriod) {
             return response()->json(['message' => 'Hiện không có đợt đăng ký nào đang mở', 'reason_code' => 'no_open_channel'], 422);
         }
@@ -931,7 +971,7 @@ class RegistrationController extends Controller
                 // check capacity; nếu đã approved sẵn (double-click/gọi lại) thì đây là no-op, không
                 // chiếm thêm suất nào nên không cần re-check.
                 $capacity = app(DormCapacityService::class)
-                    ->summarizeForRegistrationPeriod($period ?? $registration->registration_period_id);
+                    ->summarizeForRegistrationPeriod($period ?? $registration->registration_period_id, gender: $registration->student?->gender);
                 if (($capacity['available_approval_slots'] ?? 0) < 1) {
                     return ['ok' => false, 'status' => 422, 'payload' => ['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity]];
                 }
@@ -1529,10 +1569,10 @@ class RegistrationController extends Controller
         // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
         // giữ sẵn — từ chối thẳng ở đây sẽ để lại DormReservation vẫn approved trong khi
         // Registration đã rejected (mâu thuẫn dữ liệu, suất bị kẹt không giải phóng được cho
-        // waitlist). Tạm chặn, chờ nghiệp vụ hủy giữ chỗ + giải phóng suất + promotion riêng.
+        // waitlist). Tạm chặn, cần xử lý tại hồ sơ giữ chỗ tân sinh viên trước.
         if ($registration->source_dorm_reservation_id && $registration->status === 'submitted') {
             return response()->json([
-                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể từ chối qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
+                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể từ chối qua chức năng này — vui lòng xử lý tại hồ sơ giữ chỗ tân sinh viên trước.',
             ], 422);
         }
 
@@ -1620,31 +1660,29 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Đơn đã bị hủy, không thể đổi quyết định tự động.'], 422);
         }
 
-        // Registration nguồn giữ chỗ (tân sinh viên) đã có suất được DormReservation approved
-        // giữ sẵn — không cho đổi đề xuất rời khỏi 'approve' qua dropdown thường (reject/review
-        // đều để lại DormReservation approved dở dang, suất bị kẹt). Tạm chặn, chờ nghiệp vụ
-        // hủy giữ chỗ + giải phóng suất + promotion riêng.
-        if ($registration->source_dorm_reservation_id
-            && $registration->auto_decision === 'approve'
-            && $request->input('decision') !== 'approve'
-        ) {
-            return response()->json([
-                'message' => 'Hồ sơ này đã có suất giữ chỗ được duyệt từ hồ sơ giữ chỗ tân sinh viên. Không thể đổi đề xuất qua chức năng này — cần xử lý qua chức năng hủy giữ chỗ riêng (chưa triển khai).',
-            ], 422);
-        }
+        // Trước đây chặn cứng không cho đổi đề xuất rời khỏi 'approve' cho Registration nguồn
+        // giữ chỗ, vì sợ để lại DormReservation approved dở dang. Giờ không cần chặn nữa —
+        // confirmSingle()/confirmBatch() đã tự xử lý chuyển DormReservation nguồn về
+        // 'waitlisted' (kèm thông báo cho thí sinh) khi quyết định cuối cùng là 'reject', áp
+        // dụng cho MỌI nguồn gốc auto_decision (xếp hạng tự động hay admin tự tay đổi ở đây).
 
         if ($request->input('decision') === 'approve' && $registration->hasRejectedPriorityEvidence()) {
             return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
         }
 
         if ($request->input('decision') === 'approve' && $registration->auto_decision !== 'approve') {
+            $gender = $registration->student?->gender;
+            // Đếm số đơn đang đề xuất duyệt CÙNG GIỚI TÍNH với đơn này — giường tách riêng
+            // theo giới nên không thể so với 1 số gộp chung cả nam lẫn nữ (xem
+            // PriorityRankingService::rankPeriod()).
             $proposedApprovedCount = Registration::where('registration_period_id', $registration->registration_period_id)
                 ->where('status', 'submitted')
                 ->where('auto_decision', 'approve')
+                ->whereHas('student', fn ($q) => $q->where('gender', $gender))
                 ->count() + 1;
 
             $capacity = app(DormCapacityService::class)
-                ->summarizeForRegistrationPeriod($registration->registration_period_id, $proposedApprovedCount);
+                ->summarizeForRegistrationPeriod($registration->registration_period_id, $proposedApprovedCount, gender: $gender);
 
             if (($capacity['capacity_exceeded'] ?? false) === true) {
                 return response()->json([
@@ -1693,12 +1731,12 @@ class RegistrationController extends Controller
                 return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
             }
 
-            // Registration nguồn giữ chỗ (tân sinh viên) — suất đã được DormReservation
-            // approved giữ từ trước (xem DormCapacityService::approved_dorm_reservations),
-            // KHÔNG tính đây là 1 suất mới nên bỏ qua check capacity thường. Thay vào đó
-            // phải lock + xác nhận DormReservation nguồn vẫn còn approved rồi mới cho qua.
+            // Registration nguồn giữ chỗ (tân sinh viên) — cần lock + đọc lại DormReservation
+            // nguồn dù quyết định là approve hay reject, vì từ khi rankPeriod() xếp hạng CHUNG
+            // với đăng ký thường (báo cáo 24/07), 1 hồ sơ giữ chỗ đã "approved" trước đó vẫn có
+            // thể bị xếp lại thành 'reject' nếu thua điểm ưu tiên — không còn là suất bất biến.
             $sourceReservation = null;
-            if ($registration->auto_decision === 'approve' && $registration->source_dorm_reservation_id) {
+            if ($registration->source_dorm_reservation_id && in_array($registration->auto_decision, ['approve', 'reject'], true)) {
                 $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
                     ->lockForUpdate()
                     ->first();
@@ -1709,7 +1747,7 @@ class RegistrationController extends Controller
                     ], 422);
                 }
             } elseif ($registration->auto_decision === 'approve' && $registration->status !== 'approved') {
-                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($registration->registration_period_id);
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($registration->registration_period_id, gender: $registration->student?->gender);
                 if (($capacity['available_approval_slots'] ?? 0) < 1) {
                     return response()->json([
                         'message'  => 'Sức chứa KTX đã thay đổi. Hiện không còn suất để duyệt thêm đơn này. Vui lòng xếp hạng hoặc điều chỉnh lại.',
@@ -1723,31 +1761,56 @@ class RegistrationController extends Controller
                 $registration->approved_at = now();
             }
             if ($registration->status === 'rejected' && $registration->auto_decision_reason) {
-                $registration->rejection_reason = $registration->auto_decision_reason;
+                $registration->rejection_reason = $this->studentFacingRejectionReason($registration->auto_decision_reason);
             }
             $registration->save();
 
-            // Chính thức chuyển DormReservation nguồn sang converted NGAY LÚC NÀY (không
-            // phải lúc tạo Registration) — suất chuyển từ counter approved_dorm_reservations
-            // sang approved_unassigned_registrations, tổng available_approval_slots không đổi.
+            $reservationBumped = false;
             if ($sourceReservation) {
-                $sourceReservation->update([
-                    'status'                    => 'converted',
-                    'converted_registration_id' => $registration->id,
-                ]);
+                if ($registration->status === 'approved') {
+                    // Chính thức chuyển DormReservation nguồn sang converted NGAY LÚC NÀY
+                    // (không phải lúc tạo Registration) — suất chuyển từ counter
+                    // approved_dorm_reservations sang approved_unassigned_registrations, tổng
+                    // available_approval_slots không đổi.
+                    $sourceReservation->update([
+                        'status'                    => 'converted',
+                        'converted_registration_id' => $registration->id,
+                    ]);
+                } else {
+                    // Thua điểm ưu tiên ở vòng xếp hạng chung — trả hồ sơ giữ chỗ về danh sách
+                    // chờ (KHÔNG rejected hẳn, vì thí sinh vẫn có thể được đôn lại nếu còn suất
+                    // trống, giống mọi hồ sơ waitlisted khác). Trang tra cứu của thí sinh đọc
+                    // trực tiếp status này nên tự động cập nhật theo, không cần sửa thêm.
+                    $sourceReservation->update([
+                        'status'               => 'waitlisted',
+                        'auto_decision'        => null,
+                        'auto_decision_reason' => null,
+                    ]);
+                    $reservationBumped = true;
+                }
             }
 
-            return $registration;
+            return ['registration' => $registration, 'reservation_bumped' => $reservationBumped];
         });
 
         if ($result instanceof JsonResponse) {
             return $result;
         }
 
-        $registration = $result;
+        $registration = $result['registration'];
 
         if ($registration->student) {
             $this->notifyRegistrationDecision($registration);
+
+            if ($result['reservation_bumped']) {
+                $this->notifier()->notifyStudent(
+                    $registration->student,
+                    'Hồ sơ giữ chỗ KTX chuyển sang danh sách chờ',
+                    'Khi xếp hạng chung toàn đợt (gồm cả đăng ký thường), hồ sơ giữ chỗ KTX của bạn không đủ thứ hạng ưu tiên để giữ suất và đã chuyển sang danh sách chờ. Bạn vẫn có thể được đôn lại nếu còn suất trống — vui lòng theo dõi thông báo tiếp theo.',
+                    'dorm_reservation_waitlisted',
+                    $registration->source_dorm_reservation_id,
+                );
+            }
         }
 
         return response()->json($this->formatRegistration($registration));
@@ -1772,6 +1835,25 @@ class RegistrationController extends Controller
             if ($period->status !== 'processing') {
                 return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt phải đang ở trạng thái processing']];
             }
+
+            // Chặn xác nhận TRƯỚC 17:00 ngày end_date — "Xếp hạng" chỉ để xem thử, có thể
+            // chạy lại nhiều lần, KHÔNG phải quyết định cuối; còn "Xác nhận tất cả" mới thật
+            // sự chốt (không thể đảo ngược) VÀ tự chuyển period → closed, khiến sinh viên mất
+            // quyền nộp đơn sớm hơn hạn 17h đã hứa nếu admin bấm sớm (báo cáo 25/07). Không
+            // có ngoại lệ bypass — muốn đóng sớm hơn dự kiến thì phải sửa end_date của đợt
+            // trước, không né qua chặn này.
+            $deadline = $period->admissionDeadline();
+            if ($deadline && now()->lessThan($deadline)) {
+                return ['ok' => false, 'status' => 422, 'payload' => [
+                    'message' => "Chưa tới hạn 17:00 ngày {$deadline->format('d/m/Y')} — chưa thể xác nhận đóng đợt.",
+                ]];
+            }
+
+            // Không còn chặn cứng "Xác nhận tất cả" vì còn hồ sơ giữ chỗ chưa xử lý xong —
+            // cùng lý do đã bỏ chặn ở RegistrationPeriodController::process(): 1 hồ sơ giữ chỗ
+            // approved-chưa-nhập-học có thể KHÔNG BAO GIỜ hết trạng thái này (sinh viên bỏ
+            // không nhập học), chặn cứng ở đây sẽ khiến đợt không bao giờ xác nhận được. Cảnh
+            // báo vẫn hiển thị ở FE để nhắc admin xử lý, không còn ngăn hành động.
 
             // Lock đúng tập registration còn 'submitted' TẠI THỜI ĐIỂM lock (1 query, không
             // tách bước) — registration nào đã bị xử lý/hủy bởi request khác trước khi lock
@@ -1803,19 +1885,40 @@ class RegistrationController extends Controller
             // Registration nguồn giữ chỗ KHÔNG tính vào approveProposalCount — suất của
             // chúng đã được DormReservation approved giữ từ trước (đếm ở
             // approved_dorm_reservations), không phải suất mới cần capacity thường cấp.
-            $approveProposalCount = $registrations
+            //
+            // Kiểm tra RIÊNG theo từng giới tính — giường tách riêng theo giới ở cấp Floor,
+            // gộp chung 1 số sẽ để lọt trường hợp vượt suất 1 giới trong khi giới kia còn dư
+            // (xem PriorityRankingService::rankPeriod()).
+            $approveProposals = $registrations
                 ->where('auto_decision', 'approve')
                 ->reject(fn ($r) => $rejectedEvidenceRegIds->contains($r->id))
-                ->reject(fn ($r) => $r->source_dorm_reservation_id !== null)
-                ->count();
-            if ($approveProposalCount > 0) {
-                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period, $approveProposalCount);
+                ->reject(fn ($r) => $r->source_dorm_reservation_id !== null);
+
+            foreach (['male', 'female'] as $gender) {
+                $genderProposalCount = $approveProposals
+                    ->filter(fn ($r) => strtolower($r->student->gender ?? '') === $gender)
+                    ->count();
+                if ($genderProposalCount === 0) {
+                    continue;
+                }
+                // excludeReservationsWithRegistration: true — cùng lý do như process(): hồ sơ
+                // giữ chỗ đã có Registration (nguồn source_dorm_reservation_id) bị loại khỏi
+                // $genderProposalCount ở trên rồi (suất của họ không phải suất MỚI cần xin
+                // thêm), nhưng nếu không loại luôn khỏi approved_dorm_reservations, hồ sơ giữ
+                // chỗ NÀO cũng bị tính là "đã chiếm 1 giường" tại đây — kể cả người sắp bị từ
+                // chối ngay trong chính lượt confirmBatch này (reservation của họ chỉ bị demote
+                // 'waitlisted' SAU khi vòng lặp xác nhận chạy xong, không phải trước lúc kiểm
+                // tra sức chứa) — khiến hệ thống tưởng hết suất, chặn nhầm cả đơn MỚI hợp lệ
+                // (báo cáo 28/07: 1 đơn nữ mới hợp lệ bị chặn dù còn suất thật do 2 hồ sơ giữ
+                // chỗ cũ đều bị tính "đã chiếm giường" dù 1 trong 2 sắp bị từ chối).
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period, $genderProposalCount, gender: $gender, excludeReservationsWithRegistration: true);
                 if (($capacity['capacity_exceeded'] ?? false) === true) {
+                    $genderLabel = $gender === 'male' ? 'nam' : 'nữ';
                     return [
                         'ok'      => false,
                         'status'  => 422,
                         'payload' => [
-                            'message'  => "Sức chứa KTX đã thay đổi. Hiện chỉ có thể duyệt {$capacity['available_approval_slots']} hồ sơ nhưng đang chọn {$approveProposalCount} hồ sơ. Vui lòng điều chỉnh lại.",
+                            'message'  => "Sức chứa KTX ({$genderLabel}) đã thay đổi. Hiện chỉ có thể duyệt {$capacity['available_approval_slots']} hồ sơ {$genderLabel} nhưng đang chọn {$genderProposalCount} hồ sơ. Vui lòng điều chỉnh lại.",
                             'capacity' => $capacity,
                         ],
                     ];
@@ -1827,6 +1930,7 @@ class RegistrationController extends Controller
             $skippedNull = 0;
             $skippedRejectedEvidence = 0;
             $toNotify = [];
+            $bumpedReservationRegIds = [];
 
             foreach ($registrations as $reg) {
                 if ($rejectedEvidenceRegIds->contains($reg->id)) {
@@ -1868,11 +1972,28 @@ class RegistrationController extends Controller
                 } elseif ($reg->auto_decision === 'reject') {
                     $reg->status = 'rejected';
                     if ($reg->auto_decision_reason) {
-                        $reg->rejection_reason = $reg->auto_decision_reason;
+                        $reg->rejection_reason = $this->studentFacingRejectionReason($reg->auto_decision_reason);
                     }
                     $reg->save();
                     $toNotify[] = $reg;
                     $confirmed++;
+
+                    // Registration nguồn giữ chỗ thua điểm ưu tiên ở vòng xếp hạng chung —
+                    // trả DormReservation nguồn về waitlisted (KHÔNG rejected hẳn, vẫn có thể
+                    // đôn lại nếu còn suất trống) trong CÙNG transaction, cùng quy tắc "throw để
+                    // rollback toàn batch nếu dữ liệu nguồn bất thường" như nhánh approve.
+                    if ($reg->source_dorm_reservation_id) {
+                        $sourceReservation = $sourceReservations->get($reg->source_dorm_reservation_id);
+                        if (!$sourceReservation || $sourceReservation->status !== 'approved') {
+                            throw new RuntimeException("CONFIRM_BATCH_SOURCE_RESERVATION_INVALID:{$reg->id}");
+                        }
+                        $sourceReservation->update([
+                            'status'               => 'waitlisted',
+                            'auto_decision'        => null,
+                            'auto_decision_reason' => null,
+                        ]);
+                        $bumpedReservationRegIds[] = $reg->id;
+                    }
                 } elseif ($reg->auto_decision === 'review') {
                     $skippedReview++;
                 } else {
@@ -1890,6 +2011,7 @@ class RegistrationController extends Controller
                 'skippedNull'              => $skippedNull,
                 'skippedRejectedEvidence'  => $skippedRejectedEvidence,
                 'toNotify'                 => $toNotify,
+                'bumpedReservationRegIds'  => $bumpedReservationRegIds,
             ];
         });
         } catch (RuntimeException $exception) {
@@ -1909,9 +2031,21 @@ class RegistrationController extends Controller
         }
 
         // Gửi thông báo SAU khi transaction đã commit (vẫn queue:true như hành vi cũ).
+        $bumpedRegIds = collect($result['bumpedReservationRegIds']);
         foreach ($result['toNotify'] as $reg) {
             if ($reg->student) {
                 $this->notifyRegistrationDecision($reg, queue: true);
+
+                if ($bumpedRegIds->contains($reg->id)) {
+                    $this->notifier()->notifyStudent(
+                        $reg->student,
+                        'Hồ sơ giữ chỗ KTX chuyển sang danh sách chờ',
+                        'Khi xếp hạng chung toàn đợt (gồm cả đăng ký thường), hồ sơ giữ chỗ KTX của bạn không đủ thứ hạng ưu tiên để giữ suất và đã chuyển sang danh sách chờ. Bạn vẫn có thể được đôn lại nếu còn suất trống — vui lòng theo dõi thông báo tiếp theo.',
+                        'dorm_reservation_waitlisted',
+                        $reg->source_dorm_reservation_id,
+                        queue: true,
+                    );
+                }
             }
         }
 

@@ -196,14 +196,16 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Tân sinh viên — xếp hạng + batch convert + quản lý hồ sơ giữ chỗ KTX
         Route::post('/admin/dorm-reservations/rank', [DormReservationController::class, 'rankReservations']);
+        Route::post('/admin/dorm-reservations/confirm-ranked', [DormReservationController::class, 'confirmRankedReservations']);
         Route::post('/admin/dorm-reservations/batch-convert', [DormReservationController::class, 'batchConvert']);
         Route::get('/admin/dorm-reservations', [DormReservationController::class, 'index']);
         Route::get('/admin/dorm-reservations/{id}', [DormReservationController::class, 'show'])->whereNumber('id');
         Route::get('/admin/dorm-reservations/{id}/history', [DormReservationController::class, 'history'])->whereNumber('id');
+        Route::patch('/admin/dorm-reservations/{id}/auto-decision', [DormReservationController::class, 'updateAutoDecision'])->whereNumber('id');
+        Route::post('/admin/dorm-reservations/{id}/confirm-decision', [DormReservationController::class, 'confirmDecision'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/approve', [DormReservationController::class, 'approve'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/reject', [DormReservationController::class, 'reject'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/waitlist', [DormReservationController::class, 'waitlist'])->whereNumber('id');
-        Route::put('/admin/dorm-reservations/{id}/cancel', [DormReservationController::class, 'cancel'])->whereNumber('id');
         Route::put('/admin/dorm-reservations/{id}/note', [DormReservationController::class, 'note'])->whereNumber('id');
         Route::post('/admin/dorm-reservations/{id}/convert-to-registration', [DormReservationController::class, 'convertToRegistration'])->whereNumber('id');
 

@@ -7,6 +7,7 @@ use App\Models\Occupancy;
 use App\Models\Registration;
 use App\Models\StudentPriority;
 use App\Services\PriorityRankingService;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -68,7 +69,7 @@ class StudentPriorityController extends Controller
             'note'   => 'nullable|string|max:500',
         ]);
 
-        $priority = StudentPriority::findOrFail($id);
+        $priority = StudentPriority::with('criteria')->findOrFail($id);
 
         $priority->status      = $request->status;
         // Route đã bảo vệ auth:sanctum + role:admin — lấy id từ $request->user() thay vì
@@ -93,13 +94,32 @@ class StudentPriorityController extends Controller
                 ->exists();
 
             if ($registration->status === 'submitted' && !$hasActiveOccupancy) {
+                $criteriaCode = trim((string) ($priority->criteria?->code ?? ''));
+                $criteriaName = trim((string) ($priority->criteria?->name ?? ''));
+                $criteriaLabel = trim(($criteriaCode !== '' ? "[{$criteriaCode}] " : '') . $criteriaName);
+                $criteriaLabel = $criteriaLabel !== '' ? $criteriaLabel : 'đã gửi';
+                $adminNote = trim((string) $request->input('note', ''));
+                $rejectionReason = $adminNote !== ''
+                    ? "Minh chứng ưu tiên {$criteriaLabel} không hợp lệ. Lý do: {$adminNote}"
+                    : "Minh chứng ưu tiên {$criteriaLabel} không hợp lệ.";
+
                 $registration->update([
                     'status'               => 'rejected',
-                    'rejection_reason'     => 'Minh chứng ưu tiên không hợp lệ.',
+                    'rejection_reason'     => $rejectionReason,
                     'auto_decision'        => null,
                     'auto_decision_reason' => null,
                 ]);
                 $registration->refresh();
+
+                if ($registration->student) {
+                    app(StudentNotificationService::class)->notifyStudent(
+                        $registration->student,
+                        'Đơn đăng ký nội trú bị từ chối',
+                        "Đơn đăng ký nội trú KTX của bạn đã bị từ chối. Lý do: {$registration->rejection_reason}",
+                        'registration_rejected',
+                        $registration->id,
+                    );
+                }
             } else {
                 Log::warning('[StudentPriorityController::verify] Minh chứng ưu tiên bị từ chối nhưng registration đã approved/cancelled/đang lưu trú ACTIVE — không tự động chuyển, cần admin xử lý riêng.', [
                     'registration_id' => $registration->id,

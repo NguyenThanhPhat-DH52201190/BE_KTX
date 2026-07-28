@@ -26,11 +26,15 @@ class DormWaitlistPromotionService
     }
 
     /**
+     * @param string $gender 'male'|'female' — GIỚI CỦA SUẤT VỪA GIẢI PHÓNG (giới của hồ sơ
+     *                       vừa bị hủy) — chỉ đôn người waitlisted CÙNG GIỚI lên thế chỗ, vì
+     *                       giường tách riêng theo giới ở cấp Floor (xem
+     *                       PriorityRankingService::rankPeriod() để biết lý do).
      * @return array{promoted: bool, reason?: string, reservation?: DormReservation, converted?: bool, registration?: ?Registration}
      */
-    public function promoteOne(int $periodId): array
+    public function promoteOne(int $periodId, string $gender): array
     {
-        return DB::transaction(function () use ($periodId) {
+        return DB::transaction(function () use ($periodId, $gender) {
             $period = RegistrationPeriod::where('id', $periodId)->lockForUpdate()->first();
             if (!$period) {
                 return ['promoted' => false, 'reason' => 'period_not_found'];
@@ -41,7 +45,7 @@ class DormWaitlistPromotionService
                 return ['promoted' => false, 'reason' => 'past_deadline'];
             }
 
-            $capacity = $this->capacityService->summarizeForRegistrationPeriod($period);
+            $capacity = $this->capacityService->summarizeForRegistrationPeriod($period, gender: $gender);
             if (($capacity['available_approval_slots'] ?? 0) < 1) {
                 return ['promoted' => false, 'reason' => 'no_capacity'];
             }
@@ -49,9 +53,11 @@ class DormWaitlistPromotionService
             // Lock cả nhóm waitlisted theo đúng thứ tự ranking hiện có (không persist rank
             // number) rồi chọn hồ sơ hợp lệ đầu tiên trong PHP — loại candidate không còn
             // hợp lệ (đã bị hủy trúng tuyển) hoặc có Registration hợp lệ khác trùng đợt
-            // (duplicate/race) thay vì đôn nhầm.
+            // (duplicate/race) thay vì đôn nhầm. Chỉ xét candidate CÙNG GIỚI với suất vừa
+            // giải phóng.
             $candidates = DormReservation::where('registration_period_id', $periodId)
                 ->where('status', 'waitlisted')
+                ->whereHas('candidate', fn ($q) => $q->where('gender', $gender))
                 ->with('candidate')
                 ->orderBy('top_priority_tier', 'asc')
                 ->orderByDesc('total_priority_score')

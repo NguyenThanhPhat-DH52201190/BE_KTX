@@ -16,6 +16,33 @@ use Illuminate\Support\Facades\Storage;
 
 class ReservationPriorityController extends Controller
 {
+    /**
+     * Đường dẫn minh chứng ưu tiên lưu trong DB là đường dẫn TƯƠNG ĐỐI — dùng thẳng làm
+     * <img src> ở FE sẽ bị trình duyệt tự ghép với domain của chính FE (Vercel), không phải
+     * domain BE (Railway), vỡ ảnh khi FE/BE khác domain nhau (báo cáo 28/07). Copy cùng logic
+     * với RegistrationController::getImageUrl().
+     */
+    private function getImageUrl($path)
+    {
+        if (empty($path)) {
+            return null;
+        }
+
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
+
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
+
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+
+        if ($isProduction) {
+            return url('/api/storage/' . $cleanPath);
+        }
+
+        return url('/storage/' . $cleanPath);
+    }
+
     // =========================================================
     // Public routes — verified by reservation_code
     // =========================================================
@@ -214,7 +241,14 @@ class ReservationPriorityController extends Controller
             $query->whereHas('dormReservation', fn ($q) => $q->where('registration_period_id', $periodId));
         }
 
-        return response()->json($query->paginate(20));
+        $paginated = $query->paginate(20);
+        foreach ($paginated as $priority) {
+            foreach ($priority->evidences as $ev) {
+                $ev->file_url = $this->getImageUrl($ev->file_url);
+            }
+        }
+
+        return response()->json($paginated);
     }
 
     /**
@@ -265,16 +299,16 @@ class ReservationPriorityController extends Controller
 
         // Minh chứng ưu tiên không hợp lệ — hồ sơ không còn đủ điều kiện tham gia ranking/
         // duyệt/promotion/convert. Chuyển thẳng sang rejected trừ khi đã ở trạng thái cuối
-        // (converted/cancelled/expired), trường hợp đó KHÔNG tự động sửa, chỉ log cảnh báo
-        // để admin xử lý riêng (không tự hủy hồ sơ đã converted/ACTIVE).
+        // (converted/expired), trường hợp đó KHÔNG tự động sửa, chỉ log cảnh báo
+        // để admin xử lý riêng (không tự đổi hồ sơ đã converted/ACTIVE).
         $reservation = $priority->dormReservation;
-        if ($reservation && !in_array($reservation->status, ['converted', 'cancelled', 'expired'], true)) {
+        if ($reservation && !in_array($reservation->status, ['converted', 'expired'], true)) {
             $reservation->update([
                 'status'            => 'rejected',
                 'rejection_reason'  => 'Minh chứng ưu tiên không hợp lệ.',
             ]);
         } elseif ($reservation) {
-            Log::warning('[ReservationPriorityController::reject] Minh chứng ưu tiên bị từ chối nhưng reservation đã ở trạng thái cuối (converted/cancelled/expired) — không tự động chuyển, cần admin xử lý riêng.', [
+            Log::warning('[ReservationPriorityController::reject] Minh chứng ưu tiên bị từ chối nhưng reservation đã ở trạng thái cuối (converted/expired) — không tự động chuyển, cần admin xử lý riêng.', [
                 'reservation_id' => $reservation->id,
                 'priority_id'    => $priority->id,
                 'status'         => $reservation->status,

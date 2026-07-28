@@ -11,6 +11,7 @@ use App\Models\Account;
 use App\Models\AdminNotification;
 use App\Models\Student;
 use App\Models\StudentSupportRequest;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -151,7 +152,8 @@ class StudentSupportRequestController extends Controller
             'admin_note' => ['nullable', 'string'],
         ]);
 
-        $supportRequest = StudentSupportRequest::query()->findOrFail($id);
+        $supportRequest = StudentSupportRequest::with('student')->findOrFail($id);
+        $previousStatus = $supportRequest->status;
 
         $supportRequest->update([
             'status'     => $validated['status'],
@@ -159,6 +161,10 @@ class StudentSupportRequestController extends Controller
                 ? $validated['admin_note']
                 : $supportRequest->admin_note,
         ]);
+
+        if ($validated['status'] !== $previousStatus) {
+            $this->notifyStudentStatusChange($supportRequest);
+        }
 
         return response()->json(
             (new StudentSupportRequestResource($supportRequest->fresh(self::WITH_ALL)))->resolve(),
@@ -169,15 +175,56 @@ class StudentSupportRequestController extends Controller
 
     private function transition(ProcessStudentSupportRequest $request, int $id, string $status): JsonResponse
     {
-        $supportRequest = StudentSupportRequest::query()->findOrFail($id);
+        $supportRequest = StudentSupportRequest::with('student')->findOrFail($id);
+        $previousStatus = $supportRequest->status;
 
         $supportRequest->update([
             'status'     => $status,
             'admin_note' => $request->has('admin_note') ? $request->input('admin_note') : $supportRequest->admin_note,
         ]);
 
+        if ($status !== $previousStatus) {
+            $this->notifyStudentStatusChange($supportRequest);
+        }
+
         return response()->json(
             (new StudentSupportRequestResource($supportRequest->fresh(self::WITH_ALL)))->resolve(),
+        );
+    }
+
+    /** Báo cho sinh viên (chuông + email) mỗi khi trạng thái yêu cầu hỗ trợ đổi — trước đây
+     *  chỉ có notifyAdmin() (báo admin lúc sinh viên GỬI yêu cầu), chiều ngược lại (admin xử
+     *  lý xong báo cho sinh viên) chưa từng được làm, sinh viên không biết yêu cầu đã được xử
+     *  lý trừ khi tự vào xem lại trang "Yêu cầu hỗ trợ". */
+    private function notifyStudentStatusChange(StudentSupportRequest $supportRequest): void
+    {
+        $student = $supportRequest->student;
+        if (!$student) {
+            return;
+        }
+
+        $statusMessage = match ($supportRequest->status) {
+            'processing' => "Yêu cầu hỗ trợ \"{$supportRequest->title}\" của bạn đang được xử lý.",
+            'rejected'   => "Yêu cầu hỗ trợ \"{$supportRequest->title}\" của bạn đã bị từ chối."
+                . ($supportRequest->admin_note ? " Lý do: {$supportRequest->admin_note}" : ''),
+            'completed'  => "Yêu cầu hỗ trợ \"{$supportRequest->title}\" của bạn đã được xử lý xong.",
+            default      => "Yêu cầu hỗ trợ \"{$supportRequest->title}\" của bạn đã được duyệt, đang chờ xử lý.",
+        };
+
+        $titleMessage = match ($supportRequest->status) {
+            'processing' => 'Yêu cầu hỗ trợ đang được xử lý',
+            'rejected'   => 'Yêu cầu hỗ trợ bị từ chối',
+            'completed'  => 'Yêu cầu hỗ trợ đã hoàn tất',
+            default      => 'Yêu cầu hỗ trợ đã được duyệt',
+        };
+
+        app(StudentNotificationService::class)->notifyStudent(
+            $student,
+            $titleMessage,
+            $statusMessage,
+            'support_request_status',
+            $supportRequest->id,
+            queue: true,
         );
     }
 

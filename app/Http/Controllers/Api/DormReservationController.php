@@ -7,13 +7,11 @@ use App\Http\Controllers\Controller;
 use App\Models\AdmissionCandidate;
 use App\Models\Bed;
 use App\Models\DormReservation;
-use App\Models\Occupancy;
 use App\Models\Registration;
 use App\Models\RegistrationPeriod;
 use App\Models\ReservationPriority;
 use App\Models\StudentPriority;
 use App\Models\StudentPriorityEvidence;
-use App\Services\DormReservationCancellationService;
 use App\Services\DormReservationConversionService;
 use App\Services\DormWaitlistPromotionService;
 use App\Services\DormCapacityService;
@@ -28,6 +26,35 @@ use Illuminate\Support\Str;
 class DormReservationController extends Controller
 {
     private const ACTIVE_RESERVATION_STATUSES = ['submitted', 'approved', 'waitlisted'];
+
+    /**
+     * Đường dẫn minh chứng ưu tiên lưu trong DB là đường dẫn TƯƠNG ĐỐI (VD
+     * "/api/storage/reservation-evidences/xxx.jpg") — dùng thẳng làm <img src> ở FE sẽ bị
+     * trình duyệt tự ghép với domain của chính FE (Vercel), không phải domain BE (Railway),
+     * vỡ ảnh khi FE/BE khác domain nhau (báo cáo 28/07: ảnh minh chứng bên "Đơn đăng ký" hiện
+     * đúng vì RegistrationController có bước này, còn "Hồ sơ giữ chỗ tân sinh viên" trả thẳng
+     * model ra JSON, thiếu bước build URL đầy đủ). Copy cùng logic với RegistrationController.
+     */
+    private function getImageUrl($path)
+    {
+        if (empty($path)) {
+            return null;
+        }
+
+        if (filter_var($path, FILTER_VALIDATE_URL)) {
+            return $path;
+        }
+
+        $cleanPath = preg_replace('#^/?(api/)?storage/#', '', ltrim($path, '/'));
+
+        $isProduction = app()->environment('production') || env('RAILWAY_ENVIRONMENT') === 'production';
+
+        if ($isProduction) {
+            return url('/api/storage/' . $cleanPath);
+        }
+
+        return url('/storage/' . $cleanPath);
+    }
 
     // =========================================================
     // Public routes
@@ -287,7 +314,18 @@ class DormReservationController extends Controller
             ], 422);
         }
 
-        $result = app(DormReservationCancellationService::class)->cancel($reservation->id, $reason, 'candidate');
+        // 'approved' (đã duyệt giữ chỗ, chưa nhập học/convert) và 'converted' (đã có
+        // Registration) đều cho tự hủy — DormReservationCancellationService::cancel() tự
+        // phân biệt 2 trường hợp và áp đúng điều kiện chặn riêng (hạn, đã bị admin xác
+        // nhận hay chưa...).
+        if (!in_array($reservation->status, ['approved', 'converted'], true)) {
+            return response()->json([
+                'message' => 'Hồ sơ giữ chỗ không còn hỗ trợ hủy trực tuyến. Nếu hồ sơ không được duyệt, Ban quản lý KTX sẽ phản hồi bằng trạng thái Không được duyệt.',
+                'code'    => 'not_cancellable',
+            ], 422);
+        }
+
+        $result = app(\App\Services\DormReservationCancellationService::class)->cancel($reservation->id, $reason, 'candidate');
 
         if (!$result['ok']) {
             return response()->json([
@@ -297,18 +335,17 @@ class DormReservationController extends Controller
         }
 
         $promotionOutcome = null;
-        if ($result['releasedApprovedSlot'] && $result['periodId']) {
-            $promotionOutcome = app(DormWaitlistPromotionService::class)->promoteOne($result['periodId']);
+        $releasedGender = strtolower($reservation->candidate?->gender ?? '');
+        if ($result['releasedApprovedSlot'] && $result['periodId'] && in_array($releasedGender, ['male', 'female'], true)) {
+            $promotionOutcome = app(DormWaitlistPromotionService::class)->promoteOne($result['periodId'], $releasedGender);
         }
 
         // Gửi thông báo SAU KHI cả 2 transaction (hủy + đôn waitlist) đã commit — không
         // gửi mail trong transaction để tránh giữ lock lâu / rollback vẫn lỡ gửi mail.
         $this->notifyCandidate(
             $result['reservation']->candidate,
-            $result['cancelledRegistration'] ? 'Đơn đăng ký nội trú KTX đã được hủy' : 'Yêu cầu ở KTX đã được hủy',
-            $result['cancelledRegistration']
-                ? 'Đơn đăng ký nội trú của bạn đã được hủy trước thời hạn.'
-                : 'Yêu cầu ở KTX của bạn đã được hủy thành công.',
+            'Đơn đăng ký nội trú KTX đã được hủy',
+            'Đơn đăng ký nội trú của bạn đã được hủy trước thời hạn.',
         );
 
         if ($promotionOutcome && $promotionOutcome['promoted']) {
@@ -457,11 +494,6 @@ class DormReservationController extends Controller
             $payload['rejection_reason'] = $reservation->rejection_reason;
         }
 
-        if ($reservation->status === 'cancelled') {
-            $payload['cancellation_reason'] = $reservation->cancellation_reason;
-            $payload['cancelled_at']        = $reservation->cancelled_at?->toISOString();
-        }
-
         if ($reservation->status === 'expired' && $reservation->expiration_reason) {
             $payload['expiration_reason'] = $reservation->expiration_reason;
         }
@@ -485,34 +517,28 @@ class DormReservationController extends Controller
         return $payload;
     }
 
-    /**
-     * Gợi ý hiển thị nút hủy cho FE — KHÔNG phải nguồn xác thực cuối cùng, cancelSelf()
-     * vẫn tự kiểm tra lại toàn bộ điều kiện trong transaction có lock trước khi hủy thật.
-     */
+    /** Đồng bộ đúng điều kiện với DormReservationCancellationService::cancel() — 2 giai đoạn
+     *  được tự hủy: (1) đã duyệt giữ chỗ nhưng CHƯA nhập học/convert, (2) đã convert thành
+     *  Registration nhưng Registration đó CHƯA được admin "Xác nhận" (còn 'submitted'). Ngay
+     *  khi admin xác nhận xong thì KHÔNG cho tự hủy trực tuyến nữa. */
     private function canCancelReservation(DormReservation $reservation): bool
     {
-        if (in_array($reservation->status, ['expired', 'rejected', 'cancelled'], true)) {
-            return false;
-        }
-
         $deadline = $reservation->period?->admissionDeadline();
         if ($deadline && now()->greaterThan($deadline)) {
             return false;
         }
 
-        if ($reservation->status === 'converted') {
-            $registration = $reservation->convertedRegistration;
-            if (!$registration || in_array($registration->status, ['cancelled', 'rejected'], true)) {
-                return false;
-            }
-
-            $occupancy = Occupancy::where('registration_id', $registration->id)->orderByDesc('id')->first();
-            if ($occupancy && $occupancy->status === 'ACTIVE') {
-                return false;
-            }
+        if ($reservation->status === 'approved') {
+            return true;
         }
 
-        return true;
+        if ($reservation->status !== 'converted') {
+            return false;
+        }
+
+        $registration = $reservation->convertedRegistration;
+
+        return $registration?->status === 'submitted';
     }
 
     private function reservationSubmittedAt(DormReservation $reservation): ?string
@@ -564,7 +590,7 @@ class DormReservationController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $validStatuses = ['submitted', 'approved', 'rejected', 'waitlisted', 'converted', 'expired', 'cancelled'];
+        $validStatuses = ['submitted', 'approved', 'rejected', 'waitlisted', 'converted', 'expired'];
 
         $query = DormReservation::with(['candidate', 'period', 'convertedRegistration'])
             ->withCount([
@@ -636,8 +662,43 @@ class DormReservationController extends Controller
             }
         }
 
+        // Status 'rejected' dùng chung cho cả "bị admin từ chối" lẫn "thí sinh tự hủy" (xem
+        // DormReservationCancellationService), phân biệt qua tiền tố "Tự hủy:" trong
+        // rejection_reason — FE cần lọc riêng 2 nhóm này ra 2 tab khác nhau trên danh sách
+        // (báo cáo 28/07: lọc "Không được duyệt" đang gộp luôn cả hồ sơ SV tự hủy).
+        if ($selfCancelled = $request->input('self_cancelled')) {
+            if ($selfCancelled === 'yes') {
+                $query->where('status', 'rejected')->where('rejection_reason', 'like', 'Tự hủy:%');
+            } elseif ($selfCancelled === 'no') {
+                $query->where('status', 'rejected')
+                    ->where(function ($q) {
+                        $q->whereNull('rejection_reason')->orWhere('rejection_reason', 'not like', 'Tự hủy:%');
+                    });
+            }
+        }
+
         if ($periodId = $request->input('registration_period_id')) {
             $query->where('registration_period_id', $periodId);
+        }
+
+        if ($autoDecision = $request->input('auto_decision')) {
+            if (in_array($autoDecision, ['approve', 'waitlist', 'reject', 'review'], true)) {
+                $query->where('auto_decision', $autoDecision);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
+        } elseif ($request->boolean('auto_decision_empty')) {
+            $query->whereNull('auto_decision');
+        }
+
+        // Lọc theo giới tính candidate — giường KTX tách riêng theo giới ở cấp Floor, FE cần
+        // đếm riêng số hồ sơ đề xuất duyệt của từng giới (xem PriorityRankingService::rankPeriod()).
+        if ($gender = $request->input('gender')) {
+            if (in_array($gender, ['male', 'female'], true)) {
+                $query->whereHas('candidate', fn ($q) => $q->where('gender', $gender));
+            } else {
+                $query->whereRaw('1 = 0');
+            }
         }
 
         // Việc 5 — lọc riêng nhóm "đã duyệt nhưng cuối cùng không thành đơn nội trú" (không
@@ -647,41 +708,41 @@ class DormReservationController extends Controller
             $query->where('expiration_reason', $expirationReason)->where('status', 'expired');
         }
 
-        // Lọc theo tình trạng minh chứng ưu tiên tổng hợp (badge FE đang hiển thị), dùng lại
-        // đúng thứ tự ưu tiên pending > verified > rejected như transform bên dưới, để filter
-        // và badge luôn khớp nhau. Các cột priority_*_count là subquery scalar từ withCount ở
-        // trên nên HAVING dùng được mà không cần GROUP BY.
-        // Chỉ áp dụng cho hồ sơ còn submitted/waitlisted — hồ sơ đã rejected/approved/... thì
-        // tình trạng minh chứng không còn ý nghĩa (không còn ai xử lý được nữa), khớp với badge
-        // ở FE cũng chỉ hiện cho 2 trạng thái này.
+        // Lọc theo tình trạng minh chứng ưu tiên tổng hợp (badge FE đang hiển thị). Riêng
+        // "Không hợp lệ" phải lấy cả hồ sơ đã bị chuyển sang rejected vì minh chứng bị từ chối.
+        // Các cột priority_*_count là subquery scalar từ withCount ở trên nên HAVING dùng được
+        // mà không cần GROUP BY.
         if ($priorityEvidenceStatus = $request->input('priority_evidence_status')) {
-            $query->whereIn('status', ['submitted', 'waitlisted']);
-            match ($priorityEvidenceStatus) {
-                'pending' => $query->having('priority_pending_count', '>', 0),
-                'verified' => $query->having('priority_pending_count', 0)
-                    ->having('priority_verified_count', '>', 0),
-                'rejected' => $query->having('priority_pending_count', 0)
-                    ->having('priority_verified_count', 0)
-                    ->having('priority_rejected_count', '>', 0),
-                default => $query->whereRaw('1 = 0'),
-            };
+            if ($priorityEvidenceStatus === 'pending') {
+                $query->whereIn('status', ['submitted', 'waitlisted'])
+                    ->having('priority_rejected_count', 0)
+                    ->having('priority_pending_count', '>', 0);
+            } elseif ($priorityEvidenceStatus === 'verified') {
+                $query->whereIn('status', ['submitted', 'waitlisted'])
+                    ->having('priority_pending_count', 0)
+                    ->having('priority_rejected_count', 0)
+                    ->having('priority_verified_count', '>', 0);
+            } elseif ($priorityEvidenceStatus === 'rejected') {
+                $query->having('priority_rejected_count', '>', 0);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
         }
 
         $paginated = $query->paginate(20);
 
         // Tổng hợp tình trạng minh chứng ưu tiên cho FE (badge thay cho "Đã nộp hồ sơ") từ
         // 3 count đã eager-load qua withCount ở trên — không query thêm theo từng hồ sơ.
-        // Ưu tiên hiển thị: còn minh chứng chờ xác minh > đã có minh chứng hợp lệ > toàn bộ
-        // minh chứng bị từ chối, vì "chờ xác minh" là việc cần admin xử lý gấp nhất.
+        // Ưu tiên hiển thị: có minh chứng bị từ chối > còn minh chứng chờ xác minh > đã xác minh.
         $paginated->getCollection()->transform(function (DormReservation $reservation) {
             $reservation->has_priority_evidence = ($reservation->priority_pending_count
                 + $reservation->priority_verified_count
                 + $reservation->priority_rejected_count) > 0;
 
             $reservation->priority_evidence_status = match (true) {
+                $reservation->priority_rejected_count > 0 => 'rejected',
                 $reservation->priority_pending_count > 0 => 'pending',
                 $reservation->priority_verified_count > 0 => 'verified',
-                $reservation->priority_rejected_count > 0 => 'rejected',
                 default => null,
             };
 
@@ -700,6 +761,12 @@ class DormReservationController extends Controller
             'reservationPriorities.criteria',
             'reservationPriorities.evidences',
         ])->findOrFail($id);
+
+        foreach ($reservation->reservationPriorities as $rp) {
+            foreach ($rp->evidences as $ev) {
+                $ev->file_url = $this->getImageUrl($ev->file_url);
+            }
+        }
 
         return response()->json($reservation);
     }
@@ -790,9 +857,21 @@ class DormReservationController extends Controller
                 ];
             }
 
+            // Candidate chưa có giới tính (khác Student, gender ở đây nullable) — không tự
+            // suy đoán được thuộc suất nam hay nữ, phải chặn duyệt tới khi admin điền đủ.
+            $candidateGender = strtolower($reservation->candidate?->gender ?? '');
+            if (!in_array($candidateGender, ['male', 'female'], true)) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => 'Ứng viên chưa có giới tính hợp lệ trong hồ sơ. Vui lòng cập nhật giới tính trước khi duyệt.'],
+                ];
+            }
+
             // Tính capacity SAU KHI đã lock RegistrationPeriod — chặn 2 request approve()
-            // đọc cùng 1 giá trị "còn suất" trước khi cả hai cùng ghi approved (BUG-2).
-            $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period ?? $reservation->registration_period_id);
+            // đọc cùng 1 giá trị "còn suất" trước khi cả hai cùng ghi approved (BUG-2). Tính
+            // RIÊNG theo giới của candidate — giường tách theo giới ở cấp Floor.
+            $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period ?? $reservation->registration_period_id, gender: $candidateGender);
             if (($capacity['available_approval_slots'] ?? 0) < 1) {
                 return [
                     'ok'      => false,
@@ -801,11 +880,13 @@ class DormReservationController extends Controller
                 ];
             }
 
-            $reservation->update([
-                'status'      => 'approved',
-                'approved_at' => now(),
-                'admin_note'  => $adminNoteInput ?? $reservation->admin_note,
-            ]);
+        $reservation->update([
+            'status'      => 'approved',
+            'approved_at' => now(),
+            'auto_decision' => null,
+            'auto_decision_reason' => null,
+            'admin_note'  => $adminNoteInput ?? $reservation->admin_note,
+        ]);
 
             $converted = null;
             // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
@@ -858,6 +939,8 @@ class DormReservationController extends Controller
         $reservation->update([
             'status'           => 'rejected',
             'rejection_reason' => $data['rejection_reason'],
+            'auto_decision'    => null,
+            'auto_decision_reason' => null,
             'admin_note'       => $request->input('admin_note', $reservation->admin_note),
         ]);
 
@@ -888,6 +971,8 @@ class DormReservationController extends Controller
 
         $reservation->update([
             'status'     => 'waitlisted',
+            'auto_decision' => null,
+            'auto_decision_reason' => null,
             'admin_note' => $request->input('admin_note', $reservation->admin_note),
         ]);
 
@@ -900,46 +985,183 @@ class DormReservationController extends Controller
         return response()->json(['message' => 'Đã chuyển vào danh sách chờ.', 'reservation' => $reservation->load('candidate', 'period')]);
     }
 
-    public function cancel(Request $request, int $id): JsonResponse
+    public function updateAutoDecision(Request $request, int $id): JsonResponse
     {
-        $reservation = DormReservation::with(['candidate', 'period'])->findOrFail($id);
-
-        if ($blocked = $this->ensureAdmissionPeriodStillOpen($reservation)) {
-            return $blocked;
-        }
-
-        if (in_array($reservation->status, ['converted', 'cancelled'], true)) {
-            return response()->json(['message' => 'Hồ sơ đã được chuyển đổi hoặc đã huỷ, không thể huỷ lại.'], 422);
-        }
-
         $data = $request->validate([
-            'reason' => ['required', 'string', 'max:1000'],
-            'admin_note' => ['nullable', 'string'],
+            'decision' => ['required', 'in:approve,waitlist,reject,review'],
+            'reason'   => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $reason = trim($data['reason']);
-        if ($reason === '') {
+        if ($data['decision'] === 'reject' && trim((string) ($data['reason'] ?? '')) === '') {
             return response()->json([
-                'message' => 'Vui lòng nhập lý do hủy giữ chỗ.',
-                'errors' => [
-                    'reason' => ['Vui lòng nhập lý do hủy giữ chỗ.'],
-                ],
+                'message' => 'Vui lòng nhập lý do từ chối.',
+                'errors'  => ['reason' => ['Vui lòng nhập lý do từ chối.']],
             ], 422);
         }
 
+        $reservation = DormReservation::with(['candidate', 'period'])->findOrFail($id);
+
+        if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
+            return response()->json(['message' => 'Chỉ đổi được đề xuất cho hồ sơ chưa có quyết định cuối cùng.'], 422);
+        }
+
+        // Thiếu check này khiến admin đổi tay đề xuất 'approve'/'waitlist' được ngay cả khi
+        // hồ sơ còn minh chứng ưu tiên chưa xác minh — tier/điểm dùng để xếp hạng lúc đó chưa
+        // phản ánh đúng thực tế (minh chứng pending không được tính), dẫn tới "Gợi ý duyệt"
+        // sai lệch hiển thị trên UI dù còn minh chứng pending (báo cáo 24/07). 'reject' vẫn
+        // cho phép bất kể minh chứng, đồng bộ với rule ở approve()/dropdown FE.
+        if (in_array($data['decision'], ['approve', 'waitlist'], true)) {
+            $pendingPriorityCount = ReservationPriority::where('dorm_reservation_id', $reservation->id)
+                ->where('status', 'pending')
+                ->count();
+
+            if ($pendingPriorityCount > 0) {
+                return response()->json([
+                    'message' => "Còn {$pendingPriorityCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh hoặc từ chối tất cả minh chứng trước khi đổi đề xuất sang duyệt/danh sách chờ.",
+                    'pending_priority_count' => $pendingPriorityCount,
+                ], 422);
+            }
+        }
+
         $reservation->update([
-            'status'              => 'cancelled',
-            'cancellation_reason' => $reason,
-            'admin_note'          => $data['admin_note'] ?? $reservation->admin_note,
+            'auto_decision'        => $data['decision'],
+            'auto_decision_reason' => trim((string) ($data['reason'] ?? '')) ?: null,
         ]);
 
-        $this->notifyCandidate(
-            $reservation->candidate,
-            'Hồ sơ giữ chỗ KTX đã bị huỷ',
-            'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị huỷ.',
-        );
+        return response()->json([
+            'message'     => 'Đã cập nhật đề xuất.',
+            'reservation' => $reservation->fresh(['candidate', 'period', 'convertedRegistration']),
+        ]);
+    }
 
-        return response()->json(['message' => 'Đã huỷ hồ sơ giữ chỗ.', 'reservation' => $reservation->load('candidate', 'period')]);
+    public function confirmDecision(Request $request, int $id): JsonResponse
+    {
+        $result = DB::transaction(function () use ($id) {
+            $reservation = DormReservation::with(['candidate', 'period'])->lockForUpdate()->findOrFail($id);
+
+            if ($blocked = $this->ensureAdmissionPeriodStillOpen($reservation)) {
+                return ['ok' => false, 'response' => $blocked];
+            }
+
+            if (!in_array($reservation->status, ['submitted', 'waitlisted'], true)) {
+                return ['ok' => false, 'response' => response()->json(['message' => 'Hồ sơ hiện không ở trạng thái chờ xác nhận.'], 422)];
+            }
+
+            if (!in_array($reservation->auto_decision, ['approve', 'waitlist', 'reject'], true)) {
+                return ['ok' => false, 'response' => response()->json(['message' => 'Hồ sơ chưa có đề xuất có thể xác nhận.'], 422)];
+            }
+
+            $period = $reservation->registration_period_id
+                ? RegistrationPeriod::where('id', $reservation->registration_period_id)->lockForUpdate()->first()
+                : null;
+
+            if (in_array($reservation->auto_decision, ['approve', 'waitlist'], true)) {
+                $pendingPriorityCount = ReservationPriority::where('dorm_reservation_id', $reservation->id)
+                    ->where('status', 'pending')
+                    ->count();
+
+                if ($pendingPriorityCount > 0) {
+                    return ['ok' => false, 'response' => response()->json([
+                        'message' => "Còn {$pendingPriorityCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh hoặc từ chối tất cả minh chứng trước khi xác nhận.",
+                        'pending_priority_count' => $pendingPriorityCount,
+                    ], 422)];
+                }
+
+                if ($reservation->hasRejectedPriorityEvidence()) {
+                    return ['ok' => false, 'response' => response()->json(['message' => 'Không thể xác nhận hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422)];
+                }
+            }
+
+            $notify = null;
+            $converted = null;
+
+            if ($reservation->auto_decision === 'approve') {
+                $candidateGender = strtolower($reservation->candidate?->gender ?? '');
+                if (!in_array($candidateGender, ['male', 'female'], true)) {
+                    return ['ok' => false, 'response' => response()->json(['message' => 'Ứng viên chưa có giới tính hợp lệ trong hồ sơ. Vui lòng cập nhật giới tính trước khi xác nhận.'], 422)];
+                }
+
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period ?? $reservation->registration_period_id, gender: $candidateGender);
+                if (($capacity['available_approval_slots'] ?? 0) < 1) {
+                    return ['ok' => false, 'response' => response()->json(['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity], 422)];
+                }
+
+                $reservation->update([
+                    'status'               => 'approved',
+                    'approved_at'          => now(),
+                    'auto_decision'        => null,
+                    'auto_decision_reason' => null,
+                ]);
+
+                if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
+                    $converted = app(DormReservationConversionService::class)->convert($reservation);
+                }
+
+                $notify = [
+                    'title' => 'Hồ sơ giữ chỗ KTX đã được duyệt',
+                    'content' => $this->approvedNotificationContent($reservation),
+                ];
+            } elseif ($reservation->auto_decision === 'waitlist') {
+                $reservation->update([
+                    'status'               => 'waitlisted',
+                    'auto_decision'        => null,
+                    'auto_decision_reason' => null,
+                ]);
+
+                $notify = [
+                    'title' => 'Hồ sơ giữ chỗ KTX đang ở danh sách chờ',
+                    'content' => 'Hồ sơ đăng ký giữ chỗ KTX của bạn hiện đang ở danh sách chờ do số lượng chỗ có hạn. Vui lòng theo dõi thông báo tiếp theo.',
+                ];
+            } else {
+                $reason = trim((string) $reservation->auto_decision_reason);
+                if ($reason === '') {
+                    return ['ok' => false, 'response' => response()->json(['message' => 'Vui lòng nhập lý do từ chối trước khi xác nhận.'], 422)];
+                }
+
+                $reservation->update([
+                    'status'               => 'rejected',
+                    'rejection_reason'     => $reason,
+                    'auto_decision'        => null,
+                    'auto_decision_reason' => null,
+                ]);
+
+                $notify = [
+                    'title' => 'Hồ sơ giữ chỗ KTX bị từ chối',
+                    'content' => 'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị từ chối. Lý do: ' . $reason,
+                ];
+            }
+
+            return [
+                'ok'          => true,
+                'reservation' => $reservation->fresh(['candidate', 'period', 'convertedRegistration']),
+                'notify'      => $notify,
+                'converted'   => $converted,
+            ];
+        });
+
+        if (!$result['ok']) {
+            return $result['response'];
+        }
+
+        if ($result['notify']) {
+            $this->notifyCandidate(
+                $result['reservation']->candidate,
+                $result['notify']['title'],
+                $result['notify']['content'],
+            );
+        }
+
+        return response()->json([
+            'message'     => 'Đã xác nhận đề xuất.',
+            'reservation' => $result['reservation'],
+        ]);
+    }
+
+    public function cancel(Request $request, int $id): JsonResponse
+    {
+        return response()->json([
+            'message' => 'Chức năng này đã được ngừng sử dụng. Vui lòng dùng Từ chối nếu hồ sơ không được duyệt.',
+        ], 410);
     }
 
     public function note(Request $request, int $id): JsonResponse
@@ -1116,41 +1338,68 @@ class DormReservationController extends Controller
                 ];
             }
 
-            $capacityBefore = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period);
-            $freeBeds       = (int) $capacityBefore['available_approval_slots'];
+            $rankableCount = DormReservation::where('registration_period_id', $periodId)
+                ->where('status', 'submitted')
+                ->whereNull('auto_decision')
+                ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
+                ->count();
+
+            if ($rankableCount === 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => 'Đợt này không còn hồ sơ chờ xử lý mới để xếp hạng.'],
+                ];
+            }
+
+            // Candidate chưa có giới tính hợp lệ không thể xếp vào suất nam/nữ nào — chặn cả
+            // đợt tới khi admin điền đủ, giống cách đang chặn khi còn minh chứng pending.
+            $genderlessCount = DormReservation::where('registration_period_id', $periodId)
+                ->where('status', 'submitted')
+                ->whereNull('auto_decision')
+                ->whereDoesntHave('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
+                ->whereHas('candidate', fn ($q) => $q->whereNotIn('gender', ['male', 'female'])->orWhereNull('gender'))
+                ->count();
+            if ($genderlessCount > 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => ['message' => "Còn {$genderlessCount} hồ sơ ứng viên chưa có giới tính hợp lệ. Vui lòng cập nhật giới tính trước khi xếp hạng."],
+                ];
+            }
+
+            $capacityService = app(DormCapacityService::class);
+            $freeBedsByGender = [
+                'male' => (int) $capacityService->summarizeForRegistrationPeriod($period, gender: 'male')['available_approval_slots'],
+                'female' => (int) $capacityService->summarizeForRegistrationPeriod($period, gender: 'female')['available_approval_slots'],
+            ];
 
             $ranker = new PriorityRankingService();
-            $rankResult = $ranker->rankReservationPeriod($periodId, $freeBeds);
-            $capacityWithProposals = app(DormCapacityService::class)
-                ->summarizeForRegistrationPeriod($period, $rankResult['approved']->count());
-
-            $toNotifyApproved  = [];
-            $toNotifyWaitlist  = [];
+            $rankResult = $ranker->rankReservationPeriod($periodId, $freeBedsByGender);
+            $capacityWithProposalsByGender = [
+                'male' => $capacityService->summarizeForRegistrationPeriod($period, $rankResult['byGender']['male']['approved']->count(), gender: 'male'),
+                'female' => $capacityService->summarizeForRegistrationPeriod($period, $rankResult['byGender']['female']['approved']->count(), gender: 'female'),
+            ];
 
             foreach ($rankResult['approved'] as $reservation) {
-                $reservation->update(['status' => 'approved', 'approved_at' => now()]);
-                $toNotifyApproved[] = $reservation;
-
-                // Candidate đã nhập học từ trước (Student đã tồn tại) — tự chuyển luôn thành
-                // Registration, không cần đợi import lại Excel. convert() tự mở transaction lồng
-                // (savepoint) — giữ nguyên logic hiện có.
-                if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
-                    app(DormReservationConversionService::class)->convert($reservation);
-                }
+                $reservation->update([
+                    'auto_decision'        => 'approve',
+                    'auto_decision_reason' => null,
+                ]);
             }
             foreach ($rankResult['waitlist'] as $reservation) {
-                $reservation->update(['status' => 'waitlisted']);
-                $toNotifyWaitlist[] = $reservation;
+                $reservation->update([
+                    'auto_decision'        => 'waitlist',
+                    'auto_decision_reason' => 'Không đủ chỉ tiêu giữ chỗ tại thời điểm xếp hạng.',
+                ]);
             }
 
             return [
-                'ok'                => true,
-                'free_beds'         => $freeBeds,
-                'approved_count'    => $rankResult['approved']->count(),
-                'waitlist_count'    => $rankResult['waitlist']->count(),
-                'capacity'          => $capacityWithProposals,
-                'toNotifyApproved'  => $toNotifyApproved,
-                'toNotifyWaitlist'  => $toNotifyWaitlist,
+                'ok'                  => true,
+                'free_beds_by_gender' => $freeBedsByGender,
+                'approved_count'      => $rankResult['approved']->count(),
+                'waitlist_count'      => $rankResult['waitlist']->count(),
+                'capacity_by_gender'  => $capacityWithProposalsByGender,
             ];
         });
 
@@ -1158,28 +1407,177 @@ class DormReservationController extends Controller
             return response()->json($result['payload'], $result['status']);
         }
 
-        // Gửi thông báo SAU khi transaction đã commit.
-        foreach ($result['toNotifyApproved'] as $reservation) {
-            $this->notifyCandidate(
-                $reservation->candidate,
-                'Hồ sơ giữ chỗ KTX đã được duyệt',
-                $this->approvedNotificationContent($reservation),
-            );
+        return response()->json([
+            'message'             => 'Đã xếp hạng và tạo đề xuất.',
+            'free_beds_by_gender' => $result['free_beds_by_gender'],
+            'approved'            => $result['approved_count'],
+            'waitlist'            => $result['waitlist_count'],
+            'capacity_by_gender'  => $result['capacity_by_gender'],
+        ]);
+    }
+
+    public function confirmRankedReservations(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'registration_period_id' => ['required', 'integer', 'exists:registration_periods,id'],
+        ]);
+
+        $periodId = (int) $data['registration_period_id'];
+
+        $result = DB::transaction(function () use ($periodId) {
+            $period = RegistrationPeriod::where('id', $periodId)->lockForUpdate()->first();
+
+            if (!$period) {
+                return ['ok' => false, 'status' => 404, 'payload' => ['message' => 'Không tìm thấy đợt đăng ký.']];
+            }
+
+            if ($this->admissionPeriodPastDeadline($period)) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt đăng ký giữ chỗ KTX đã kết thúc, không thể xác nhận đề xuất.']];
+            }
+
+            $reservations = DormReservation::with(['candidate', 'period'])
+                ->where('registration_period_id', $periodId)
+                ->whereIn('status', ['submitted', 'waitlisted'])
+                ->whereIn('auto_decision', ['approve', 'waitlist', 'reject'])
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($reservations->isEmpty()) {
+                return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Không có đề xuất nào để xác nhận.']];
+            }
+
+            $actionableIds = $reservations
+                ->whereIn('auto_decision', ['approve', 'waitlist'])
+                ->pluck('id');
+
+            if ($actionableIds->isNotEmpty()) {
+                $pendingPriorityCount = ReservationPriority::whereIn('dorm_reservation_id', $actionableIds)
+                    ->where('status', 'pending')
+                    ->count();
+
+                if ($pendingPriorityCount > 0) {
+                    return ['ok' => false, 'status' => 422, 'payload' => [
+                        'message' => "Còn {$pendingPriorityCount} minh chứng ưu tiên chưa được xác minh. Vui lòng xác minh tất cả minh chứng trước khi xác nhận đề xuất.",
+                        'pending_priority_count' => $pendingPriorityCount,
+                    ]];
+                }
+
+                $rejectedPriorityCount = ReservationPriority::whereIn('dorm_reservation_id', $actionableIds)
+                    ->where('status', 'rejected')
+                    ->count();
+
+                if ($rejectedPriorityCount > 0) {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Có hồ sơ trong đề xuất có minh chứng ưu tiên không hợp lệ. Vui lòng tải lại dữ liệu và xử lý lại.']];
+                }
+            }
+
+            // Kiểm tra RIÊNG theo giới tính candidate — giường tách theo giới ở cấp Floor.
+            $approvedReservations = $reservations->where('auto_decision', 'approve');
+            foreach (['male', 'female'] as $gender) {
+                $genderApproveCount = $approvedReservations
+                    ->filter(fn ($r) => strtolower($r->candidate?->gender ?? '') === $gender)
+                    ->count();
+                if ($genderApproveCount === 0) {
+                    continue;
+                }
+                $capacity = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period, $genderApproveCount, gender: $gender);
+                if (($capacity['capacity_exceeded'] ?? false) === true) {
+                    return ['ok' => false, 'status' => 422, 'payload' => ['message' => self::CAPACITY_CONFLICT_MESSAGE, 'capacity' => $capacity]];
+                }
+            }
+
+            $approved = 0;
+            $waitlisted = 0;
+            $rejected = 0;
+            $converted = 0;
+            $toNotify = [];
+
+            foreach ($reservations as $reservation) {
+                if ($reservation->auto_decision === 'approve') {
+                    $reservation->update([
+                        'status'               => 'approved',
+                        'approved_at'          => now(),
+                        'auto_decision'        => null,
+                        'auto_decision_reason' => null,
+                    ]);
+
+                    if ($reservation->candidate?->status === 'enrolled' && $reservation->candidate?->student_id) {
+                        $registration = app(DormReservationConversionService::class)->convert($reservation);
+                        if ($registration) {
+                            $converted++;
+                        }
+                    }
+
+                    $toNotify[] = [
+                        'reservation' => $reservation->fresh(['candidate', 'period']),
+                        'title'       => 'Hồ sơ giữ chỗ KTX đã được duyệt',
+                        'content'     => $this->approvedNotificationContent($reservation),
+                    ];
+                    $approved++;
+                } elseif ($reservation->auto_decision === 'waitlist') {
+                    $reservation->update([
+                        'status'               => 'waitlisted',
+                        'auto_decision'        => null,
+                        'auto_decision_reason' => null,
+                    ]);
+
+                    $toNotify[] = [
+                        'reservation' => $reservation->fresh(['candidate', 'period']),
+                        'title'       => 'Hồ sơ giữ chỗ KTX đang ở danh sách chờ',
+                        'content'     => 'Hồ sơ đăng ký giữ chỗ KTX của bạn hiện đang ở danh sách chờ do số lượng chỗ có hạn. Vui lòng theo dõi thông báo tiếp theo.',
+                    ];
+                    $waitlisted++;
+                } elseif ($reservation->auto_decision === 'reject') {
+                    $reason = trim((string) $reservation->auto_decision_reason);
+                    if ($reason === '') {
+                        return ['ok' => false, 'status' => 422, 'payload' => ['message' => "Hồ sơ #{$reservation->id} chưa có lý do từ chối."]];
+                    }
+
+                    $reservation->update([
+                        'status'               => 'rejected',
+                        'rejection_reason'     => $reason,
+                        'auto_decision'        => null,
+                        'auto_decision_reason' => null,
+                    ]);
+
+                    $toNotify[] = [
+                        'reservation' => $reservation->fresh(['candidate', 'period']),
+                        'title'       => 'Hồ sơ giữ chỗ KTX bị từ chối',
+                        'content'     => 'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị từ chối. Lý do: ' . $reason,
+                    ];
+                    $rejected++;
+                }
+            }
+
+            return [
+                'ok'         => true,
+                'approved'   => $approved,
+                'waitlisted' => $waitlisted,
+                'rejected'   => $rejected,
+                'converted'  => $converted,
+                'toNotify'   => $toNotify,
+            ];
+        });
+
+        if (!$result['ok']) {
+            return response()->json($result['payload'], $result['status']);
         }
-        foreach ($result['toNotifyWaitlist'] as $reservation) {
+
+        foreach ($result['toNotify'] as $item) {
             $this->notifyCandidate(
-                $reservation->candidate,
-                'Hồ sơ giữ chỗ KTX đang chờ xét duyệt',
-                'Hồ sơ đăng ký giữ chỗ KTX của bạn hiện đang ở danh sách chờ do số lượng chỗ có hạn. Vui lòng theo dõi thông báo tiếp theo.',
+                $item['reservation']->candidate,
+                $item['title'],
+                $item['content'],
             );
         }
 
         return response()->json([
-            'message'   => 'Đã xếp hạng xong.',
-            'free_beds' => $result['free_beds'],
-            'approved'  => $result['approved_count'],
-            'waitlist'  => $result['waitlist_count'],
-            'capacity'  => $result['capacity'],
+            'message'    => 'Đã xác nhận đề xuất xếp hạng.',
+            'approved'   => $result['approved'],
+            'waitlisted' => $result['waitlisted'],
+            'rejected'   => $result['rejected'],
+            'converted'  => $result['converted'],
         ]);
     }
 
@@ -1303,11 +1701,11 @@ class DormReservationController extends Controller
     {
         $deadline = $reservation->period?->admissionDeadline();
         if (!$deadline) {
-            return 'Hồ sơ giữ chỗ của bạn đã được duyệt. Vui lòng theo dõi email/thông báo để hoàn tất thủ tục nhập học và đăng ký lưu trú chính thức.';
+            return 'Bạn đã được duyệt hồ sơ giữ chỗ KTX. Vui lòng hoàn tất thủ tục nhập học để được xét duyệt đơn đăng ký lưu trú chính thức.';
         }
 
-        return 'Hồ sơ giữ chỗ của bạn đã được duyệt. Vui lòng hoàn tất thủ tục nhập học trước 17:00 ngày '
-            . $deadline->format('d/m/Y') . ' để tiếp tục giữ chỗ KTX.';
+        return 'Bạn đã được duyệt hồ sơ giữ chỗ KTX. Vui lòng nhập học trước 17:00 ngày '
+            . $deadline->format('d/m/Y') . ' để được xét duyệt đơn đăng ký lưu trú chính thức.';
     }
 
     /**

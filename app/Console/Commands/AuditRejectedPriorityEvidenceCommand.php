@@ -14,7 +14,7 @@ use Illuminate\Console\Command;
  *
  * --fix: backfill status=rejected cho đúng những hồ sơ AN TOÀN để tự động sửa (theo đúng
  *        điều kiện cascade đang dùng khi admin từ chối minh chứng): DormReservation chưa
- *        converted/cancelled/expired; Registration còn 'submitted' và chưa có Occupancy
+ *        converted/expired; Registration còn 'submitted' và chưa có Occupancy
  *        ACTIVE. Hồ sơ đã converted/approved/active KHÔNG bao giờ bị đụng tới, kể cả với
  *        --fix — luôn chỉ liệt kê để admin xử lý tay.
  */
@@ -38,7 +38,7 @@ class AuditRejectedPriorityEvidenceCommand extends Command
     private function auditDormReservations(bool $fix): void
     {
         $reservations = DormReservation::whereHas('reservationPriorities', fn ($q) => $q->where('status', 'rejected'))
-            ->whereNotIn('status', ['rejected', 'converted', 'cancelled', 'expired'])
+            ->whereNotIn('status', ['rejected', 'converted', 'expired'])
             ->get();
 
         $this->info("[DormReservation] {$reservations->count()} hồ sơ có minh chứng ưu tiên rejected nhưng chưa chuyển sang status=rejected:");
@@ -51,7 +51,7 @@ class AuditRejectedPriorityEvidenceCommand extends Command
             return;
         }
 
-        // Mọi hồ sơ lọt qua whereNotIn ở trên đều đã loại converted/cancelled/expired nên
+        // Mọi hồ sơ lọt qua whereNotIn ở trên đều đã loại converted/expired nên
         // an toàn để backfill toàn bộ — đúng điều kiện cascade dùng ở
         // ReservationPriorityController::reject().
         foreach ($reservations as $reservation) {

@@ -3,10 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\DormReservation;
 use App\Models\Occupancy;
+use App\Models\Registration;
 use App\Models\RegistrationPeriod;
 use App\Services\DormCapacityService;
 use App\Services\PriorityRankingService;
+use App\Services\StudentNotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,14 +31,37 @@ class RegistrationPeriodController extends Controller
             'registrations',
             'registrations as approved_count'         => fn ($q) => $q->where('status', 'approved'),
             'registrations as rejected_count'         => fn ($q) => $q->where('status', 'rejected'),
+            // Tách riêng đơn SV tự hủy (status 'cancelled') khỏi "Tổng đơn" hiển thị cùng
+            // approved/rejected — trước đây "Tổng đơn" đếm cả cancelled trong khi 2 badge
+            // approved/rejected không tính, khiến tổng 2 badge luôn lệch với "Tổng đơn" hiển
+            // thị, gây hiểu lầm là thiếu đơn (báo cáo 28/07).
+            'registrations as cancelled_count'        => fn ($q) => $q->where('status', 'cancelled'),
             'registrations as approve_proposal_count' => fn ($q) => $q->where('auto_decision', 'approve')->where('status', 'submitted'),
             'registrations as reject_proposal_count'  => fn ($q) => $q->where('auto_decision', 'reject')->where('status', 'submitted'),
             'registrations as review_count'           => fn ($q) => $q->where('auto_decision', 'review')->where('status', 'submitted'),
+            // Tách riêng theo giới tính — giường KTX tách riêng theo giới ở cấp Floor, nên
+            // "đang đề xuất duyệt" cũng phải xét riêng từng giới khi kiểm tra vượt suất (xem
+            // PriorityRankingService::rankPeriod()), không dùng được 1 số gộp chung nữa.
+            'registrations as approve_proposal_count_male' => fn ($q) => $q->where('auto_decision', 'approve')->where('status', 'submitted')
+                ->whereHas('student', fn ($sq) => $sq->where('gender', 'male')),
+            'registrations as approve_proposal_count_female' => fn ($q) => $q->where('auto_decision', 'approve')->where('status', 'submitted')
+                ->whereHas('student', fn ($sq) => $sq->where('gender', 'female')),
             // Đếm riêng cho luồng tân sinh viên — dùng hiển thị trạng thái đóng đợt tự động,
             // không phục vụ chốt thủ công (đã bỏ cơ chế đó).
-            'dormReservations as admission_submitted_count'  => fn ($q) => $q->where('status', 'submitted'),
-            'dormReservations as admission_waitlisted_count' => fn ($q) => $q->where('status', 'waitlisted'),
-            'dormReservations as admission_approved_count'   => fn ($q) => $q->where('status', 'approved'),
+            //
+            // Tách "chưa xếp hạng" (submitted/waitlisted, auto_decision null — cần bấm Xếp
+            // hạng) khỏi "đã có gợi ý, chờ xác nhận" (đã qua rankReservationPeriod() nhưng
+            // chưa được admin bấm Xác nhận đề xuất) — trước đây gộp chung vào "Chờ xét" khiến
+            // hồ sơ ĐÃ xếp hạng vẫn bị nhắc "nhập danh sách nhập học/MSSV", sai hành động cần
+            // làm thật sự (chỉ cần bấm Xác nhận đề xuất, không liên quan nhập học) — báo cáo
+            // 24/07.
+            'dormReservations as admission_submitted_count'  => fn ($q) => $q->where('status', 'submitted')->whereNull('auto_decision'),
+            'dormReservations as admission_waitlisted_count' => fn ($q) => $q->where('status', 'waitlisted')->whereNull('auto_decision'),
+            'dormReservations as admission_awaiting_confirm_count' => fn ($q) => $q->whereIn('status', ['submitted', 'waitlisted'])->whereNotNull('auto_decision'),
+            // Chỉ tính candidate CHƯA nhập học — số này chỉ để hiển thị cảnh báo nhắc admin
+            // nhập danh sách nhập học/MSSV, KHÔNG còn chặn xếp hạng (xem process() bên dưới).
+            'dormReservations as admission_approved_count'   => fn ($q) => $q->where('status', 'approved')
+                ->whereHas('candidate', fn ($cq) => $cq->where('status', '!=', 'enrolled')),
         ])->addSelect(DB::raw("({$pendingCriteriaSubquery->toSql()}) as `pending_criteria_count`"))
           ->addBinding($pendingCriteriaSubquery->getBindings(), 'select');
     }
@@ -57,8 +83,19 @@ class RegistrationPeriodController extends Controller
             ->whereDate('start_date', '<=', $today)
             ->update(['status' => 'active']);
 
+        // Không tự đóng đợt kênh 'main' nếu còn đơn 'submitted' chưa xử lý — tránh đá nhau
+        // với AutoCloseAdmissionPeriodsCommand (lệnh xử lý thật: tự xếp hạng/xác nhận, hoặc
+        // báo admin nếu còn minh chứng chưa xác minh và GIỮ đợt ở active). Nếu hàm này cứ
+        // đóng theo ngày bất kể còn việc dở, mỗi lần ai đó load lại trang sẽ xóa sạch trạng
+        // thái "chưa đóng" mà lệnh kia vừa set, tạo vòng lặp mở-đóng vô nghĩa mỗi lần
+        // refresh (báo cáo 27/07). Đợt kênh 'rolling' không qua process()/confirmBatch() nên
+        // không tính, cứ đóng theo ngày như cũ.
         RegistrationPeriod::where('status', 'active')
             ->whereDate('end_date', '<', $today)
+            ->where(function ($q) {
+                $q->where('channel', '!=', 'main')
+                    ->orWhereDoesntHave('registrations', fn ($rq) => $rq->where('status', 'submitted'));
+            })
             ->update(['status' => 'closed']);
     }
 
@@ -411,8 +448,36 @@ class RegistrationPeriodController extends Controller
                 return ['ok' => false, 'status' => 422, 'payload' => ['message' => 'Đợt phải ở trạng thái active, closed hoặc processing.']];
             }
 
-            $capacityBefore = app(DormCapacityService::class)->summarizeForRegistrationPeriod($period);
-            $freeBeds       = (int) $capacityBefore['available_approval_slots'];
+            // Không còn chặn xếp hạng vì còn hồ sơ giữ chỗ approved-chưa-nhập-học — sinh viên
+            // trúng tuyển nhưng bỏ không nhập học thì sẽ KHÔNG BAO GIỜ hết trạng thái này,
+            // chặn cứng ở đây sẽ khiến đợt không bao giờ xếp hạng được. Cảnh báo vẫn hiển thị
+            // ở FE (chỉ để nhắc admin nhập danh sách nhập học/MSSV), không còn ngăn hành động.
+
+            // Giường KTX tách riêng theo giới tính ở cấp Floor — tính suất trống RIÊNG cho
+            // từng giới, không còn dùng 1 con số gộp chung (báo cáo 27/07: gộp chung khiến
+            // duyệt lố 1 giới trong khi giới kia còn dư).
+            //
+            // excludeReservationsWithRegistration: true — đây là bước XẾP HẠNG, hồ sơ giữ chỗ
+            // đã có Registration (dù đang 'submitted') chính là người đang được xếp hạng ngay
+            // trong bảng bên dưới — không trừ suất họ trước, tránh trừ 2 lần cùng 1 suất (báo
+            // cáo 28/07).
+            $capacityService = app(DormCapacityService::class);
+            $capacityBeforeByGender = [
+                'male' => $capacityService->summarizeForRegistrationPeriod($period, gender: 'male', excludeReservationsWithRegistration: true),
+                'female' => $capacityService->summarizeForRegistrationPeriod($period, gender: 'female', excludeReservationsWithRegistration: true),
+            ];
+
+            // Thống nhất 24/07: hồ sơ giữ chỗ CHƯA nhập học (chưa có Registration thật) KHÔNG
+            // được cạnh tranh trực tiếp trong bảng xếp hạng Đơn đăng ký — chưa hề có "đơn" nào
+            // để mà cạnh tranh. Ngân sách ở đây dùng nguyên available_approval_slots (đã trừ
+            // sẵn suất của nhóm approved-chưa-convert qua DormCapacityService — họ vẫn giữ
+            // suất riêng, ngoài bảng này). Chỉ khi họ nhập học xong (có Registration) và admin
+            // bấm "Xếp hạng lại", họ mới vào PriorityRankingService::rankPeriod() như mọi
+            // Registration khác.
+            $freeBedsByGender = [
+                'male' => (int) $capacityBeforeByGender['male']['available_approval_slots'],
+                'female' => (int) $capacityBeforeByGender['female']['available_approval_slots'],
+            ];
 
             $pendingCriteriaCount = \App\Models\StudentPriority::query()
                 ->whereHas('registration', fn ($q) => $q->where('registration_period_id', $period->id))
@@ -433,35 +498,92 @@ class RegistrationPeriodController extends Controller
                 ];
             }
 
-            $ranker = new PriorityRankingService();
-            $rankResult = $ranker->rankPeriod($period->id, $freeBeds, recalculate: true);
+            // Đơn của sinh viên chưa có giới tính (không nên xảy ra vì Student.gender bắt
+            // buộc — chỉ phòng vệ dữ liệu bất thường) sẽ không rơi vào bucket nam/nữ nào, bị
+            // loại âm thầm khỏi cả 2 bên duyệt/waitlist — chặn sớm để admin biết mà xử lý tay,
+            // không để mất tích khỏi bảng xếp hạng mà không ai hay.
+            $genderlessCount = Registration::where('registration_period_id', $period->id)
+                ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
+                ->whereHas('student', fn ($q) => $q->whereNotIn('gender', ['male', 'female'])->orWhereNull('gender'))
+                ->count();
+            if ($genderlessCount > 0) {
+                return [
+                    'ok'      => false,
+                    'status'  => 422,
+                    'payload' => [
+                        'message' => "Còn {$genderlessCount} đơn của sinh viên chưa xác định giới tính hợp lệ. Vui lòng kiểm tra lại hồ sơ sinh viên trước khi xếp hạng.",
+                    ],
+                ];
+            }
 
-            $totalApplicants = $rankResult['approved']->count() + $rankResult['waitlist']->count();
+            $ranker = new PriorityRankingService();
+            $rankResult = $ranker->rankPeriod($period->id, $freeBedsByGender, recalculate: true);
+
             foreach ($rankResult['approved'] as $reg) {
                 $reg->auto_decision = 'approve';
                 $reg->auto_decision_reason = null;
                 $reg->save();
             }
-            foreach ($rankResult['waitlist'] as $index => $reg) {
-                $rank = $rankResult['approved']->count() + $index + 1;
-                $reg->auto_decision = 'reject';
-                $reg->auto_decision_reason = "Không đủ chỉ tiêu — xếp hạng thứ {$rank}/{$totalApplicants}, chỉ tiêu {$freeBeds} suất.";
-                $reg->save();
+
+            $genderLabel = ['male' => 'nam', 'female' => 'nữ'];
+            foreach (['male', 'female'] as $gender) {
+                $genderBucket = $rankResult['byGender'][$gender];
+                $genderApprovedCount = $genderBucket['approved']->count();
+                $genderTotal = $genderApprovedCount + $genderBucket['waitlist']->count();
+                foreach ($genderBucket['waitlist'] as $index => $reg) {
+                    $rank = $genderApprovedCount + $index + 1;
+                    $reg->auto_decision = 'reject';
+                    $reg->auto_decision_reason = "Không đủ chỉ tiêu ({$genderLabel[$gender]}) — xếp hạng thứ {$rank}/{$genderTotal}, chỉ tiêu {$freeBedsByGender[$gender]} suất.";
+                    $reg->save();
+                }
+            }
+
+            // Suất DƯ (nếu bảng Đơn đăng ký không dùng hết ngân sách) mới được xét đôn cho hồ
+            // sơ giữ chỗ đang waitlisted (chưa nhập học) — luôn ưu tiên người có Registration
+            // thật trước, đôn theo tier/điểm/mốc nộp riêng của nhóm giữ chỗ, và riêng theo
+            // đúng giới của suất dư đó.
+            $leftoverBedsByGender = [
+                'male' => max(0, $freeBedsByGender['male'] - $rankResult['byGender']['male']['approved']->count()),
+                'female' => max(0, $freeBedsByGender['female'] - $rankResult['byGender']['female']['approved']->count()),
+            ];
+            $promotedReservations = $ranker->rankLeftoverForWaitlistedReservations($period->id, $leftoverBedsByGender);
+
+            $reservationsToNotifyApproved = [];
+            foreach ($promotedReservations as $reservation) {
+                $reservation->update([
+                    'status'               => 'approved',
+                    'approved_at'          => now(),
+                    'auto_decision'        => null,
+                    'auto_decision_reason' => null,
+                ]);
+                $reservationsToNotifyApproved[] = $reservation;
             }
 
             $period->status = 'processing';
             $period->save();
 
-            $capacityAfterProposals = app(DormCapacityService::class)
-                ->summarizeForRegistrationPeriod($period, $rankResult['approved']->count());
+            $capacityAfterProposals = [
+                'male' => $capacityService->summarizeForRegistrationPeriod(
+                    $period,
+                    $rankResult['byGender']['male']['approved']->count(),
+                    gender: 'male',
+                ),
+                'female' => $capacityService->summarizeForRegistrationPeriod(
+                    $period,
+                    $rankResult['byGender']['female']['approved']->count(),
+                    gender: 'female',
+                ),
+            ];
 
             return [
-                'ok'                     => true,
-                'free_beds'              => $freeBeds,
-                'approved'               => $rankResult['approved']->count(),
-                'waitlist'               => $rankResult['waitlist']->count(),
-                'pending_criteria_count' => $pendingCriteriaCount,
-                'capacity'               => $capacityAfterProposals,
+                'ok'                        => true,
+                'free_beds_by_gender'       => $freeBedsByGender,
+                'approved'                  => $rankResult['approved']->count(),
+                'waitlist'                  => $rankResult['waitlist']->count(),
+                'promoted_from_waitlist'    => count($reservationsToNotifyApproved),
+                'pending_criteria_count'    => $pendingCriteriaCount,
+                'capacity_by_gender'        => $capacityAfterProposals,
+                'reservationsToNotifyApproved' => $reservationsToNotifyApproved,
             ];
         });
 
@@ -469,25 +591,49 @@ class RegistrationPeriodController extends Controller
             return response()->json($result['payload'], $result['status']);
         }
 
+        // Gửi thông báo SAU khi transaction đã commit — candidate CHƯA nhập học nên chưa có
+        // Student/Account, chỉ gửi email (giống notifyCandidate() bên DormReservationController).
+        // Chỉ có chiều "được đôn lên approved" — hồ sơ giữ chỗ chưa nhập học không còn bị
+        // chính vòng xếp hạng này đánh rớt nữa (họ không cạnh tranh trực tiếp ở đây).
+        foreach ($result['reservationsToNotifyApproved'] as $reservation) {
+            $candidate = $reservation->candidate;
+            if ($candidate?->email) {
+                app(StudentNotificationService::class)->notifyEmailOnly(
+                    $candidate->email,
+                    $candidate->full_name,
+                    'Hồ sơ giữ chỗ KTX đã được duyệt',
+                    'Hồ sơ đăng ký giữ chỗ KTX của bạn đã được đôn lên duyệt vì còn suất trống sau khi xếp hạng đợt chính. Vui lòng hoàn tất thủ tục nhập học theo hướng dẫn.',
+                    queue: true,
+                );
+            }
+        }
+
         return response()->json([
             'message'                => 'Đã xếp hạng xong.',
-            'free_beds'              => $result['free_beds'],
+            'free_beds_by_gender'    => $result['free_beds_by_gender'],
             'approved'               => $result['approved'],
             'waitlist'               => $result['waitlist'],
+            'promoted_from_waitlist' => $result['promoted_from_waitlist'],
             'pending_criteria_count' => $result['pending_criteria_count'],
-            'capacity'               => $result['capacity'],
+            'capacity_by_gender'     => $result['capacity_by_gender'],
         ]);
     }
 
     public function capacity(int $id, Request $request): JsonResponse
     {
         $period = RegistrationPeriod::findOrFail($id);
+        $capacityService = app(DormCapacityService::class);
 
-        $proposedApprovedCount = max(0, (int) $request->query('proposed_approved_count', 0));
+        // Giường tách riêng theo giới tính — số đơn "đang đề xuất duyệt" truyền vào cũng phải
+        // tách riêng theo giới, không còn 1 số gộp chung (xem PriorityRankingService::rankPeriod()).
+        $proposedApprovedCountMale = max(0, (int) $request->query('proposed_approved_count_male', 0));
+        $proposedApprovedCountFemale = max(0, (int) $request->query('proposed_approved_count_female', 0));
 
         return response()->json([
-            'capacity' => app(DormCapacityService::class)
-                ->summarizeForRegistrationPeriod($period, $proposedApprovedCount),
+            'capacity' => [
+                'male' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountMale, gender: 'male'),
+                'female' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountFemale, gender: 'female'),
+            ],
         ]);
     }
 

@@ -90,15 +90,17 @@ class DormReservationConversionService
                 'school_year'            => $period?->school_year,
                 'stay_from_date'         => $period?->stay_start_date?->format('Y-m-d'),
                 'stay_to_date'           => $period?->stay_end_date?->format('Y-m-d'),
-                // Registration nguồn giữ chỗ KHÔNG được approved ngay — suất đã được
-                // DormReservation approved giữ trước đó rồi (xem DormCapacityService), tạo
-                // Registration approved luôn ở đây sẽ double-count suất. Để 'submitted' +
-                // auto_decision='approve' — đúng cấu trúc "đã xếp hạng, chờ admin xác nhận"
-                // đang dùng cho Registration thường, KHÔNG cần thêm status mới. Admin phải tự
-                // bấm "Xác nhận" (RegistrationController::confirmSingle()/confirmBatch()) để
-                // chính thức chuyển approved + convert DormReservation → converted.
+                // Registration nguồn giữ chỗ để 'submitted' + auto_decision=null, GIỐNG HỆT
+                // đăng ký thường mới nộp — PriorityRankingService::rankPeriodUnified() giờ xếp
+                // hạng CHUNG cả 2 nguồn trong 1 bảng công bằng (báo cáo 24/07), nên không được
+                // set sẵn auto_decision='approve' ở đây nữa (trước đây làm vậy vì hồ sơ giữ chỗ
+                // từng được đảm bảo duyệt, tách riêng khỏi xếp hạng chung — giờ không còn đúng,
+                // set sẵn sẽ hiện nhầm badge "Duyệt" trong khi đơn thực chất CHƯA được xếp hạng
+                // lần nào ở cấp đợt). Admin vẫn phải bấm "Xếp hạng" cho đợt rồi mới "Xác nhận"
+                // (RegistrationController::confirmSingle()/confirmBatch()) để chính thức
+                // chuyển approved + convert DormReservation → converted.
                 'status'                     => 'submitted',
-                'auto_decision'              => 'approve',
+                'auto_decision'              => null,
                 'auto_decision_reason'       => null,
                 'approved_at'                => null,
                 'source_dorm_reservation_id' => $reservation->id,
