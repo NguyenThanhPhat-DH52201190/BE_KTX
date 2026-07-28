@@ -158,6 +158,15 @@ class ReservationPriorityController extends Controller
         $file = $request->file('file');
         $dir  = 'reservation-evidences';
 
+        // Lấy metadata TRƯỚC khi move() — move() thật sự DI CHUYỂN file khỏi thư mục tạm
+        // /tmp/..., nên gọi getMimeType()/getSize() SAU move() sẽ cố đọc lại file đã không
+        // còn tồn tại ở đường dẫn tạm nữa, ném lỗi "file does not exist" (Symfony
+        // FileinfoMimeTypeGuesser) → 500 dù file ĐÃ lưu thành công vào volume rồi (báo cáo
+        // 28/07: ảnh minh chứng lưu được nhưng response vẫn 500).
+        $originalName = $file->getClientOriginalName();
+        $mimeType = $file->getMimeType();
+        $fileSize = $file->getSize();
+
         if (StorageHelper::isRailwayWithVolume()) {
             $filename = 'evidence_' . $id . '_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
             $volumePath = env('RAILWAY_VOLUME_PATH', '/data/storage');
@@ -178,9 +187,9 @@ class ReservationPriorityController extends Controller
         $evidence = ReservationPriorityEvidence::create([
             'reservation_priority_id' => $id,
             'file_url'                => $fileUrl,
-            'original_name'           => $file->getClientOriginalName(),
-            'mime_type'               => $file->getMimeType(),
-            'file_size'               => $file->getSize(),
+            'original_name'           => $originalName,
+            'mime_type'               => $mimeType,
+            'file_size'               => $fileSize,
         ]);
 
         return response()->json(['message' => 'Đã upload minh chứng.'], 201);
