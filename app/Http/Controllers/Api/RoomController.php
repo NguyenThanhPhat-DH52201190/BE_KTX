@@ -23,9 +23,10 @@ class RoomController extends Controller
     {
         $rooms = Room::query()->with(['floor', 'beds'])->orderBy('id')->get();
         $occupiedBedIds = $this->getOccupiedBedIdSet($rooms);
+        $pendingMaintenanceMap = $this->getPendingRoomMaintenanceMap($rooms);
 
         return response()->json(
-            $rooms->map(fn (Room $room) => $this->formatRoom($room, $occupiedBedIds))->values(),
+            $rooms->map(fn (Room $room) => $this->formatRoom($room, $occupiedBedIds, $pendingMaintenanceMap))->values(),
         );
     }
 
@@ -119,7 +120,7 @@ class RoomController extends Controller
             return $room->fresh(['floor', 'beds']);
         });
 
-        return response()->json($this->formatRoom($room, $this->getOccupiedBedIdSet(collect([$room]))));
+        return response()->json($this->formatRoom($room, $this->getOccupiedBedIdSet(collect([$room])), $this->getPendingRoomMaintenanceMap(collect([$room]))));
     }
 
     public function destroy(int $roomId): JsonResponse
@@ -493,7 +494,7 @@ class RoomController extends Controller
 
         $room = $room->fresh(['floor', 'beds']);
 
-        return response()->json($this->formatRoom($room, $this->getOccupiedBedIdSet(collect([$room]))));
+        return response()->json($this->formatRoom($room, $this->getOccupiedBedIdSet(collect([$room])), $this->getPendingRoomMaintenanceMap(collect([$room]))));
     }
 
     public function transferBedOccupancy(Request $request, int $roomId, int $bedId): JsonResponse
@@ -626,7 +627,7 @@ class RoomController extends Controller
             $this->sendBedTransferEmail($notifData);
         }
 
-        return response()->json($this->formatRoom($updatedRoom, $this->getOccupiedBedIdSet(collect([$updatedRoom]))));
+        return response()->json($this->formatRoom($updatedRoom, $this->getOccupiedBedIdSet(collect([$updatedRoom])), $this->getPendingRoomMaintenanceMap(collect([$updatedRoom]))));
     }
 
     private function createBedTransferNotification(
@@ -782,6 +783,36 @@ class RoomController extends Controller
             ->exists();
     }
 
+    /**
+     * Map room_id => thông tin yêu cầu bảo trì cả phòng đang PENDING (đã lên lịch cho
+     * tương lai, chưa tới ngày bắt đầu di dời) — dùng để FE hiện badge riêng cho phòng
+     * đã có kế hoạch bảo trì chờ sẵn, tránh trường hợp phòng hiện "Còn trống" bình
+     * thường dù đã có lịch, khiến admin vô tình lên lịch/bắt đầu chồng lần nữa.
+     */
+    private function getPendingRoomMaintenanceMap($rooms): array
+    {
+        $roomIds = $rooms->pluck('id')->unique()->values();
+
+        if ($roomIds->isEmpty()) {
+            return [];
+        }
+
+        return MaintenanceRequest::query()
+            ->where('type', 'ROOM')
+            ->where('status', 'PENDING')
+            ->whereIn('room_id', $roomIds->all())
+            ->orderByDesc('id')
+            ->get()
+            ->keyBy('room_id')
+            ->map(fn (MaintenanceRequest $mr) => [
+                'id' => $mr->id,
+                'reason' => $mr->reason,
+                'started_at' => optional($mr->started_at)->toDateString(),
+                'expected_end_at' => optional($mr->expected_end_at)->toDateString(),
+            ])
+            ->all();
+    }
+
     private function getOccupiedBedIdSet($rooms): array
     {
         $bedIds = $rooms->flatMap(fn (Room $room) => $room->beds->pluck('id'))->unique()->values();
@@ -804,7 +835,7 @@ class RoomController extends Controller
         return $value === 'maintenance' ? 'maintenance' : 'active';
     }
 
-    private function formatRoom(Room $room, array $occupiedBedIds): array
+    private function formatRoom(Room $room, array $occupiedBedIds, array $pendingMaintenanceMap = []): array
     {
         $beds = $room->beds->sortBy('bed_number')->values();
         $roomInMaintenance = strtoupper((string) $room->status) === 'MAINTENANCE';
@@ -857,6 +888,7 @@ class RoomController extends Controller
             'occupied_beds' => $occupiedBeds,
             'available_beds' => $availableBeds,
             'maintenance_beds' => $maintenanceBeds,
+            'scheduled_maintenance' => $pendingMaintenanceMap[$room->id] ?? null,
         ];
     }
 }
