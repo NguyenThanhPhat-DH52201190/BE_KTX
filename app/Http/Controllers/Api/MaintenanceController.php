@@ -303,6 +303,24 @@ class MaintenanceController extends Controller
     private function schedulePendingRoomMaintenance(int $roomId, array $data): JsonResponse
     {
         $room = Room::query()->with(['floor', 'beds'])->findOrFail($roomId);
+
+        // Phòng đã có kế hoạch bảo trì PENDING (đã lên lịch, chưa tới ngày) thì chặn tạo
+        // thêm — tránh 2 kế hoạch chồng nhau cho cùng 1 phòng (cron auto-start xử lý cả
+        // 2 khi tới ngày, hoặc admin bắt đầu ngay sẽ vô tình tái sử dụng nhầm kế hoạch).
+        $existingPending = MaintenanceRequest::query()
+            ->where('room_id', $room->id)
+            ->where('type', 'ROOM')
+            ->where('status', 'PENDING')
+            ->latest()
+            ->first();
+
+        if ($existingPending) {
+            $existingDate = optional($existingPending->started_at)->format('d/m/Y');
+            return response()->json([
+                'message' => "Phòng này đã có kế hoạch bảo trì đang chờ (dự kiến bắt đầu {$existingDate}, lý do: {$existingPending->reason}). Vui lòng xử lý kế hoạch cũ trước khi lên lịch mới.",
+            ], 422);
+        }
+
         $targets = collect($data['assignments'])->pluck('target_bed_id')->map(fn ($id) => (int) $id);
 
         if ($targets->unique()->count() !== $targets->count()) {
@@ -419,9 +437,16 @@ class MaintenanceController extends Controller
                 ->first();
 
             if ($maintenanceRequest) {
+                // Ghi đè bằng dữ liệu admin vừa nhập ở lần bấm "bắt đầu ngay" này — trước
+                // đây chỉ đổi status, khiến reason/note/expected_end_at cũ (từ lúc lên lịch
+                // trước đó) bị giữ nguyên dù admin vừa nhập giá trị khác, dễ gây sai lệch.
                 $maintenanceRequest->update([
                     'status'              => 'IN_PROGRESS',
                     'pending_assignments' => null,
+                    'reason'              => trim($data['reason']),
+                    'note'                => $data['note'] ?? null,
+                    'started_at'          => $data['started_at'],
+                    'expected_end_at'     => $data['expected_end_at'],
                 ]);
             } else {
                 $maintenanceRequest = MaintenanceRequest::create([
