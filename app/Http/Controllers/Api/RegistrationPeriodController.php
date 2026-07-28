@@ -629,10 +629,17 @@ class RegistrationPeriodController extends Controller
         $proposedApprovedCountMale = max(0, (int) $request->query('proposed_approved_count_male', 0));
         $proposedApprovedCountFemale = max(0, (int) $request->query('proposed_approved_count_female', 0));
 
+        // excludeReservationsWithRegistration: true — endpoint này chỉ được FE dùng để tính
+        // sức chứa cho ngữ cảnh XẾP HẠNG (badge "Xác nhận tất cả" bị khóa hay không, xem
+        // AdminRegistrationPeriodsPage.tsx/DormReservationManagementPage.tsx), cùng lý do như
+        // process()/confirmBatch(): người giữ chỗ đang được xếp hạng trong chính bảng này
+        // không được trừ suất trước, tránh trừ 2 lần (báo cáo 28/07: gợi ý chỉ 2 nam/2 nữ,
+        // đúng đủ 2 giường mỗi giới, nhưng nút vẫn báo "vượt sức chứa" do endpoint này sót
+        // chưa dùng flag mới).
         return response()->json([
             'capacity' => [
-                'male' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountMale, gender: 'male'),
-                'female' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountFemale, gender: 'female'),
+                'male' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountMale, gender: 'male', excludeReservationsWithRegistration: true),
+                'female' => $capacityService->summarizeForRegistrationPeriod($period, $proposedApprovedCountFemale, gender: 'female', excludeReservationsWithRegistration: true),
             ],
         ]);
     }
