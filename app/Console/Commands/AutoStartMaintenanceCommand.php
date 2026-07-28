@@ -23,6 +23,7 @@ class AutoStartMaintenanceCommand extends Command
 
     private bool $isDry;
     private int  $started = 0;
+    private int  $held    = 0;
 
     public function handle(): int
     {
@@ -47,7 +48,7 @@ class AutoStartMaintenanceCommand extends Command
             $this->startRoom($mr);
         }
 
-        $this->info("Đã bắt đầu: {$this->started} bảo trì.");
+        $this->info("Đã bắt đầu: {$this->started} bảo trì. Đang giữ chờ (còn sinh viên chưa chuyển tạm): {$this->held}.");
 
         return self::SUCCESS;
     }
@@ -72,9 +73,10 @@ class AutoStartMaintenanceCommand extends Command
         }
 
         $pendingEmails = [];
+        $isHeld        = false;
 
         try {
-            DB::transaction(function () use ($mr, $assignments, &$pendingEmails) {
+            DB::transaction(function () use ($mr, $assignments, &$pendingEmails, &$isHeld) {
                 $room = Room::query()->with(['floor', 'beds'])->lockForUpdate()->findOrFail($mr->room_id);
 
                 $targetIds  = collect($assignments)->pluck('target_bed_id')->map(fn ($id) => (int) $id);
@@ -83,6 +85,8 @@ class AutoStartMaintenanceCommand extends Command
                     ->lockForUpdate()
                     ->get()
                     ->keyBy('id');
+
+                $skipReasons = [];
 
                 foreach ($assignments as $assignment) {
                     $occupancy = Occupancy::occupiedBedsQuery()
@@ -93,14 +97,18 @@ class AutoStartMaintenanceCommand extends Command
                         ->first();
 
                     if (! $occupancy) {
-                        $this->warn("  [SKIP occupancy #{$assignment['occupancy_id']}] Không tìm thấy hoặc không còn ACTIVE trong phòng.");
+                        $reason = 'Không tìm thấy hoặc không còn ACTIVE trong phòng';
+                        $this->warn("  [SKIP occupancy #{$assignment['occupancy_id']}] {$reason}.");
+                        $skipReasons[(int) $assignment['occupancy_id']] = $reason;
                         continue;
                     }
 
                     $targetBed = $targetBeds->get((int) $assignment['target_bed_id']);
 
                     if (! $targetBed) {
-                        $this->warn("  [SKIP occupancy #{$occupancy->id}] Không tìm thấy giường đích #{$assignment['target_bed_id']}.");
+                        $reason = "Không tìm thấy giường đích #{$assignment['target_bed_id']}";
+                        $this->warn("  [SKIP occupancy #{$occupancy->id}] {$reason}.");
+                        $skipReasons[(int) $occupancy->id] = $reason;
                         continue;
                     }
 
@@ -110,7 +118,9 @@ class AutoStartMaintenanceCommand extends Command
                         ->exists();
 
                     if ($occupied || strtolower((string) $targetBed->status) === 'maintenance') {
-                        $this->warn("  [SKIP occupancy #{$occupancy->id}] Giường đích #{$targetBed->id} đã bị chiếm hoặc bảo trì.");
+                        $reason = "Giường đích #{$targetBed->id} đã bị chiếm hoặc bảo trì";
+                        $this->warn("  [SKIP occupancy #{$occupancy->id}] {$reason}.");
+                        $skipReasons[(int) $occupancy->id] = $reason;
                         continue;
                     }
 
@@ -166,6 +176,40 @@ class AutoStartMaintenanceCommand extends Command
                     }
                 }
 
+                $roomCode    = ($room->floor?->building_code ?? '') . $room->room_number;
+                $expectedEnd = Carbon::parse($mr->expected_end_at)->format('d/m/Y');
+
+                // Giống executeRoomMaintenance() (thao tác tay): kiểm tra còn ai đang ACTIVE
+                // trong phòng mà chưa được chuyển tạm đi hay không. Khác thao tác tay (chặn
+                // cứng, rollback), ở đây KHÔNG rollback phần đã chuyển thành công — chỉ giữ
+                // maintenance_request ở PENDING (không đổi phòng/giường thành maintenance) để
+                // cron ngày mai tự thử lại, đồng thời báo ngay cho admin qua web + email.
+                $leftoverOccupancies = Occupancy::occupiedBedsQuery()
+                    ->where('room_id', $room->id)
+                    ->with('student')
+                    ->lockForUpdate()
+                    ->get();
+
+                if ($leftoverOccupancies->isNotEmpty()) {
+                    $isHeld = true;
+
+                    $lines = $leftoverOccupancies->map(function ($occ) use ($skipReasons) {
+                        $label  = $occ->student ? "{$occ->student->full_name} ({$occ->student->student_code})" : "occupancy #{$occ->id}";
+                        $reason = $skipReasons[(int) $occ->id] ?? 'Chưa rõ lý do cụ thể, cần kiểm tra tay';
+
+                        return "- {$label}: {$reason}";
+                    })->implode("\n");
+
+                    $adminTitle   = "Bảo trì phòng {$roomCode} CHƯA thể tự động bắt đầu";
+                    $adminContent = "Hệ thống định tự động bắt đầu bảo trì Phòng {$roomCode} hôm nay nhưng còn sinh viên chưa được chuyển tạm sang phòng khác:\n"
+                                  . $lines
+                                  . "\n\nYêu cầu bảo trì vẫn giữ trạng thái chờ xử lý, hệ thống sẽ tự thử lại vào ngày mai. Vui lòng kiểm tra và xử lý tay nếu cần.";
+                    $this->saveAdminNotification($adminTitle, $adminContent, 'room_maintenance_start_failed', $mr->id);
+                    $pendingEmails[] = $this->buildAdminPayload($adminTitle, $adminContent, 'room_maintenance_start_failed');
+
+                    return;
+                }
+
                 MaintenanceRequest::query()->where('id', $mr->id)->update([
                     'status'              => 'IN_PROGRESS',
                     'pending_assignments' => null,
@@ -176,8 +220,6 @@ class AutoStartMaintenanceCommand extends Command
                 $room->beds()->update(['status' => 'maintenance']);
 
                 // Thông báo admin
-                $roomCode    = ($room->floor?->building_code ?? '') . $room->room_number;
-                $expectedEnd = Carbon::parse($mr->expected_end_at)->format('d/m/Y');
                 $adminTitle  = "Bảo trì phòng {$roomCode} đã bắt đầu";
                 $adminContent = "Hệ thống đã tự động bắt đầu bảo trì Phòng {$roomCode} hôm nay. "
                               . "Dự kiến hoàn thành: {$expectedEnd}. Sinh viên đã được di dời sang phòng tạm.";
@@ -189,8 +231,13 @@ class AutoStartMaintenanceCommand extends Command
                 $this->sendEmail($payload);
             }
 
-            $this->line("  [DONE] ROOM maintenance #{$mr->id} — room_id={$mr->room_id}");
-            $this->started++;
+            if ($isHeld) {
+                $this->warn("  [HOLD] ROOM maintenance #{$mr->id}: còn sinh viên chưa chuyển tạm, giữ nguyên PENDING để thử lại ngày mai.");
+                $this->held++;
+            } else {
+                $this->line("  [DONE] ROOM maintenance #{$mr->id} — room_id={$mr->room_id}");
+                $this->started++;
+            }
         } catch (\Throwable $e) {
             Log::error("[maintenance:auto-start] ROOM #{$mr->id} thất bại: " . $e->getMessage());
             $this->error("  [FAIL] ROOM maintenance #{$mr->id}: " . $e->getMessage());
