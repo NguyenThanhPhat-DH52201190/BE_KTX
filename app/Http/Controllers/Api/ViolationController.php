@@ -203,7 +203,7 @@ class ViolationController extends Controller
 
             $bed = $occupancy->bed;
             if ($bed && strtolower((string) $bed->status) !== 'maintenance') {
-                $bed->status = 'EMPTY';
+                $bed->status = 'active';
                 $bed->save();
             }
 
