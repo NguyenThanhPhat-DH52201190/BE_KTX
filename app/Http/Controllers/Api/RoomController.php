@@ -204,6 +204,13 @@ class RoomController extends Controller
             ->get()
             ->keyBy('id');
 
+        // Lý do bảo trì admin tự nhập (MaintenanceRequest::reason) — dùng để hiện đúng lý do
+        // thật trong lịch sử thay vì chỉ 1 câu mẫu chung chung (xem RoomChangeLogService::
+        // buildLabel(), báo cáo 28/07).
+        $maintenanceRequestReasons = MaintenanceRequest::query()
+            ->whereIn('id', $historyLogs->pluck('maintenance_request_id')->filter()->unique()->all())
+            ->pluck('reason', 'id');
+
         $roomInMaintenance = strtoupper((string) $room->status) === 'MAINTENANCE';
 
         $payload = $beds->map(function (Bed $bed) use (
@@ -218,6 +225,7 @@ class RoomController extends Controller
             $historyOccupancies,
             $historyBeds,
             $historyRooms,
+            $maintenanceRequestReasons,
             $roomInMaintenance,
             $isAdmin
         ) {
@@ -242,8 +250,11 @@ class RoomController extends Controller
             $bedHistoryLogs = $historyLogs->filter(
                 fn ($log) => (int) $log->old_bed_id === (int) $bed->id || (int) $log->new_bed_id === (int) $bed->id,
             )->values();
-            // Student-level: only the current occupant's own moves (for transfer_history)
-            $currentOccupancyId = $occupancy?->id;
+            // Student-level: only the current occupant's own moves (for transfer_history) —
+            // nếu giường đang trống do bảo trì (chưa ai ở, occupancy hiện tại null), lấy tạm
+            // occupancy của người VỪA rời đi (qua $maintenanceLog) để vẫn hiện được lịch sử
+            // thay vì trống trơn gây hiểu lầm mất dữ liệu (báo cáo 28/07).
+            $currentOccupancyId = $occupancy?->id ?? $maintenanceLog?->occupancy_id;
             $studentHistoryLogs = $currentOccupancyId
                 ? $historyLogs->filter(fn ($log) => (int) $log->occupancy_id === $currentOccupancyId)->values()
                 : collect();
@@ -252,7 +263,7 @@ class RoomController extends Controller
                 return $room ? (($room->floor?->building_code ?? '') . $room->room_number) : null;
             };
 
-            $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms) {
+            $formatHistory = function ($log) use ($historyOccupancies, $historyBeds, $historyRooms, $maintenanceRequestReasons) {
                 $historyOccupancy = $historyOccupancies->get($log->occupancy_id);
                 $oldRoom = $historyRooms->get($log->old_room_id);
                 $newRoom = $historyRooms->get($log->new_room_id);
@@ -260,7 +271,8 @@ class RoomController extends Controller
                 $newBed = $historyBeds->get($log->new_bed_id);
                 // resolveHistoryReason()/buildLabel() cần old_room_code cho câu "Chuyển tạm do bảo trì phòng X".
                 $log->old_room_code = $oldRoom ? (($oldRoom->floor?->building_code ?? '') . $oldRoom->room_number) : null;
-                $reason = $this->resolveHistoryReason($log);
+                $customReason = $log->maintenance_request_id ? $maintenanceRequestReasons->get($log->maintenance_request_id) : null;
+                $reason = $this->resolveHistoryReason($log, $customReason);
 
                 return [
                     'id' => $log->id,
@@ -426,7 +438,7 @@ class RoomController extends Controller
             : url('/storage/' . $cleanPath);
     }
 
-    private function resolveHistoryReason(object $log): ?string
+    private function resolveHistoryReason(object $log, ?string $customReason = null): ?string
     {
         $reason = $log->transfer_reason;
         $studentRequestReasons = [
@@ -436,7 +448,7 @@ class RoomController extends Controller
         ];
 
         if (! array_key_exists((string) $reason, $studentRequestReasons)) {
-            return RoomChangeLogService::buildLabel($log);
+            return RoomChangeLogService::buildLabel($log, $customReason);
         }
 
         return $studentRequestReasons[(string) $reason];

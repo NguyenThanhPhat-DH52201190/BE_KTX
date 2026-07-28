@@ -27,10 +27,21 @@ class RoomChangeLogService
      * xếp chỗ ban đầu — gọi isInitialAssignment() để lọc trước khi dùng hàm này).
      * Yêu cầu $row có các thuộc tính: is_temporary, change_type, transfer_reason,
      * change_source, old_room_code (nếu có, dùng cho câu "Chuyển tạm do bảo trì phòng X").
+     *
+     * @param string|null $customReason Lý do bảo trì admin tự nhập (MaintenanceRequest::reason)
+     *                                  — nếu có, nối thêm vào câu nhãn chung thay vì chỉ hiện
+     *                                  câu mẫu chung chung, không mất thông tin admin đã ghi
+     *                                  (báo cáo 28/07: gõ "test" nhưng lịch sử luôn hiện câu
+     *                                  mẫu cố định, không thấy lý do thật đã nhập).
      */
-    public static function buildLabel(object $row): string
+    public static function buildLabel(object $row, ?string $customReason = null): string
     {
         if ($row->is_temporary) {
+            $customReason = trim((string) $customReason);
+            if ($customReason !== '') {
+                return $customReason;
+            }
+
             return trim('Chuyển tạm do bảo trì phòng ' . ($row->old_room_code ?? ''));
         }
 
