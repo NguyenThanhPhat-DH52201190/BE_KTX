@@ -40,7 +40,13 @@ class ExpireInitialPaymentCommand extends Command
         foreach ($occupancies as $occupancy) {
             $firstBill = $this->firstBill($occupancy);
 
-            if (! $firstBill || $firstBill->status !== 'unpaid' || Carbon::parse($firstBill->due_date)->gte($today)) {
+            // Bỏ qua chỉ khi nợ đã thực sự được giải quyết (đã trả/đã miễn) — 'unpaid' và
+            // 'overdue' đều vẫn coi là đang nợ, không phụ thuộc việc lệnh bills:update-overdue
+            // có chạy trước và đổi trạng thái hay chưa (2 lệnh không còn đảm bảo thứ tự cố
+            // định từ khi cả hai cùng chạy mỗi 5 phút).
+            if (! $firstBill
+                || in_array($firstBill->status, ['paid', 'exempted'], true)
+                || Carbon::parse($firstBill->due_date)->gte($today)) {
                 continue;
             }
 
@@ -86,9 +92,10 @@ class ExpireInitialPaymentCommand extends Command
                     ->update(['status' => 'active']);
             }
 
-            // Lưu trú chưa từng bắt đầu (chưa ACTIVE) nên không giữ lại công nợ.
+            // Lưu trú chưa từng bắt đầu (chưa ACTIVE) nên không giữ lại công nợ — xóa cả
+            // 'overdue' lẫn 'unpaid', tránh sót hóa đơn quá hạn treo lại sau khi đã hủy.
             RoomFeeBill::where('occupancy_id', $occupancy->id)
-                ->where('status', 'unpaid')
+                ->whereIn('status', ['unpaid', 'overdue'])
                 ->delete();
 
             $occupancy->update([

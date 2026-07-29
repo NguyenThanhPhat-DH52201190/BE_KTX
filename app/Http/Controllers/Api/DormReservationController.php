@@ -379,7 +379,11 @@ class DormReservationController extends Controller
 
     private function findActiveAdmissionPeriod(bool $lock = false): ?RegistrationPeriod
     {
-        $query = RegistrationPeriod::where('status', 'active')
+        // 'processing' (đã xếp hạng ít nhất 1 lần) vẫn coi là đang mở, khớp
+        // RegistrationController::findOpenSubmissionPeriod() — "Xếp hạng" không phải quyết
+        // định cuối, có thể chạy lại nhiều lần, không được sớm chặn nộp/xác minh hồ sơ tân
+        // sinh viên trước đúng hạn 17:00 đã hứa.
+        $query = RegistrationPeriod::whereIn('status', ['active', 'processing'])
             ->where('allow_admission_candidates', true)
             ->orderByDesc('created_at');
 

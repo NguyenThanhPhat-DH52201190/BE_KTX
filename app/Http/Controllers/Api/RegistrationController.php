@@ -26,6 +26,7 @@ use App\Helpers\StorageHelper;
 use App\Jobs\ProcessPriorityEvidenceJob;
 use App\Services\AutoReviewService;
 use App\Services\DormCapacityService;
+use App\Services\DormReservationExpiryService;
 use App\Services\RoomFeeBillingService;
 use App\Services\StudentNotificationService;
 use Carbon\Carbon;
@@ -1116,7 +1117,7 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy user hoặc chưa liên kết sinh viên'], 404);
         }
 
-        $registration = Registration::with(['occupancy', 'period'])->where('student_id', $account->student_id)
+        $registration = Registration::with(['occupancy', 'period', 'student'])->where('student_id', $account->student_id)
             ->where('status', 'approved')
             ->latest('id')
             ->first();
@@ -1197,6 +1198,21 @@ class RegistrationController extends Controller
         // Sinh hóa đơn tháng đầu để sinh viên thanh toán trước khi ACTIVE
         $billingService = app(RoomFeeBillingService::class);
         $bill = $billingService->createInitialBill($occupancy);
+
+        if ($registration->student) {
+            $bed->loadMissing('room.floor');
+            $roomCode = ($bed->room?->floor?->building_code ?? '') . ($bed->room?->room_number ?? '');
+            $dueDateText = $bill?->due_date ? Carbon::parse($bill->due_date)->format('d/m/Y') : null;
+
+            $this->notifier()->notifyStudent(
+                $registration->student,
+                'Đã chọn giường thành công',
+                "Bạn đã chọn Phòng {$roomCode} giường #{$bed->bed_number}."
+                    . ($dueDateText ? " Vui lòng thanh toán hóa đơn tháng đầu trước hạn {$dueDateText} để hoàn tất thủ tục lưu trú." : ' Vui lòng thanh toán hóa đơn tháng đầu để hoàn tất thủ tục lưu trú.'),
+                'bed_selected',
+                $registration->id,
+            );
+        }
 
         return response()->json([
             'message' => 'Đã chọn giường. Vui lòng thanh toán hóa đơn để hoàn tất lưu trú.',
@@ -2047,6 +2063,15 @@ class RegistrationController extends Controller
                     );
                 }
             }
+        }
+
+        // Registration vừa chốt xong 'rejected' thật sự ở trên — đúng thời điểm an toàn để
+        // xử lý hồ sơ giữ chỗ tân sinh viên hết hạn (nếu có) và đôn Registration bị từ chối
+        // tương ứng lên duyệt, thay vì chỉ cron mới làm được (báo cáo 30/07). Idempotent —
+        // gọi lại nhiều lần không đôn trùng, không xử lý trùng.
+        $closedPeriod = RegistrationPeriod::find($periodId);
+        if ($closedPeriod) {
+            app(DormReservationExpiryService::class)->processExpiredReservationsAndPromote($closedPeriod);
         }
 
         return response()->json([
