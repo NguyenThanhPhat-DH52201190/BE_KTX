@@ -103,6 +103,17 @@ class AutoStartMaintenanceCommand extends Command
                         continue;
                     }
 
+                    // Occupancy có thể đã ACTIVE (đã thanh toán) trước cả ngày check_in_date
+                    // thật — không di dời tạm người chưa từng có mặt tại KTX.
+                    if ($occupancy->check_in_date
+                        && Carbon::parse($occupancy->check_in_date)->startOfDay()->gt(Carbon::today())) {
+                        $reason = 'Sinh viên chưa tới ngày nhận phòng (dự kiến '
+                            . Carbon::parse($occupancy->check_in_date)->format('d/m/Y') . ')';
+                        $this->warn("  [SKIP occupancy #{$occupancy->id}] {$reason}.");
+                        $skipReasons[(int) $occupancy->id] = $reason;
+                        continue;
+                    }
+
                     $targetBed = $targetBeds->get((int) $assignment['target_bed_id']);
 
                     if (! $targetBed) {
