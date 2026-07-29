@@ -385,9 +385,15 @@ class PriorityRankingService
             return collect();
         }
 
+        // Dò theo auto_decision_reason (giữ nguyên bản gốc "Không đủ chỉ tiêu (nam)...") —
+        // KHÔNG dò rejection_reason vì cột đó đã bị confirmBatch() ghi đè bằng bản dịch thân
+        // thiện cho sinh viên đọc (RegistrationController::studentFacingRejectionReason()),
+        // không còn giữ đúng mẫu để nhận diện "bị từ chối do hết chỉ tiêu" nữa (báo cáo
+        // 30/07: Anh, Bảo không được đôn dù suất đã giải phóng đúng).
         $rejected = Registration::where('registration_period_id', $periodId)
             ->where('status', 'rejected')
-            ->where('rejection_reason', 'like', 'Không đủ chỉ tiêu%')
+            ->where('auto_decision', 'reject')
+            ->where('auto_decision_reason', 'like', 'Không đủ chỉ tiêu%')
             ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->with(['sourceDormReservation:id,submitted_at,created_at', 'student:id,gender'])
             ->get();

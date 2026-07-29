@@ -21,9 +21,14 @@ class StudentSearchController extends Controller
 
         $results = Student::query()
             ->whereExists(function ($query) {
+                // Chỉ tính occupancy còn ý nghĩa cho trang "Quản lý lưu trú" — khớp đúng các
+                // trạng thái đang lọc được ở đó (Đang lưu trú/Yêu cầu thôi ở/Đã thôi ở/Buộc
+                // thôi ở). Loại CANCELLED (chưa từng ở thật, hồ sơ bị hủy giữa chừng) và
+                // PENDING_PAYMENT/PROPOSED (chưa có chỗ thật) — không thuộc trang này.
                 $query->select(DB::raw(1))
                     ->from('occupancy')
-                    ->whereColumn('occupancy.student_id', 'students.id');
+                    ->whereColumn('occupancy.student_id', 'students.id')
+                    ->whereIn('occupancy.status', ['ACTIVE', 'ROOM_CONFIRMED', 'COMPLETED', 'TERMINATED']);
             })
             ->where(function ($query) use ($q) {
                 $query->where('full_name', 'like', "%{$q}%")

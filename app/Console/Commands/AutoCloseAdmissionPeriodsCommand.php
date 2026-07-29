@@ -8,11 +8,9 @@ use App\Models\AdminNotification;
 use App\Models\DormReservation;
 use App\Models\Registration;
 use App\Models\RegistrationPeriod;
-use App\Services\DormReservationConversionService;
-use App\Services\PriorityRankingService;
+use App\Services\DormReservationExpiryService;
 use App\Services\StudentNotificationService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class AutoCloseAdmissionPeriodsCommand extends Command
@@ -20,7 +18,7 @@ class AutoCloseAdmissionPeriodsCommand extends Command
     protected $signature   = 'registration-periods:auto-close-admission';
     protected $description = 'Tự động đóng đợt tân sinh viên khi qua hạn 17:00 end_date: chốt hồ sơ giữ chỗ chưa hoàn tất, đợt → closed';
 
-    public function handle(StudentNotificationService $notifier, DormReservationConversionService $conversionService, PriorityRankingService $ranker): int
+    public function handle(StudentNotificationService $notifier, DormReservationExpiryService $expiryService): int
     {
         $periods = RegistrationPeriod::where('allow_admission_candidates', true)->get();
 
@@ -56,7 +54,7 @@ class AutoCloseAdmissionPeriodsCommand extends Command
                 continue;
             }
 
-            if ($this->closePeriod($period, $notifier, $conversionService, $ranker)) {
+            if ($this->closePeriod($period, $notifier, $expiryService)) {
                 $closedCount++;
             }
         }
@@ -66,140 +64,16 @@ class AutoCloseAdmissionPeriodsCommand extends Command
         return self::SUCCESS;
     }
 
-    private const PERIOD_CLOSED_SUBMITTED_REJECTION_REASON = 'Hồ sơ không được xử lý trước khi đợt đăng ký kết thúc.';
-
-    /** Map status gốc trước khi expire → expiration_reason tương ứng. */
-    private const EXPIRATION_REASON_BY_STATUS = [
-        'waitlisted' => DormReservation::EXPIRATION_PERIOD_CLOSED_WAITLISTED,
-    ];
-
     /** @return bool true nếu đợt thực sự đã chuyển `closed` (false nếu bị chặn ở phần Đơn
      *  đăng ký thường — ví dụ còn minh chứng ưu tiên chưa xác minh). */
-    private function closePeriod(RegistrationPeriod $period, StudentNotificationService $notifier, DormReservationConversionService $conversionService, PriorityRankingService $ranker): bool
+    private function closePeriod(RegistrationPeriod $period, StudentNotificationService $notifier, DormReservationExpiryService $expiryService): bool
     {
-        $result = DB::transaction(function () use ($period, $conversionService) {
-            $reservations = DormReservation::where('registration_period_id', $period->id)
-                ->whereIn('status', ['submitted', 'waitlisted', 'approved'])
-                ->with('candidate')
-                ->lockForUpdate()
-                ->get();
+        // Hết hạn hồ sơ giữ chỗ TRƯỚC khi xếp hạng Đơn đăng ký thường — để suất vừa hết hạn
+        // được tính "trống" ngay trong bảng xếp hạng chính (xem DormReservationExpiryService).
+        $expiry = $expiryService->expirePendingReservations($period);
 
-            $expiredIdsByReason = [];
-            $rejectedSubmittedIds = [];
-            $anomalyCount = 0;
-            $freedSlotsByGender = ['male' => 0, 'female' => 0];
-
-            foreach ($reservations as $reservation) {
-                if ($reservation->status === 'submitted') {
-                    $rejectedSubmittedIds[] = $reservation->id;
-                    continue;
-                }
-
-                // waitlisted: hết hạn theo đúng status gốc, vẫn cần tách khỏi nhóm đã duyệt
-                // nhưng chưa nhập học để admin lọc rõ nguyên nhân.
-                if ($reservation->status === 'waitlisted') {
-                    $expiredIdsByReason[self::EXPIRATION_REASON_BY_STATUS[$reservation->status]][] = $reservation->id;
-                    continue;
-                }
-
-                // approved: LUÔN thử convert trước (dùng chung DormReservationConversionService),
-                // bất kể candidate đã enrolled hay chưa — service tự kiểm tra đủ điều kiện.
-                $registration = $conversionService->convert($reservation);
-                if ($registration) {
-                    continue; // đã tự chuyển converted — không expire.
-                }
-
-                // Convert thất bại — phân biệt 2 trường hợp:
-                // - Candidate đã có Registration hợp lệ khác trong đúng đợt này (duplicate) →
-                //   ANOMALY thật (dữ liệu bất thường cần admin kiểm tra tay), KHÔNG expire.
-                // - Ngược lại (candidate chưa từng nhập học, hoặc chưa có Registration nào) →
-                //   hợp lệ để expire, đúng nghĩa Việc 5 (đã duyệt giữ chỗ nhưng cuối cùng không
-                //   thành đơn nội trú trước khi đợt kết thúc).
-                $candidate = $reservation->candidate;
-                $hasRegistration = $candidate?->student_id
-                    ? Registration::where('student_id', $candidate->student_id)
-                        ->where('registration_period_id', $reservation->registration_period_id)
-                        ->whereNotIn('status', ['rejected', 'cancelled'])
-                        ->exists()
-                    : false;
-
-                if ($hasRegistration) {
-                    $anomalyCount++;
-                    Log::warning('[registration-periods:auto-close-admission] Bỏ qua reservation bất thường (approved, conversion thất bại vì candidate đã có Registration hợp lệ khác trong đợt)', [
-                        'period_id'      => $period->id,
-                        'reservation_id' => $reservation->id,
-                        'candidate_id'   => $reservation->admission_candidate_id,
-                    ]);
-                    continue;
-                }
-
-                $expiredIdsByReason[DormReservation::EXPIRATION_APPROVED_NOT_CONVERTED][] = $reservation->id;
-                $expiredGender = strtolower($candidate?->gender ?? '');
-                if (in_array($expiredGender, ['male', 'female'], true)) {
-                    $freedSlotsByGender[$expiredGender]++;
-                }
-            }
-
-            $expiredIds = [];
-            if ($rejectedSubmittedIds !== []) {
-                DormReservation::whereIn('id', $rejectedSubmittedIds)->update([
-                    'status'               => 'rejected',
-                    'rejection_reason'     => self::PERIOD_CLOSED_SUBMITTED_REJECTION_REASON,
-                    'expiration_reason'    => null,
-                    'auto_decision'        => null,
-                    'auto_decision_reason' => null,
-                ]);
-            }
-
-            foreach ($expiredIdsByReason as $reason => $ids) {
-                DormReservation::whereIn('id', $ids)->update([
-                    'status'            => 'expired',
-                    'expiration_reason' => $reason,
-                ]);
-                array_push($expiredIds, ...$ids);
-            }
-
-            // KHÔNG ép status → closed ở đây nữa — chỉ đóng đợt THẬT SỰ sau khi đã thử tự
-            // động xếp hạng/xác nhận xong phần Registration (xem autoProcessRegistrations()
-            // gọi ở cuối closePeriod()). Nếu ép đóng ở đây trước, đợt sẽ hiện "Đã đóng" dù
-            // các đơn đăng ký thường bên trong vẫn chưa được xử lý (báo cáo 25/07).
-
-            if ($anomalyCount > 0) {
-                $this->warn("  Đợt #{$period->id} \"{$period->name}\": {$anomalyCount} hồ sơ bất thường bị bỏ qua (xem log).");
-            }
-
-            return [
-                'expired' => $reservations->whereIn('id', $expiredIds),
-                'rejected' => $reservations->whereIn('id', $rejectedSubmittedIds),
-                'freedSlotsByGender' => $freedSlotsByGender,
-            ];
-        });
-
-        foreach ($result['expired'] as $reservation) {
-            if ($reservation->candidate?->email) {
-                $notifier->notifyEmailOnly(
-                    $reservation->candidate->email,
-                    $reservation->candidate->full_name,
-                    'Hồ sơ giữ chỗ KTX đã hết hiệu lực',
-                    'Hồ sơ giữ chỗ KTX của bạn đã hết hiệu lực do quá hạn xác nhận nhập học.',
-                );
-            }
-        }
-
-        foreach ($result['rejected'] as $reservation) {
-            if ($reservation->candidate?->email) {
-                $notifier->notifyEmailOnly(
-                    $reservation->candidate->email,
-                    $reservation->candidate->full_name,
-                    'Hồ sơ giữ chỗ KTX bị từ chối',
-                    'Hồ sơ đăng ký giữ chỗ KTX của bạn đã bị từ chối. Lý do: ' . self::PERIOD_CLOSED_SUBMITTED_REJECTION_REASON,
-                );
-            }
-        }
-
-        // Phần hồ sơ giữ chỗ đã xử lý xong ở trên (transaction riêng). Giờ mới tới phần
-        // Đơn đăng ký thường — thử tự xếp hạng/xác nhận thay admin nếu admin chưa kịp làm,
-        // rồi mới ĐÓNG ĐỢT THẬT SỰ (chỉ khi thành công, không ép nếu bị chặn).
+        // Giờ mới tới phần Đơn đăng ký thường — thử tự xếp hạng/xác nhận thay admin nếu admin
+        // chưa kịp làm, rồi mới ĐÓNG ĐỢT THẬT SỰ (chỉ khi thành công, không ép nếu bị chặn).
         $registrationOutcome = $this->autoProcessRegistrations($period, $notifier);
 
         $period->refresh();
@@ -221,45 +95,12 @@ class AutoCloseAdmissionPeriodsCommand extends Command
         // autoProcessRegistrations() (rank + confirmBatch) đã xử lý xong đợt — vì ranker
         // đôn người từ nhóm Registration 'rejected', mà nhóm đó chỉ CHỐT XONG (thành 'rejected'
         // thật sự) sau khi confirmBatch() hoàn tất. Chạy trước sẽ đôn nhầm dựa trên dữ liệu
-        // 'submitted' chưa xếp hạng, bỏ sót đúng người lẽ ra được đôn (báo cáo 28/07: chạy
-        // lệnh xong Võ Quốc Bảo đáng lẽ được đôn lên nhưng không thấy đôn).
-        $freedSlotsByGender = $result['freedSlotsByGender'];
-        $promotedRegistrations = collect();
-        if (max($freedSlotsByGender['male'], $freedSlotsByGender['female']) > 0) {
-            $promotedRegistrations = DB::transaction(function () use ($period, $ranker, $freedSlotsByGender) {
-                $promoted = $ranker->rankRejectedRegistrationsForFreedSlots($period->id, $freedSlotsByGender);
-                foreach ($promoted as $reg) {
-                    $reg->update([
-                        'status'               => 'approved',
-                        'approved_at'          => now(),
-                        'auto_decision'        => 'approve',
-                        'auto_decision_reason' => null,
-                        'rejection_reason'     => null,
-                    ]);
-                }
-
-                return $promoted;
-            });
-        }
-
-        foreach ($promotedRegistrations as $registration) {
-            if ($registration->student) {
-                $this->notifyRegistrationDecision($registration, $notifier);
-            }
-        }
-        if ($promotedRegistrations->count() > 0) {
-            $this->notifyAdminEmail(
-                "Đã tự động đôn {$promotedRegistrations->count()} đơn lên duyệt — đợt \"{$period->name}\"",
-                "Hệ thống vừa tự động đôn {$promotedRegistrations->count()} đơn đăng ký nội trú từ 'Bị từ chối' lên 'Đã duyệt' trong đợt \"{$period->name}\", do có suất giữ chỗ tân sinh viên vừa hết hạn/giải phóng.",
-                $notifier,
-                'admission_promoted',
-                $period->id,
-            );
-        }
+        // 'submitted' chưa xếp hạng, bỏ sót đúng người lẽ ra được đôn (báo cáo 28/07, 30/07).
+        $promoted = $expiryService->promoteFreedSlots($period, $expiry['freedSlotsByGender']);
 
         $isClosed = $period->status === 'closed';
         $closedLabel = $isClosed ? 'đã đóng đợt' : 'CHƯA đóng đợt (còn vướng minh chứng ưu tiên chưa xác minh, xem log/email admin)';
-        $this->info("  Đợt #{$period->id} \"{$period->name}\": {$result['expired']->count()} hồ sơ chuyển expired, {$result['rejected']->count()} hồ sơ chuyển rejected, {$promotedRegistrations->count()} đơn được đôn lên duyệt, {$closedLabel}.");
+        $this->info("  Đợt #{$period->id} \"{$period->name}\": {$expiry['expiredCount']} hồ sơ giữ chỗ hết hạn/từ chối, {$promoted->count()} đơn được đôn lên duyệt, {$closedLabel}.");
 
         return $isClosed;
     }
@@ -365,20 +206,5 @@ class AutoCloseAdmissionPeriodsCommand extends Command
             'related_id' => $relatedId,
             'created_at' => now(),
         ]);
-    }
-
-    /** Báo cho sinh viên khi đơn đăng ký thường của họ được đôn từ 'rejected' lên 'approved'
-     *  nhờ suất giữ chỗ vừa giải phóng — cùng nội dung mẫu với
-     *  RegistrationController::notifyRegistrationDecision() cho nhánh approved. */
-    private function notifyRegistrationDecision(Registration $registration, StudentNotificationService $notifier): void
-    {
-        $notifier->notifyStudent(
-            $registration->student,
-            'Đơn đăng ký nội trú đã được duyệt',
-            'Đơn đăng ký nội trú KTX của bạn đã được đôn lên duyệt vì có suất trống được giải phóng. Vui lòng theo dõi thông báo để biết kết quả phân phòng.',
-            'registration_approved',
-            $registration->id,
-            queue: true,
-        );
     }
 }
