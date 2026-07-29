@@ -145,13 +145,26 @@ class RoomFeeBillController extends Controller
         $bill = RoomFeeBill::query()->findOrFail($id);
 
         $data = $request->validate([
-            'status' => ['required', 'string', Rule::in(['unpaid', 'paid', 'overdue'])],
+            'status'     => ['required', 'string', Rule::in(['unpaid', 'paid', 'overdue'])],
+            'admin_note' => ['nullable', 'string', 'max:191'],
         ]);
+
+        // Hạ cấp một hóa đơn đã thanh toán về unpaid/overdue là thao tác nhạy cảm (có thể
+        // vô tình khiến sinh viên bị tính lại quá hạn dù đã trả tiền) — bắt buộc phải nêu rõ
+        // lý do thay vì cho đổi tự do không dấu vết như trước.
+        if (($bill->status ?? 'unpaid') === 'paid'
+            && $data['status'] !== 'paid'
+            && empty($data['admin_note'] ?? null)) {
+            return response()->json([
+                'message' => 'Hóa đơn này đã thanh toán — bắt buộc nhập lý do (admin_note) khi hạ cấp về chưa thanh toán/quá hạn.',
+            ], 422);
+        }
 
         DB::transaction(function () use ($bill, $data) {
             $bill->update([
-                'status' => $data['status'],
-                'paid_at' => $data['status'] === 'paid' ? ($bill->paid_at ?? now()) : $bill->paid_at,
+                'status'     => $data['status'],
+                'paid_at'    => $data['status'] === 'paid' ? ($bill->paid_at ?? now()) : $bill->paid_at,
+                'admin_note' => $data['admin_note'] ?? $bill->admin_note,
             ]);
 
             if ($data['status'] === 'paid') {
