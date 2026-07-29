@@ -288,7 +288,6 @@ class MaintenanceController extends Controller
             'reason' => ['required', 'string', 'max:500'],
             'started_at' => ['required', 'date'],
             'expected_end_at' => ['required', 'date', 'after_or_equal:started_at'],
-            'note' => ['nullable', 'string', 'max:1000'],
         ]);
 
         $isFuture = Carbon::parse($data['started_at'])->startOfDay()->gt(Carbon::today());
@@ -351,7 +350,6 @@ class MaintenanceController extends Controller
                 'type'                => 'ROOM',
                 'room_id'             => $room->id,
                 'reason'              => trim($data['reason']),
-                'note'                => $data['note'] ?? null,
                 'pending_assignments' => $data['assignments'],
                 'status'              => 'PENDING',
                 'started_at'          => $data['started_at'],
@@ -438,13 +436,12 @@ class MaintenanceController extends Controller
 
             if ($maintenanceRequest) {
                 // Ghi đè bằng dữ liệu admin vừa nhập ở lần bấm "bắt đầu ngay" này — trước
-                // đây chỉ đổi status, khiến reason/note/expected_end_at cũ (từ lúc lên lịch
+                // đây chỉ đổi status, khiến reason/expected_end_at cũ (từ lúc lên lịch
                 // trước đó) bị giữ nguyên dù admin vừa nhập giá trị khác, dễ gây sai lệch.
                 $maintenanceRequest->update([
                     'status'              => 'IN_PROGRESS',
                     'pending_assignments' => null,
                     'reason'              => trim($data['reason']),
-                    'note'                => $data['note'] ?? null,
                     'started_at'          => $data['started_at'],
                     'expected_end_at'     => $data['expected_end_at'],
                 ]);
@@ -453,7 +450,6 @@ class MaintenanceController extends Controller
                     'type'            => 'ROOM',
                     'room_id'         => $room->id,
                     'reason'          => trim($data['reason']),
-                    'note'            => $data['note'] ?? null,
                     'status'          => 'IN_PROGRESS',
                     'started_at'      => $data['started_at'],
                     'expected_end_at' => $data['expected_end_at'],

@@ -15,7 +15,6 @@ class MaintenanceRequest extends Model
         'bed_id',
         'reason',
         'pending_assignments',
-        'note',
         'status',
         'started_at',
         'expected_end_at',
