@@ -9,6 +9,7 @@ use App\Models\Blacklist;
 use App\Models\CheckoutRequest;
 use App\Models\Occupancy;
 use App\Services\StudentNotificationService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -76,6 +77,18 @@ class ViolationController extends Controller
         if ($this->isForcedCheckout($occupancy->status)) {
             return response()->json([
                 'message' => 'Sinh viên không còn lưu trú tại KTX, không thể ghi nhận hoạt động mới.',
+            ], 422);
+        }
+
+        // Occupancy có thể đã ACTIVE (đã thanh toán) trước cả ngày check_in_date thật —
+        // không thể ghi nhận hoạt động (vi phạm/khen thưởng) xảy ra tại KTX cho người
+        // chưa từng có mặt ở đó.
+        if ($occupancy->check_in_date
+            && Carbon::parse($occupancy->check_in_date)->startOfDay()->gt(Carbon::today())) {
+            return response()->json([
+                'message' => 'Sinh viên chưa tới ngày nhận phòng (dự kiến '
+                    . Carbon::parse($occupancy->check_in_date)->format('d/m/Y')
+                    . '), chưa thể ghi nhận hoạt động.',
             ], 422);
         }
 

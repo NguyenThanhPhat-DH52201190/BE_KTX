@@ -72,6 +72,8 @@ class MaintenanceController extends Controller
                 abort(response()->json(['message' => 'Giường này không có sinh viên ACTIVE để chuyển tạm.'], 422));
             }
 
+            $this->assertOccupancyCheckedIn($occupancy);
+
             $oldRoomId = (int) $occupancy->room_id;
             $oldBedId = (int) $occupancy->bed_id;
             $maintenanceRequest = MaintenanceRequest::create([
@@ -468,6 +470,8 @@ class MaintenanceController extends Controller
                     abort(response()->json(['message' => 'Danh sách sinh viên chuyển phòng không hợp lệ.'], 422));
                 }
 
+                $this->assertOccupancyCheckedIn($occupancy);
+
                 $targetBed = $targetBeds->get((int) $assignment['target_bed_id']);
                 $oldRoomId = (int) $occupancy->room_id;
                 $oldBedId = (int) $occupancy->bed_id;
@@ -737,6 +741,22 @@ class MaintenanceController extends Controller
 
         if (strtolower((string) $bed->room?->floor?->gender) !== strtolower((string) $sourceRoom->floor?->gender)) {
             abort(response()->json(['message' => 'Giường đích không cùng giới tính với phòng nguồn.'], 422));
+        }
+    }
+
+    /**
+     * Occupancy có thể đã ACTIVE (đã thanh toán) trước cả ngày check_in_date thật —
+     * chặn di dời tạm (bảo trì) cho người chưa từng có mặt tại KTX.
+     */
+    private function assertOccupancyCheckedIn(Occupancy $occupancy): void
+    {
+        if ($occupancy->check_in_date
+            && Carbon::parse($occupancy->check_in_date)->startOfDay()->gt(Carbon::today())) {
+            abort(response()->json([
+                'message' => 'Sinh viên chưa tới ngày nhận phòng (dự kiến '
+                    . Carbon::parse($occupancy->check_in_date)->format('d/m/Y')
+                    . '), chưa thể di dời tạm.',
+            ], 422));
         }
     }
 
