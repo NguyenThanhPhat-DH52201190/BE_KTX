@@ -28,7 +28,7 @@ class StudentSearchController extends Controller
                 $query->select(DB::raw(1))
                     ->from('occupancy')
                     ->whereColumn('occupancy.student_id', 'students.id')
-                    ->whereIn('occupancy.status', ['ACTIVE', 'ROOM_CONFIRMED', 'COMPLETED', 'TERMINATED']);
+                    ->whereIn('occupancy.status', ['ACTIVE', 'COMPLETED', 'TERMINATED']);
             })
             ->where(function ($query) use ($q) {
                 $query->where('full_name', 'like', "%{$q}%")
@@ -88,10 +88,10 @@ class StudentSearchController extends Controller
         }
 
         return match ($occupancy->status) {
-            'ACTIVE', 'ROOM_CONFIRMED' => 'ACTIVE',
-            'COMPLETED'                => 'CHECKED_OUT',
-            'TERMINATED'               => 'FORCED_CHECKOUT',
-            default                    => null,
+            'ACTIVE'      => 'ACTIVE',
+            'COMPLETED'   => 'CHECKED_OUT',
+            'TERMINATED'  => 'FORCED_CHECKOUT',
+            default       => null,
         };
     }
 
