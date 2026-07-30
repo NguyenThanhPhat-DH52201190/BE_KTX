@@ -246,6 +246,7 @@ class RegistrationController extends Controller
                 $newRoomCode,
                 $this->bedSelectionDeadline($registration),
                 $registration->id,
+                queue: true,
             );
             return;
         }
@@ -271,7 +272,7 @@ class RegistrationController extends Controller
             }
         }
 
-        $this->notifier()->notifyStudent($student, $title, $content, $type);
+        $this->notifier()->notifyStudent($student, $title, $content, $type, queue: true);
     }
 
     /**
@@ -1211,6 +1212,7 @@ class RegistrationController extends Controller
                     . ($dueDateText ? " Vui lòng thanh toán hóa đơn tháng đầu trước hạn {$dueDateText} để hoàn tất thủ tục lưu trú." : ' Vui lòng thanh toán hóa đơn tháng đầu để hoàn tất thủ tục lưu trú.'),
                 'bed_selected',
                 $registration->id,
+                queue: true,
             );
         }
 
