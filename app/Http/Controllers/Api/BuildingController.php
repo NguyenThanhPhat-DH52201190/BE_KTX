@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Bed;
 use App\Models\Building;
 use App\Models\Floor;
 use App\Models\Occupancy;
+use App\Models\Room;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -265,5 +267,15 @@ class BuildingController extends Controller
         $floor->delete();
 
         return response()->noContent();
+    }
+
+    // Thống kê công khai cho trang chủ (chưa đăng nhập) — số tòa, số phòng & tổng giường thực tế.
+    public function publicStats()
+    {
+        return response()->json([
+            'buildings' => Building::query()->count(),
+            'rooms' => Room::query()->count(),
+            'beds' => Bed::query()->count(),
+        ]);
     }
 }

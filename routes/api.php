@@ -46,6 +46,11 @@ Route::middleware('throttle:60,1')->group(function () {
     // Trang tĩnh (public)
     Route::get('/pages/{slug}', [StaticPageController::class, 'show']);
 
+    // Thống kê công khai (số tòa/giường thực tế) cho trang chủ chưa đăng nhập — đặt TRƯỚC
+    // route /buildings/{buildingCode} (yêu cầu auth) ở dưới, nếu không "public-stats" sẽ bị
+    // nuốt mất như một buildingCode và trả về 401.
+    Route::get('/buildings/public-stats', [BuildingController::class, 'publicStats']);
+
     // Tuyến xác thực
     Route::post('/register', [AuthController::class, 'register']);
     Route::post('/login', [AuthController::class, 'login']);
