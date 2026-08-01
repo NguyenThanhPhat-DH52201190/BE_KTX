@@ -87,6 +87,7 @@ class DormReservationCancellationService
 
         $pendingRegistration = Registration::where('source_dorm_reservation_id', $reservation->id)
             ->whereNotIn('status', ['cancelled', 'rejected'])
+            ->with('student:id,gender')
             ->lockForUpdate()
             ->first();
 
@@ -97,6 +98,21 @@ class DormReservationCancellationService
                 'cancellation_reason' => $reason,
                 'cancelled_by'        => $cancelledBy,
             ]);
+
+            // Đơn vừa bị loại khỏi vòng cạnh tranh (status='cancelled') — xếp hạng lại NGAY
+            // đúng giới của thí sinh vừa tự hủy để người kế tiếp trong waitlist được đôn lên và
+            // hiển thị đúng trên /admin/registrations ngay, không cần đợi admin bấm "Xếp hạng
+            // lại" thủ công (xem RegistrationController::manualRejectNow() — cùng cơ chế, áp
+            // dụng cho trường hợp Từ chối tay).
+            $gender = strtolower($pendingRegistration->student?->gender ?? '');
+            if (in_array($gender, ['male', 'female'], true)) {
+                $capacityService = app(DormCapacityService::class);
+                $availableBedsByGender = [
+                    'male' => (int) ($capacityService->summarizeForRegistrationPeriod($reservation->registration_period_id, gender: 'male', excludeReservationsWithRegistration: true)['available_approval_slots'] ?? 0),
+                    'female' => (int) ($capacityService->summarizeForRegistrationPeriod($reservation->registration_period_id, gender: 'female', excludeReservationsWithRegistration: true)['available_approval_slots'] ?? 0),
+                ];
+                app(PriorityRankingService::class)->applyRankingDecisions($reservation->registration_period_id, $availableBedsByGender, onlyGender: $gender);
+            }
         }
 
         $reservation->update([
