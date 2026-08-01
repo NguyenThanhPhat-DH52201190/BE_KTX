@@ -516,27 +516,11 @@ class RegistrationPeriodController extends Controller
                 ];
             }
 
+            // applyRankingDecisions() = rankPeriod() + ghi auto_decision/auto_decision_reason —
+            // dùng chung với các nơi cần tự xếp hạng lại tức thời (Từ chối tay, tự hủy giữ chỗ...)
+            // xem RegistrationController::manualRejectNow(), DormReservationCancellationService.
             $ranker = new PriorityRankingService();
-            $rankResult = $ranker->rankPeriod($period->id, $freeBedsByGender, recalculate: true);
-
-            foreach ($rankResult['approved'] as $reg) {
-                $reg->auto_decision = 'approve';
-                $reg->auto_decision_reason = null;
-                $reg->save();
-            }
-
-            $genderLabel = ['male' => 'nam', 'female' => 'nữ'];
-            foreach (['male', 'female'] as $gender) {
-                $genderBucket = $rankResult['byGender'][$gender];
-                $genderApprovedCount = $genderBucket['approved']->count();
-                $genderTotal = $genderApprovedCount + $genderBucket['waitlist']->count();
-                foreach ($genderBucket['waitlist'] as $index => $reg) {
-                    $rank = $genderApprovedCount + $index + 1;
-                    $reg->auto_decision = 'reject';
-                    $reg->auto_decision_reason = "Không đủ chỉ tiêu ({$genderLabel[$gender]}) — xếp hạng thứ {$rank}/{$genderTotal}, chỉ tiêu {$freeBedsByGender[$gender]} suất.";
-                    $reg->save();
-                }
-            }
+            $rankResult = $ranker->applyRankingDecisions($period->id, $freeBedsByGender);
 
             // Suất DƯ (nếu bảng Đơn đăng ký không dùng hết ngân sách) mới được xét đôn cho hồ
             // sơ giữ chỗ đang waitlisted (chưa nhập học) — luôn ưu tiên người có Registration

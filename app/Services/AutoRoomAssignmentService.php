@@ -37,7 +37,7 @@ class AutoRoomAssignmentService
         //    (includes registrations with existing PROPOSED — we will update them)
         $query = Registration::query()
             ->where('status', 'approved')
-            ->with(['student', 'period'])
+            ->with(['student', 'period', 'sourceDormReservation:id,submitted_at,created_at'])
             ->whereNotExists(function ($sub) {
                 $sub->from('occupancy')
                     ->whereColumn('occupancy.registration_id', 'registrations.id')
@@ -60,7 +60,8 @@ class AutoRoomAssignmentService
             ->keyBy('registration_id');
 
         // 3. Secondary sort: cluster by province → faculty+year, while preserving priority
-        $sorted = $registrations->sort(function (Registration $a, Registration $b) {
+        $ranker = new PriorityRankingService();
+        $sorted = $registrations->sort(function (Registration $a, Registration $b) use ($ranker) {
             if ($a->top_priority_tier !== $b->top_priority_tier) {
                 return $a->top_priority_tier <=> $b->top_priority_tier;
             }
@@ -77,7 +78,12 @@ class AutoRoomAssignmentService
             if ($aGroup !== $bGroup) {
                 return strcmp($aGroup, $bGroup);
             }
-            return $a->created_at <=> $b->created_at;
+            // Dùng đúng mốc nộp GỐC (originalSubmittedAt) thay vì created_at thô — với tân sinh
+            // viên convert từ giữ chỗ, created_at là thời điểm convert/nhập học (trễ hơn), sẽ
+            // xếp sai thứ tự "ai nộp trước" nếu 2 người trùng hết các tiêu chí gom nhóm phía
+            // trên (tỉnh, khoa, khóa). Dùng chung đúng logic PriorityRankingService đang dùng
+            // để xếp hạng duyệt, tránh 2 nơi tính "ai nộp trước" ra 2 kết quả khác nhau.
+            return $ranker->originalSubmittedAt($a)->timestamp <=> $ranker->originalSubmittedAt($b)->timestamp;
         })->values();
 
         // 4. Room availability map (PROPOSED occupancies do NOT count as occupied;

@@ -27,6 +27,7 @@ use App\Jobs\ProcessPriorityEvidenceJob;
 use App\Services\AutoReviewService;
 use App\Services\DormCapacityService;
 use App\Services\DormReservationExpiryService;
+use App\Services\PriorityRankingService;
 use App\Services\RoomFeeBillingService;
 use App\Services\StudentNotificationService;
 use Carbon\Carbon;
@@ -134,6 +135,9 @@ class RegistrationController extends Controller
             'rejection_reason' => $registration->rejection_reason,
             'auto_decision' => $registration->auto_decision,
             'auto_decision_reason' => $registration->auto_decision_reason,
+            'decision_source' => $registration->decision_source,
+            'manual_decision' => $registration->manual_decision,
+            'manual_decision_reason' => $registration->manual_decision_reason,
             'source_dorm_reservation_id' => $registration->source_dorm_reservation_id,
             'registration_period_id' => $registration->registration_period_id,
             'channel' => $registration->period?->channel,
@@ -1661,12 +1665,37 @@ class RegistrationController extends Controller
         });
     }
 
+    /**
+     * "Đổi đề xuất" thủ công của admin trên 1 đơn đang chờ xử lý (status='submitted').
+     *
+     * - decision=reject: CHỐT THẬT NGAY LẬP TỨC (status='rejected'), không còn là đề xuất chờ
+     *   Xác nhận riêng nữa — xem manualRejectNow(). Đơn này bị loại vĩnh viễn khỏi vòng xếp
+     *   hạng (PriorityRankingService::rankPeriod() loại status='rejected'), suất tự động trôi
+     *   xuống người xếp hạng kế tiếp cùng giới ở lần "Xếp hạng lại" kế tiếp.
+     * - decision=approve: chỉ là "ghim tay" (decision_source='manual'), vẫn ở status='submitted'
+     *   chờ Xác nhận như bình thường. Lần "Xếp hạng lại" kế tiếp sẽ ưu tiên giữ suất cho đơn
+     *   này TRƯỚC (Cách A — có thể đẩy 1 người xếp hạng tự nhiên cao hơn xuống waitlist) — xem
+     *   PriorityRankingService::splitBucketWithManualPins(). FE nên gọi previewManualApprove()
+     *   trước để cảnh báo admin ai có thể bị ảnh hưởng.
+     * - decision=review: giữ nguyên hành vi cũ (chỉ đánh dấu "cần xem lại", không phải quyết
+     *   định tay/ghim gì cả).
+     */
     public function patchAutoDecision($id, Request $request)
     {
         $request->validate([
             'decision' => 'required|in:approve,reject,review',
-            'reason'   => 'nullable|string|max:1000',
+            // Chỉ bắt buộc lý do cho 'reject' (giờ chốt thật ngay, cần lưu vết) — 'approve' để
+            // nullable vì còn 1 nơi gọi không qua dialog "Đổi đề xuất": nút "Duyệt" nhanh ở khu
+            // "Chờ duyệt thủ công" (handleApproveFromReview ở FE) duyệt thẳng rồi confirm luôn,
+            // không đi qua dialog ghim có ô nhập lý do bắt buộc.
+            'reason'   => 'required_if:decision,reject|nullable|string|max:1000',
         ]);
+
+        $decision = $request->input('decision');
+
+        if ($decision === 'reject') {
+            return $this->manualRejectNow($id, $request->input('reason'));
+        }
 
         $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])->find($id);
 
@@ -1674,47 +1703,195 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Không tìm thấy đơn'], 404);
         }
 
-        if ($registration->status === 'cancelled') {
-            return response()->json(['message' => 'Đơn đã bị hủy, không thể đổi quyết định tự động.'], 422);
+        // Chỉ cho đổi đề xuất khi đơn còn đang chờ xử lý — status khác 'submitted' (đã
+        // approved/rejected/cancelled) nghĩa là đã có quyết định cuối cùng hoặc đã bị hủy, đổi
+        // đề xuất lúc này không còn ý nghĩa gì (và với reject giờ đụng thẳng status, càng cần
+        // chặn chặt để không đảo ngược 1 quyết định đã chốt/hủy trước đó).
+        if ($registration->status !== 'submitted') {
+            return response()->json(['message' => 'Chỉ có thể đổi đề xuất khi đơn đang ở trạng thái chờ xử lý.'], 422);
         }
 
-        // Trước đây chặn cứng không cho đổi đề xuất rời khỏi 'approve' cho Registration nguồn
-        // giữ chỗ, vì sợ để lại DormReservation approved dở dang. Giờ không cần chặn nữa —
-        // confirmSingle()/confirmBatch() đã tự xử lý chuyển DormReservation nguồn về
-        // 'waitlisted' (kèm thông báo cho thí sinh) khi quyết định cuối cùng là 'reject', áp
-        // dụng cho MỌI nguồn gốc auto_decision (xếp hạng tự động hay admin tự tay đổi ở đây).
-
-        if ($request->input('decision') === 'approve' && $registration->hasRejectedPriorityEvidence()) {
-            return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
-        }
-
-        if ($request->input('decision') === 'approve' && $registration->auto_decision !== 'approve') {
-            $gender = $registration->student?->gender;
-            // Đếm số đơn đang đề xuất duyệt CÙNG GIỚI TÍNH với đơn này — giường tách riêng
-            // theo giới nên không thể so với 1 số gộp chung cả nam lẫn nữ (xem
-            // PriorityRankingService::rankPeriod()).
-            $proposedApprovedCount = Registration::where('registration_period_id', $registration->registration_period_id)
-                ->where('status', 'submitted')
-                ->where('auto_decision', 'approve')
-                ->whereHas('student', fn ($q) => $q->where('gender', $gender))
-                ->count() + 1;
-
-            $capacity = app(DormCapacityService::class)
-                ->summarizeForRegistrationPeriod($registration->registration_period_id, $proposedApprovedCount, gender: $gender);
-
-            if (($capacity['capacity_exceeded'] ?? false) === true) {
-                return response()->json([
-                    'message'  => 'Không thể chọn duyệt thêm vì đã đạt giới hạn sức chứa của đợt.',
-                    'capacity' => $capacity,
-                ], 422);
+        if ($decision === 'approve') {
+            if ($registration->hasRejectedPriorityEvidence()) {
+                return response()->json(['message' => 'Không thể duyệt hồ sơ vì minh chứng ưu tiên không hợp lệ.'], 422);
             }
+
+            // KHÔNG còn chặn theo "sức chứa còn trống hay không" ở đây nữa — đó là rào chắn
+            // của thời trước khi có ghim tay, giờ mâu thuẫn trực tiếp với chính mục đích của
+            // ghim tay: được phép chiếm 1 suất TRƯỚC dù chỉ tiêu đã đủ người, đổi lại 1 người
+            // đang giữ suất yếu nhất bị đẩy xuống waitlist (đã cảnh báo rõ qua
+            // previewManualApprove() + dialog FE trước khi admin xác nhận).
+            //
+            // Ghim tay là hành động MỘT LẦN — PriorityRankingService::applyManualApprove() tự
+            // xử lý trực tiếp: xác định ai bị đẩy (nếu có), ghi kết quả CHO CẢ 2 người ngay lập
+            // tức, không cần "Xếp hạng lại" toàn bộ để tính thắng thua (xem
+            // splitBucketWithManualPins() — sau khi thắng, đơn này được khóa cứng, không còn bị
+            // tính lại/tranh chấp ở các lần xếp hạng sau nữa).
+            $gender = strtolower($registration->student?->gender ?? '');
+            if (!in_array($gender, ['male', 'female'], true)) {
+                return response()->json(['message' => 'Không xác định được giới tính của sinh viên.'], 422);
+            }
+
+            $capacityService = app(DormCapacityService::class);
+            $beds = (int) ($capacityService->summarizeForRegistrationPeriod(
+                $registration->registration_period_id,
+                gender: $gender,
+                excludeReservationsWithRegistration: true,
+            )['available_approval_slots'] ?? 0);
+
+            (new PriorityRankingService())->applyManualApprove($registration, $beds, $request->input('reason'));
+
+            return response()->json($this->formatRegistration($registration->fresh(['student', 'student.account', 'occupancy', 'period'])));
         }
 
-        $registration->auto_decision = $request->input('decision');
+        // review — giữ hành vi cũ, chỉ là nhãn "cần xem lại", không ghim gì.
+        $registration->decision_source = null;
+        $registration->manual_decision = null;
+        $registration->manual_decision_reason = null;
+        $registration->auto_decision = 'review';
         $registration->auto_decision_reason = $request->input('reason');
         $registration->save();
 
         return response()->json($this->formatRegistration($registration));
+    }
+
+    /**
+     * Từ chối tay = chốt thật ngay, không qua bước "Xác nhận" riêng nữa. Nếu đơn có nguồn
+     * giữ chỗ tân sinh viên (source_dorm_reservation_id), reservation nguồn chuyển hẳn sang
+     * 'rejected' (KHÔNG phải 'waitlisted' như nhánh reject-do-thua-điểm-xếp-hạng của
+     * confirmSingle()) — vì đây là admin chủ động xác định hồ sơ có vấn đề, không phải đơn
+     * thuần túy thua điểm cạnh tranh; 'rejected' không nằm trong ACTIVE_RESERVATION_STATUSES
+     * (xem DormReservationController) nên thí sinh nộp lại hồ sơ mới được, không bị kẹt.
+     */
+    private function manualRejectNow(int $id, string $reason): JsonResponse
+    {
+        $result = DB::transaction(function () use ($id, $reason) {
+            $registration = Registration::with(['student', 'student.account', 'occupancy', 'period'])
+                ->whereKey($id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$registration) {
+                return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+            }
+
+            if ($registration->status !== 'submitted') {
+                return response()->json(['message' => 'Chỉ có thể đổi đề xuất khi đơn đang ở trạng thái chờ xử lý.'], 422);
+            }
+
+            $sourceReservation = null;
+            if ($registration->source_dorm_reservation_id) {
+                $sourceReservation = DormReservation::where('id', $registration->source_dorm_reservation_id)
+                    ->lockForUpdate()
+                    ->first();
+            }
+
+            $registration->status = 'rejected';
+            $registration->rejection_reason = $reason;
+            $registration->auto_decision = 'reject';
+            $registration->auto_decision_reason = $reason;
+            $registration->decision_source = 'manual';
+            $registration->manual_decision = 'reject';
+            $registration->manual_decision_reason = $reason;
+            $registration->save();
+
+            if ($sourceReservation && $sourceReservation->status === 'approved') {
+                $sourceReservation->update([
+                    'status'               => 'rejected',
+                    'rejection_reason'     => $reason,
+                    'auto_decision'        => null,
+                    'auto_decision_reason' => null,
+                ]);
+            }
+
+            // Đơn vừa bị loại khỏi vòng cạnh tranh (status='rejected') — xếp hạng lại NGAY
+            // đúng giới của đơn này để người kế tiếp trong waitlist được đôn lên và hiển thị
+            // đúng trên giao diện luôn, không cần đợi admin bấm "Xếp hạng lại" thủ công.
+            $this->refreshGenderRanking($registration->registration_period_id, strtolower($registration->student?->gender ?? ''));
+
+            return ['registration' => $registration];
+        });
+
+        if ($result instanceof JsonResponse) {
+            return $result;
+        }
+
+        $registration = $result['registration'];
+
+        if ($registration->student) {
+            $this->notifyRegistrationDecision($registration);
+        }
+
+        return response()->json($this->formatRegistration($registration));
+    }
+
+    /**
+     * Xếp hạng lại NGAY 1 giới của 1 đợt — dùng cho các thao tác tự động loại 1 đơn khỏi cạnh
+     * tranh (Từ chối tay...) để người kế tiếp được đôn lên và hiển thị đúng ngay lập tức, không
+     * cần đợi admin bấm "Xếp hạng lại" thủ công. Bỏ qua nếu $gender không hợp lệ (dữ liệu sinh
+     * viên thiếu giới tính — trường hợp bất thường, không nên chặn cả giao dịch chính vì lý do
+     * phụ này).
+     */
+    private function refreshGenderRanking(int $periodId, string $gender): void
+    {
+        if (!in_array($gender, ['male', 'female'], true)) {
+            return;
+        }
+
+        $capacityService = app(DormCapacityService::class);
+        $availableBedsByGender = [
+            'male' => (int) ($capacityService->summarizeForRegistrationPeriod($periodId, gender: 'male', excludeReservationsWithRegistration: true)['available_approval_slots'] ?? 0),
+            'female' => (int) ($capacityService->summarizeForRegistrationPeriod($periodId, gender: 'female', excludeReservationsWithRegistration: true)['available_approval_slots'] ?? 0),
+        ];
+
+        (new PriorityRankingService())->applyRankingDecisions($periodId, $availableBedsByGender, onlyGender: $gender);
+    }
+
+    /**
+     * Xem trước hệ quả nếu ghim tay Duyệt cho 1 đơn — trả về sinh viên (nếu có) sẽ bị đẩy
+     * xuống waitlist, để FE cảnh báo admin trước khi xác nhận. Không ghi gì xuống DB.
+     */
+    public function previewManualApprove($id): JsonResponse
+    {
+        $registration = Registration::find($id);
+
+        if (!$registration) {
+            return response()->json(['message' => 'Không tìm thấy đơn'], 404);
+        }
+
+        if ($registration->status !== 'submitted') {
+            return response()->json(['message' => 'Chỉ có thể đổi đề xuất khi đơn đang ở trạng thái chờ xử lý.'], 422);
+        }
+
+        $capacityService = app(DormCapacityService::class);
+        $availableBedsByGender = [];
+        foreach (['male', 'female'] as $g) {
+            $capacity = $capacityService->summarizeForRegistrationPeriod(
+                $registration->registration_period_id,
+                gender: $g,
+                excludeReservationsWithRegistration: true,
+            );
+            $availableBedsByGender[$g] = (int) ($capacity['available_approval_slots'] ?? 0);
+        }
+
+        $preview = (new PriorityRankingService())->previewManualApprove(
+            (int) $id,
+            $registration->registration_period_id,
+            $availableBedsByGender,
+        );
+
+        if ($preview === null) {
+            return response()->json(['message' => 'Không xác định được giới tính của sinh viên.'], 422);
+        }
+
+        $bumped = $preview['bumped'];
+
+        return response()->json([
+            'bumped_student' => $bumped ? [
+                'full_name'    => $bumped->student?->full_name,
+                'student_code' => $bumped->student?->student_code,
+            ] : null,
+        ]);
     }
 
     public function confirmSingle($id)

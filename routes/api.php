@@ -137,6 +137,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Đăng ký — quyết định tự động / xác nhận hàng loạt
         Route::patch('/admin/registrations/{id}/auto-decision', [RegistrationController::class, 'patchAutoDecision']);
+        Route::get('/admin/registrations/{id}/preview-manual-approve', [RegistrationController::class, 'previewManualApprove']);
         Route::post('/admin/registrations/{id}/confirm', [RegistrationController::class, 'confirmSingle']);
         Route::post('/admin/registration-periods/{id}/confirm-batch', [RegistrationController::class, 'confirmBatch']);
 

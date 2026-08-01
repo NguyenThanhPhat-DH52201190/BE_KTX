@@ -253,8 +253,24 @@ class PriorityRankingService
         // chiếm 1 vị trí trong bucket theo giới, đẩy người xếp hạng thấp hơn ra khỏi chỉ
         // tiêu dù suất của người đã rút thực chất đang bỏ trống (báo cáo 28/07: Hoàng Khánh
         // Lan tự hủy nhưng vẫn tính vào "3/3" khiến Trần Thị Bích bị từ chối oan dù còn suất).
+        //
+        // Loại thêm 'rejected' — admin "Từ chối" tay qua patchAutoDecision() giờ chốt thật
+        // ngay lập tức (status='rejected'), không còn là đề xuất chờ nữa. Đơn đã bị từ chối
+        // thật không được cạnh tranh lại ở các lần xếp hạng sau (xem báo cáo sửa lỗi "Xếp
+        // hạng lại ghi đè mất quyết định tay của admin").
+        //
+        // Loại thêm 'approved' — đơn đã được XÁC NHẬN CHÍNH THỨC (confirmSingle/confirmBatch)
+        // suất của họ đã bị trừ SẴN vào $availableBedsByGender (tính qua
+        // DormCapacityService::summarizeForRegistrationPeriod()['available_approval_slots'],
+        // vốn = tổng giường - số đơn approved). Nếu KHÔNG loại họ khỏi bucket này, họ vẫn nằm
+        // trong danh sách cạnh tranh cho đúng con số suất ĐÃ TRỪ HỌ RỒI — tức 1 suất bị trừ 2
+        // lần: 1 lần lúc tính available_approval_slots, 1 lần nữa lúc họ "thắng" take($beds).
+        // Hệ quả: hễ đã có 1 người approved, top_priority_tier của họ luôn cao nhất nên vĩnh
+        // viễn không ai khác được duyệt thêm dù giường vẫn còn trống thật (báo cáo 01/08: Võ
+        // Quốc Bảo đã duyệt trước, sau đó "Xếp hạng lại" chạy lại — dù còn 1 giường nam trống —
+        // vẫn không duyệt thêm được ai vì Bảo tự chiếm lại đúng suất đó trong phép tính).
         $ranked = Registration::where('registration_period_id', $periodId)
-            ->where('status', '!=', 'cancelled')
+            ->whereNotIn('status', ['cancelled', 'rejected', 'approved'])
             ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
             ->with(['sourceDormReservation:id,submitted_at,created_at', 'student:id,gender'])
             ->orderBy('top_priority_tier', 'asc')
@@ -282,8 +298,7 @@ class PriorityRankingService
                 fn (Registration $r) => strtolower($r->student->gender ?? '') === $gender
             )->values();
             $beds = max(0, $availableBedsByGender[$gender] ?? 0);
-            $genderApproved = $bucket->take($beds)->values();
-            $genderWaitlist = $bucket->slice($beds)->values();
+            [$genderApproved, $genderWaitlist] = $this->splitBucketWithManualPins($bucket, $beds);
 
             $byGender[$gender] = [
                 'ranked' => $bucket,
@@ -300,6 +315,224 @@ class PriorityRankingService
             'waitlist' => $waitlist->values(),
             'byGender' => $byGender,
         ];
+    }
+
+    /**
+     * rankPeriod() + ghi luôn kết quả xuống auto_decision/auto_decision_reason cho từng
+     * Registration — dùng chung cho cả "Xếp hạng lại" (RegistrationPeriodController::process(),
+     * cả 2 giới) lẫn các nơi cần tự cập nhật NGAY sau khi 1 đơn bị loại khỏi cạnh tranh
+     * (Từ chối tay, sinh viên tự hủy giữ chỗ...) mà chỉ cần cập nhật đúng 1 giới bị ảnh hưởng,
+     * không cần chờ admin bấm "Xếp hạng lại" thủ công.
+     *
+     * @param array{male: int, female: int} $availableBedsByGender
+     * @param string|null $onlyGender Chỉ ghi kết quả cho 1 giới ('male'/'female') — dùng khi
+     *   chỉ cần cập nhật tức thời 1 giới vừa có suất trống, không đụng tới giới còn lại.
+     * @return array{
+     *   ranked: Collection<int, Registration>,
+     *   approved: Collection<int, Registration>,
+     *   waitlist: Collection<int, Registration>,
+     *   byGender: array<string, array{ranked: Collection<int, Registration>, approved: Collection<int, Registration>, waitlist: Collection<int, Registration>}>
+     * }
+     */
+    public function applyRankingDecisions(int $periodId, array $availableBedsByGender, ?string $onlyGender = null): array
+    {
+        $rankResult = $this->rankPeriod($periodId, $availableBedsByGender, recalculate: true);
+
+        $genderLabel = ['male' => 'nam', 'female' => 'nữ'];
+        $genders = $onlyGender ? [$onlyGender] : ['male', 'female'];
+
+        foreach ($genders as $gender) {
+            if (!isset($rankResult['byGender'][$gender])) {
+                continue;
+            }
+
+            $bucket = $rankResult['byGender'][$gender];
+
+            foreach ($bucket['approved'] as $reg) {
+                $reg->auto_decision = 'approve';
+                $reg->auto_decision_reason = null;
+                $reg->save();
+            }
+
+            $approvedCount = $bucket['approved']->count();
+            $total = $approvedCount + $bucket['waitlist']->count();
+            foreach ($bucket['waitlist'] as $index => $reg) {
+                $rank = $approvedCount + $index + 1;
+                $reg->auto_decision = 'reject';
+                $reg->auto_decision_reason = "Không đủ chỉ tiêu ({$genderLabel[$gender]}) — xếp hạng thứ {$rank}/{$total}, chỉ tiêu {$availableBedsByGender[$gender]} suất.";
+                $reg->save();
+            }
+        }
+
+        return $rankResult;
+    }
+
+    /**
+     * Chia 1 bucket (đã xếp hạng theo tier/điểm/thời gian, cùng 1 giới) thành duyệt/waitlist,
+     * có tính đến "ghim tay" (decision_source='manual', manual_decision='approve').
+     *
+     * Quy tắc (thống nhất 01/08): ghim tay là hành động MỘT LẦN, tại đúng thời điểm admin bấm
+     * xác nhận (xem resolveManualApprove()) — không phải thứ được "tính lại từ đầu" mỗi lần xếp
+     * hạng. Sau khi ghim thắng 1 lần (auto_decision đã là 'approve'), người đó được COI NHƯ ĐÃ
+     * KHÓA CỨNG suất của mình — chỉ đơn giản bị trừ khỏi số suất còn lại, không tiếp tục tranh
+     * chấp gì nữa ở các lần xếp hạng SAU (kể cả khi có người khác bị từ chối/hủy phát sinh suất
+     * mới — suất mới đó phải chia theo tiêu chí ưu tiên cho phần TỰ NHIÊN còn lại, không tự
+     * động "nhảy vào" cho 1 ghim cũ nào khác). Đơn từng được ghim nhưng ĐÃ THUA (auto_decision
+     * hiện không phải 'approve') không còn được ưu tiên gì — cạnh tranh lại hoàn toàn bình
+     * thường theo tier/điểm như một đơn tự nhiên, y hệt như chưa từng được ghim.
+     *
+     * @param Collection<int, Registration> $bucket
+     * @return array{0: Collection<int, Registration>, 1: Collection<int, Registration>}
+     */
+    private function splitBucketWithManualPins(Collection $bucket, int $beds): array
+    {
+        $isLockedWinner = fn (Registration $r) => $r->decision_source === 'manual'
+            && $r->manual_decision === 'approve'
+            && $r->auto_decision === 'approve';
+
+        $lockedPinned = $bucket->filter($isLockedWinner)->values();
+        $rest = $bucket->reject($isLockedWinner)->values();
+
+        $remainingBeds = max(0, $beds - $lockedPinned->count());
+        $naturalApproved = $rest->take($remainingBeds)->values();
+
+        $approved = $lockedPinned->concat($naturalApproved)->values();
+        $approvedIds = $approved->pluck('id')->all();
+        // Giữ nguyên thứ tự tier/điểm gốc của $bucket cho waitlist để hiển thị thứ hạng nhất quán.
+        $genderWaitlist = $bucket->reject(fn (Registration $r) => in_array($r->id, $approvedIds, true))->values();
+
+        return [$approved, $genderWaitlist];
+    }
+
+    /**
+     * Xử lý MỘT LẦN hành động "ghim tay Duyệt" cho $targetId — tìm người tier/điểm thấp nhất
+     * đang trong nhóm Duyệt hiện tại (đã tính cả các ghim đã khóa cứng từ trước) để nhường chỗ,
+     * nếu suất đã đầy. Không ghi DB — chỉ tính toán, trả về ai sẽ bị đẩy (null nếu không cần
+     * đẩy ai, hoặc nếu hết giường vật lý nên target không thể thắng).
+     *
+     * @param Collection<int, Registration> $bucket
+     * @return array{targetWins: bool, bumped: ?Registration}
+     */
+    private function resolveManualApprove(Collection $bucket, int $beds, int $targetId): array
+    {
+        [$approved] = $this->splitBucketWithManualPins($bucket, $beds);
+
+        if ($approved->contains(fn (Registration $r) => $r->id === $targetId)) {
+            return ['targetWins' => true, 'bumped' => null];
+        }
+
+        if ($approved->count() < $beds) {
+            return ['targetWins' => true, 'bumped' => null];
+        }
+
+        if ($approved->isEmpty()) {
+            // beds = 0 — không có suất vật lý nào để thắng, kể cả ghim tay cũng chịu.
+            return ['targetWins' => false, 'bumped' => null];
+        }
+
+        $weakest = $approved->sort(function (Registration $a, Registration $b) {
+            if ($a->top_priority_tier !== $b->top_priority_tier) {
+                return $b->top_priority_tier <=> $a->top_priority_tier; // tier lớn hơn (tệ hơn) lên đầu
+            }
+            if ($a->total_priority_score !== $b->total_priority_score) {
+                return $a->total_priority_score <=> $b->total_priority_score; // điểm thấp hơn lên đầu
+            }
+
+            // Trùng cả tier lẫn điểm — ai NỘP SAU thì coi là "tệ hơn" (lên đầu, bị đẩy trước),
+            // khớp đúng quy tắc tie-break chuẩn toàn hệ thống (nộp trước luôn được ưu tiên hơn).
+            $timeDiff = $this->originalSubmittedAt($b)->timestamp <=> $this->originalSubmittedAt($a)->timestamp;
+
+            return $timeDiff !== 0 ? $timeDiff : ($b->id <=> $a->id);
+        })->first();
+
+        return ['targetWins' => true, 'bumped' => $weakest];
+    }
+
+    /**
+     * Xây bucket đã xếp hạng (tier/điểm/thời gian) cho ĐÚNG 1 giới của 1 đợt — dùng chung cho
+     * previewManualApprove()/applyManualApprove(), tách riêng khỏi rankPeriod() vì 2 hàm này
+     * chỉ cần xử lý 1 giới, không cần tính cả 2 giới như rankPeriod().
+     *
+     * @return Collection<int, Registration>
+     */
+    private function buildGenderBucket(int $periodId, string $gender): Collection
+    {
+        return Registration::where('registration_period_id', $periodId)
+            ->whereNotIn('status', ['cancelled', 'rejected', 'approved'])
+            ->whereDoesntHave('studentPriorities', fn ($q) => $q->where('status', 'rejected'))
+            ->with(['sourceDormReservation:id,submitted_at,created_at', 'student:id,gender,full_name,student_code'])
+            ->orderBy('top_priority_tier', 'asc')
+            ->orderByDesc('total_priority_score')
+            ->get()
+            ->filter(fn (Registration $r) => strtolower($r->student->gender ?? '') === $gender)
+            ->sort(function (Registration $a, Registration $b) {
+                if ($a->top_priority_tier !== $b->top_priority_tier) {
+                    return $a->top_priority_tier <=> $b->top_priority_tier;
+                }
+                if ($a->total_priority_score !== $b->total_priority_score) {
+                    return $b->total_priority_score <=> $a->total_priority_score;
+                }
+                $timeDiff = $this->originalSubmittedAt($a)->timestamp <=> $this->originalSubmittedAt($b)->timestamp;
+
+                return $timeDiff !== 0 ? $timeDiff : ($a->id <=> $b->id);
+            })
+            ->values();
+    }
+
+    /**
+     * Xem trước hệ quả nếu ghim tay Duyệt cho 1 đơn — dùng để cảnh báo admin trước khi xác
+     * nhận (hiện tên người sẽ bị đẩy xuống waitlist, nếu có). Không ghi gì xuống DB.
+     *
+     * @return array{bumped: ?Registration}|null null nếu đơn không hợp lệ/không xác định được giới tính.
+     */
+    public function previewManualApprove(int $registrationId, int $periodId, array $availableBedsByGender): ?array
+    {
+        $target = Registration::with('student:id,gender')->find($registrationId);
+        $gender = strtolower($target?->student?->gender ?? '');
+        if (!$target || !in_array($gender, ['male', 'female'], true)) {
+            return null;
+        }
+
+        $bucket = $this->buildGenderBucket($periodId, $gender);
+        $beds = max(0, $availableBedsByGender[$gender] ?? 0);
+
+        $result = $this->resolveManualApprove($bucket, $beds, $registrationId);
+
+        return ['bumped' => $result['bumped']];
+    }
+
+    /**
+     * Thực thi THẬT hành động ghim tay Duyệt cho $target — ghi DB. Nếu có người bị đẩy, người
+     * đó được chuyển hẳn về trạng thái tự nhiên (gỡ cờ ghim cũ nếu có — họ đã "dùng hết" lượt
+     * ghim của mình, không còn được ưu tiên gì cho các suất phát sinh sau này) và
+     * auto_decision='reject'. $target được khóa cứng Duyệt (decision_source='manual').
+     *
+     * @return array{winner: Registration, bumped: ?Registration}
+     */
+    public function applyManualApprove(Registration $target, int $beds, ?string $reason): array
+    {
+        $gender = strtolower($target->student?->gender ?? '');
+        $bucket = $this->buildGenderBucket($target->registration_period_id, $gender);
+        $result = $this->resolveManualApprove($bucket, $beds, $target->id);
+
+        if ($result['bumped']) {
+            $bumped = $result['bumped'];
+            $bumped->decision_source = null;
+            $bumped->manual_decision = null;
+            $bumped->manual_decision_reason = null;
+            $bumped->auto_decision = 'reject';
+            $bumped->auto_decision_reason = 'Không đủ chỉ tiêu — nhường suất cho 1 trường hợp được duyệt tay đặc cách.';
+            $bumped->save();
+        }
+
+        $target->decision_source = 'manual';
+        $target->manual_decision = 'approve';
+        $target->manual_decision_reason = $reason;
+        $target->auto_decision = 'approve';
+        $target->auto_decision_reason = null;
+        $target->save();
+
+        return ['winner' => $target, 'bumped' => $result['bumped']];
     }
 
     /**
@@ -425,7 +658,11 @@ class PriorityRankingService
      *  lấy submitted_at GỐC của DormReservation (lúc thí sinh nộp giữ chỗ), KHÔNG lấy
      *  Registration.created_at (lúc DormReservationConversionService::convert() chạy — luôn
      *  trễ hơn nhiều vì chỉ xảy ra sau khi thí sinh đã nhập học). */
-    private function originalSubmittedAt(Registration $registration): \Carbon\Carbon
+    /** Public vì AutoRoomAssignmentService cũng cần đúng mốc nộp gốc này để xếp thứ tự gán
+     *  phòng nhất quán với thứ tự xếp hạng duyệt (không dùng created_at thô — với tân sinh
+     *  viên convert từ giữ chỗ, created_at là thời điểm convert/nhập học, TRỄ hơn thời điểm
+     *  nộp hồ sơ giữ chỗ gốc). */
+    public function originalSubmittedAt(Registration $registration): \Carbon\Carbon
     {
         if ($registration->source_dorm_reservation_id && $registration->sourceDormReservation) {
             return $registration->sourceDormReservation->submitted_at
