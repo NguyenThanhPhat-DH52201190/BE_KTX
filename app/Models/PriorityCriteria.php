@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class PriorityCriteria extends Model
 {
@@ -27,5 +28,10 @@ class PriorityCriteria extends Model
     public function studentPriorities(): HasMany
     {
         return $this->hasMany(StudentPriority::class, 'priority_criteria_id');
+    }
+
+    public function feeDiscountPolicy(): HasOne
+    {
+        return $this->hasOne(FeeDiscountPolicy::class, 'priority_criteria_id');
     }
 }

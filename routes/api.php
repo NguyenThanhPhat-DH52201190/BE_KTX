@@ -15,6 +15,7 @@ use App\Http\Controllers\Api\RoomFeeBillController;
 use App\Http\Controllers\Api\StudentPaymentPlanController;
 use App\Http\Controllers\Api\ElectricityController;
 use App\Http\Controllers\Api\PaymentSettingController;
+use App\Http\Controllers\Api\FeeDiscountPolicyController;
 use App\Http\Controllers\Api\StudentPaymentController;
 use App\Http\Controllers\Api\VnpayPaymentController;
 use App\Http\Controllers\Api\MaintenanceController;
@@ -100,6 +101,9 @@ Route::middleware('auth:sanctum')->group(function () {
         // Quản lý thanh toán (Bước 2D)
         Route::get('/payment-settings', [PaymentSettingController::class, 'show']);
         Route::put('/payment-settings', [PaymentSettingController::class, 'update']);
+
+        Route::get('/fee-discount-policies', [FeeDiscountPolicyController::class, 'index']);
+        Route::put('/fee-discount-policies/{priorityCriteriaId}', [FeeDiscountPolicyController::class, 'update']);
 
         Route::get('/room-fee-bills', [RoomFeeBillController::class, 'index']);
         Route::post('/room-fee-bills/generate', [RoomFeeBillController::class, 'generate']);
