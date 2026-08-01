@@ -386,10 +386,6 @@ class PriorityRankingService
         }
 
         // Dò theo auto_decision_reason (giữ nguyên bản gốc "Không đủ chỉ tiêu (nam)...") —
-        // KHÔNG dò rejection_reason vì cột đó đã bị confirmBatch() ghi đè bằng bản dịch thân
-        // thiện cho sinh viên đọc (RegistrationController::studentFacingRejectionReason()),
-        // không còn giữ đúng mẫu để nhận diện "bị từ chối do hết chỉ tiêu" nữa (báo cáo
-        // 30/07: Anh, Bảo không được đôn dù suất đã giải phóng đúng).
         $rejected = Registration::where('registration_period_id', $periodId)
             ->where('status', 'rejected')
             ->where('auto_decision', 'reject')

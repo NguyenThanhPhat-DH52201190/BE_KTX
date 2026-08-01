@@ -31,9 +31,10 @@ class OccupancyExtensionResource extends JsonResource
                     'check_in_date'  => $occ->check_in_date,
                     'check_out_date' => $occ->check_out_date,
                     'room' => $occ->relationLoaded('room') && $occ->room ? [
-                        'id'           => (int) $occ->room->id,
-                        'room_number'  => $occ->room->room_number,
-                        'floor_number' => $occ->room->relationLoaded('floor') ? ($occ->room->floor?->floor_number) : null,
+                        'id'            => (int) $occ->room->id,
+                        'room_number'   => $occ->room->room_number,
+                        'floor_number'  => $occ->room->relationLoaded('floor') ? ($occ->room->floor?->floor_number) : null,
+                        'building_code' => $occ->room->relationLoaded('floor') ? ($occ->room->floor?->building_code) : null,
                         'building_name' => ($occ->room->relationLoaded('floor') && $occ->room->floor?->relationLoaded('building'))
                             ? ($occ->room->floor->building?->name)
                             : null,
