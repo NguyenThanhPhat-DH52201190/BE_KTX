@@ -34,4 +34,9 @@ class PriorityCriteria extends Model
     {
         return $this->hasOne(FeeDiscountPolicy::class, 'priority_criteria_id');
     }
+
+    public function reservationPriorities(): HasMany
+    {
+        return $this->hasMany(ReservationPriority::class, 'priority_criteria_id');
+    }
 }
