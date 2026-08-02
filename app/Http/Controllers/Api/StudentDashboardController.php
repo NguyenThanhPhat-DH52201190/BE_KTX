@@ -51,10 +51,17 @@ class StudentDashboardController extends Controller
             $checkOut = $occ->check_out_date ?? $registration->stay_to_date;
 
             $totalDays = ($checkIn && $checkOut)
-                ? (int) Carbon::parse($checkIn)->diffInDays(Carbon::parse($checkOut))
+                ? (int) Carbon::parse($checkIn)->startOfDay()->diffInDays(Carbon::parse($checkOut)->startOfDay())
                 : null;
+            // Trước ngày nhận phòng, "còn lại" tính từ check_in_date (bằng đúng totalDays,
+            // khớp với "Đã ở: 0 ngày") thay vì từ hôm nay — tránh hiện "còn lại" nhiều hơn
+            // cả tổng số ngày ở dự kiến. startOfDay() cả 2 mốc để tránh lệch giờ:phút:giây
+            // của now() làm diffInDays cắt bớt 1 ngày.
+            $daysLeftFrom = ($checkIn && now()->startOfDay()->lt(Carbon::parse($checkIn)->startOfDay()))
+                ? Carbon::parse($checkIn)->startOfDay()
+                : now()->startOfDay();
             $daysLeft = $checkOut
-                ? (int) max(0, now()->diffInDays(Carbon::parse($checkOut), false))
+                ? (int) max(0, $daysLeftFrom->diffInDays(Carbon::parse($checkOut)->startOfDay(), false))
                 : null;
 
             $currentOccupancy = [
@@ -202,7 +209,7 @@ class StudentDashboardController extends Controller
                 'id'        => $activePeriod->id,
                 'name'      => $activePeriod->name,
                 'end_date'  => $activePeriod->end_date,
-                'days_left' => (int) max(0, now()->diffInDays(Carbon::parse($activePeriod->end_date), false)),
+                'days_left' => (int) max(0, now()->startOfDay()->diffInDays(Carbon::parse($activePeriod->end_date)->startOfDay(), false)),
             ] : null,
         ]);
     }
