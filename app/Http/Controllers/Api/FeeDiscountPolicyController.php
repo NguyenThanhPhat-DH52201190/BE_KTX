@@ -7,6 +7,7 @@ use App\Models\FeeDiscountPolicy;
 use App\Models\PriorityCriteria;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class FeeDiscountPolicyController extends Controller
 {
@@ -25,7 +26,9 @@ class FeeDiscountPolicyController extends Controller
                 'tier'                 => $item->tier,
                 'priority_score'       => $item->priority_score,
                 'discount_percent'     => $item->feeDiscountPolicy?->discount_percent ?? 0,
-                'is_active'            => $item->feeDiscountPolicy?->is_active ?? false,
+                // Đã có sinh viên/hồ sơ thật gắn diện này — khóa sửa mã ở FE để tránh lệch với
+                // hồ sơ cũ đã ghi theo mã hiện tại (báo cáo 04/08).
+                'in_use'               => $item->studentPriorities()->exists() || $item->reservationPriorities()->exists(),
             ];
         }));
     }
@@ -38,7 +41,6 @@ class FeeDiscountPolicyController extends Controller
             'tier'             => ['required', 'integer', 'min:1', 'max:3'],
             'priority_score'   => ['required', 'integer', 'min:0', 'max:100'],
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'is_active'        => ['nullable', 'boolean'],
         ]);
 
         $criteria = PriorityCriteria::create([
@@ -52,7 +54,6 @@ class FeeDiscountPolicyController extends Controller
         $policy = FeeDiscountPolicy::create([
             'priority_criteria_id' => $criteria->id,
             'discount_percent'     => $data['discount_percent'] ?? 0,
-            'is_active'            => $data['is_active'] ?? false,
         ]);
 
         return response()->json([
@@ -62,7 +63,6 @@ class FeeDiscountPolicyController extends Controller
             'tier'                 => $criteria->tier,
             'priority_score'       => $criteria->priority_score,
             'discount_percent'     => $policy->discount_percent,
-            'is_active'            => $policy->is_active,
         ], 201);
     }
 
@@ -81,18 +81,39 @@ class FeeDiscountPolicyController extends Controller
         return response()->json(['message' => 'Đã xóa tiêu chí ưu tiên.']);
     }
 
-    public function update(Request $request, int $priorityCriteriaId): JsonResponse
+    public function updateCriteria(Request $request, int $priorityCriteriaId): JsonResponse
     {
         $criteria = PriorityCriteria::findOrFail($priorityCriteriaId);
 
         $data = $request->validate([
+            'code'             => [
+                'required', 'string', 'max:20', 'regex:/^UT\d+$/i',
+                Rule::unique('priority_criteria', 'code')->ignore($criteria->id),
+            ],
+            'name'             => ['required', 'string', 'max:255'],
+            'tier'             => ['required', 'integer', 'min:1', 'max:3'],
+            'priority_score'   => ['required', 'integer', 'min:0', 'max:100'],
             'discount_percent' => ['required', 'numeric', 'min:0', 'max:100'],
-            'is_active'        => ['required', 'boolean'],
+        ]);
+
+        $inUse = $criteria->studentPriorities()->exists() || $criteria->reservationPriorities()->exists();
+        if ($inUse && $data['code'] !== $criteria->code) {
+            return response()->json([
+                'message' => 'Không thể đổi mã — đã có sinh viên hoặc hồ sơ đặt chỗ thuộc diện ưu tiên này.',
+                'errors'  => ['code' => ['Không thể đổi mã vì tiêu chí đã có người dùng.']],
+            ], 422);
+        }
+
+        $criteria->update([
+            'code'           => $data['code'],
+            'name'           => $data['name'],
+            'tier'           => $data['tier'],
+            'priority_score' => $data['priority_score'],
         ]);
 
         $policy = FeeDiscountPolicy::updateOrCreate(
             ['priority_criteria_id' => $criteria->id],
-            $data,
+            ['discount_percent' => $data['discount_percent']],
         );
 
         return response()->json([
@@ -102,7 +123,7 @@ class FeeDiscountPolicyController extends Controller
             'tier'                 => $criteria->tier,
             'priority_score'       => $criteria->priority_score,
             'discount_percent'     => $policy->discount_percent,
-            'is_active'            => $policy->is_active,
         ]);
     }
+
 }

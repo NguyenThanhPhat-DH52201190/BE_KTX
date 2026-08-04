@@ -881,7 +881,8 @@ class RegistrationController extends Controller
                         'Lỗi tải ảnh minh chứng ưu tiên',
                         'Hệ thống chưa thể lưu một hoặc nhiều ảnh minh chứng cho diện ưu tiên bạn đã đăng ký. Vui lòng vào lại trang đăng ký nội trú để kiểm tra và tải lại ảnh minh chứng.',
                         'priority_evidence_failed',
-                        $registrationId
+                        $registrationId,
+                        queue: true,
                     );
                 }
             }
@@ -1004,7 +1005,7 @@ class RegistrationController extends Controller
         // Gửi thông báo SAU khi transaction đã commit.
         $registration = $result['registration'];
         if ($registration->student) {
-            $this->notifyRegistrationDecision($registration);
+            $this->notifyRegistrationDecision($registration, queue: true);
         }
 
         return response()->json([
@@ -1286,6 +1287,7 @@ class RegistrationController extends Controller
                 'Chỗ ở của bạn tại KTX đã được kích hoạt. Chúc bạn có thời gian lưu trú thoải mái.',
                 'occupancy_activated',
                 $registration->id,
+                queue: true,
             );
         }
 
@@ -1330,6 +1332,7 @@ class RegistrationController extends Controller
                 'Giường bạn vừa chọn không được chấp nhận. Vui lòng đăng nhập hệ thống để chọn lại giường khác.',
                 'bed_rejected',
                 $registration->id,
+                queue: true,
             );
         }
 
@@ -1507,6 +1510,7 @@ class RegistrationController extends Controller
                 'Yêu cầu thôi ở của bạn tại KTX đã được xác nhận hoàn tất.',
                 'checkout_completed',
                 $registration->id,
+                queue: true,
             );
         }
 
@@ -1566,6 +1570,7 @@ class RegistrationController extends Controller
                 'Bạn đã bị buộc thôi ở tại KTX. Lý do: ' . $request->input('reason'),
                 'force_checkout',
                 $registration->id,
+                queue: true,
             );
         }
 
@@ -1603,7 +1608,7 @@ class RegistrationController extends Controller
         $registration->save();
 
         if ($registration->student) {
-            $this->notifyRegistrationDecision($registration);
+            $this->notifyRegistrationDecision($registration, queue: true);
         }
 
         return response()->json($this->formatRegistration($registration));
@@ -1819,7 +1824,7 @@ class RegistrationController extends Controller
         $registration = $result['registration'];
 
         if ($registration->student) {
-            $this->notifyRegistrationDecision($registration);
+            $this->notifyRegistrationDecision($registration, queue: true);
         }
 
         return response()->json($this->formatRegistration($registration));
@@ -1995,7 +2000,7 @@ class RegistrationController extends Controller
         $registration = $result['registration'];
 
         if ($registration->student) {
-            $this->notifyRegistrationDecision($registration);
+            $this->notifyRegistrationDecision($registration, queue: true);
 
             if ($result['reservation_bumped']) {
                 $this->notifier()->notifyStudent(
@@ -2004,6 +2009,7 @@ class RegistrationController extends Controller
                     'Khi xếp hạng chung toàn đợt (gồm cả đăng ký thường), hồ sơ giữ chỗ KTX của bạn không đủ thứ hạng ưu tiên để giữ suất và đã chuyển sang danh sách chờ. Bạn vẫn có thể được đôn lại nếu còn suất trống — vui lòng theo dõi thông báo tiếp theo.',
                     'dorm_reservation_waitlisted',
                     $registration->source_dorm_reservation_id,
+                    queue: true,
                 );
             }
         }

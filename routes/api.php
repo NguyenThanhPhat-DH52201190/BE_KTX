@@ -109,7 +109,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/fee-discount-policies', [FeeDiscountPolicyController::class, 'index']);
         Route::post('/fee-discount-policies', [FeeDiscountPolicyController::class, 'store']);
-        Route::put('/fee-discount-policies/{priorityCriteriaId}', [FeeDiscountPolicyController::class, 'update']);
+        Route::put('/priority-criteria/{priorityCriteriaId}', [FeeDiscountPolicyController::class, 'updateCriteria']);
         Route::delete('/fee-discount-policies/{priorityCriteriaId}', [FeeDiscountPolicyController::class, 'destroy']);
 
         Route::get('/room-fee-bills', [RoomFeeBillController::class, 'index']);
