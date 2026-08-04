@@ -8,10 +8,14 @@ use App\Models\ActivityType;
 use App\Models\Blacklist;
 use App\Models\CheckoutRequest;
 use App\Models\Occupancy;
+use App\Services\ExcelService;
+use App\Services\PdfService;
 use App\Services\StudentNotificationService;
+use App\Support\VnFormat;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -53,6 +57,85 @@ class ViolationController extends Controller
 
         return response()->json(
             $query->get()->map(fn (Activity $activity) => $this->formatViolation($activity))->values(),
+        );
+    }
+
+    private function buildExportRows(Request $request)
+    {
+        $query = Activity::query()
+            ->with(['type', 'student', 'occupancy.student', 'occupancy.registration.student', 'occupancy.room.floor', 'occupancy.bed'])
+            ->orderByDesc('activity_date')
+            ->orderByDesc('id');
+
+        if ($request->filled('occupancy_id')) {
+            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
+        }
+
+        if ($request->filled('student_id')) {
+            $query->where('student_id', (int) $request->query('student_id'));
+        }
+
+        if ($request->filled('student_email')) {
+            $email = (string) $request->query('student_email');
+            $query->where(function ($studentScope) use ($email) {
+                $studentScope
+                    ->whereHas('student', fn ($studentQuery) => $studentQuery->where('email', $email))
+                    ->orWhereHas('occupancy.student', fn ($studentQuery) => $studentQuery->where('email', $email));
+            });
+        }
+
+        return $query->get()->map(fn (Activity $activity) => $this->formatViolation($activity))->values();
+    }
+
+    public function exportPdf(Request $request, PdfService $pdfService): Response
+    {
+        $activities = $this->buildExportRows($request);
+
+        return $pdfService->download(
+            'pdf.violations',
+            ['activities' => $activities],
+            'danh_sach_vi_pham_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportExcel(Request $request, ExcelService $excelService): Response
+    {
+        $activities = $this->buildExportRows($request);
+
+        $statusLabels = ['pending' => 'Chờ xử lý', 'resolved' => 'Đã xử lý'];
+        $actionLabels = [
+            'reward_recorded' => 'Đã ghi nhận',
+            'reminded' => 'Nhắc nhở',
+            'warned' => 'Cảnh cáo',
+            'force_evicted' => 'Buộc thôi ở',
+        ];
+        $levelLabels = ['MINOR' => 'Nhẹ', 'MEDIUM' => 'Trung bình', 'SERIOUS' => 'Nghiêm trọng'];
+
+        $rows = $activities->values()->map(function (array $activity, int $index) use ($statusLabels, $actionLabels, $levelLabels) {
+            $level = $activity['type']['level'] ?? '';
+
+            return [
+                $index + 1,
+                VnFormat::date($activity['violation_date']),
+                $activity['student']['student_code'] ?? '',
+                $activity['student']['full_name'] ?? '',
+                $activity['room']['display_name'] ?? '',
+                $activity['bed']['bed_number'] ?? '',
+                $activity['type']['name'] ?? '',
+                $levelLabels[$level] ?? $level,
+                $activity['type']['points'] ?? 0,
+                $statusLabels[$activity['status']] ?? $activity['status'],
+                $activity['action_taken'] ? ($actionLabels[$activity['action_taken']] ?? $activity['action_taken']) : '',
+            ];
+        })->all();
+
+        return $excelService->download(
+            'danh_sach_vi_pham_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Vi pham',
+                'headers' => ['STT', 'Ngày', 'MSSV', 'Họ tên', 'Phòng', 'Giường', 'Loại', 'Mức độ', 'Điểm', 'Trạng thái', 'Biện pháp xử lý'],
+                'rows' => $rows,
+            ]],
         );
     }
 

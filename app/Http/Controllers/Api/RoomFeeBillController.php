@@ -6,9 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
 use App\Models\StudentPaymentPlan;
+use App\Services\ExcelService;
 use App\Services\FeeDiscountService;
+use App\Services\PdfService;
+use App\Support\VnFormat;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -40,6 +44,70 @@ class RoomFeeBillController extends Controller
 
         return response()->json(
             $query->get()->map(fn (RoomFeeBill $bill) => $this->formatBill($bill))->values(),
+        );
+    }
+
+    private function buildExportRows(Request $request)
+    {
+        $query = RoomFeeBill::query()
+            ->with(['student', 'occupancy.registration', 'occupancy.room.floor'])
+            ->orderByDesc('year')
+            ->orderByDesc('month')
+            ->orderByDesc('id');
+
+        if ($request->filled('student_id')) {
+            $query->where('student_id', (int) $request->query('student_id'));
+        }
+
+        if ($request->filled('occupancy_id')) {
+            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
+        }
+
+        if ($request->filled('status')) {
+            $query->where('status', strtolower((string) $request->query('status')));
+        }
+
+        return $query->get()->map(fn (RoomFeeBill $bill) => $this->formatBill($bill))->values();
+    }
+
+    public function exportPdf(Request $request, PdfService $pdfService): Response
+    {
+        $bills = $this->buildExportRows($request);
+
+        return $pdfService->download(
+            'pdf.room-fee-bills',
+            ['bills' => $bills],
+            'danh_sach_hoa_don_tien_phong_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportExcel(Request $request, ExcelService $excelService): Response
+    {
+        $bills = $this->buildExportRows($request);
+        $statusLabels = ['unpaid' => 'Chưa thanh toán', 'paid' => 'Đã thanh toán', 'overdue' => 'Quá hạn', 'exempted' => 'Đã miễn'];
+
+        $rows = $bills->values()->map(function (array $bill, int $index) use ($statusLabels) {
+            return [
+                $index + 1,
+                $bill['student']['student_code'] ?? '',
+                $bill['student']['full_name'] ?? '',
+                ($bill['room']['building_code'] ?? '') . ($bill['room']['room_number'] ?? ''),
+                $bill['month'] . '/' . $bill['year'],
+                $bill['original_amount'] ?? $bill['amount'],
+                $bill['discount_amount'] ?? 0,
+                $bill['amount'],
+                VnFormat::date($bill['due_date']),
+                $statusLabels[$bill['status']] ?? $bill['status'],
+            ];
+        })->all();
+
+        return $excelService->download(
+            'danh_sach_hoa_don_tien_phong_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Hoa don tien phong',
+                'headers' => ['STT', 'MSSV', 'Họ tên', 'Phòng', 'Kỳ', 'Số tiền gốc', 'Giảm giá', 'Thành tiền', 'Hạn nộp', 'Trạng thái'],
+                'rows' => $rows,
+            ]],
         );
     }
 

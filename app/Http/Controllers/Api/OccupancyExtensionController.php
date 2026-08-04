@@ -15,9 +15,13 @@ use App\Models\OccupancyPeriod;
 use App\Models\RegistrationPeriod;
 use App\Models\RoomFeeBill;
 use App\Models\Student;
+use App\Services\ExcelService;
+use App\Services\PdfService;
 use App\Services\RoomFeeBillingService;
+use App\Support\VnFormat;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -294,6 +298,71 @@ class OccupancyExtensionController extends Controller
         }
 
         return response()->json(OccupancyExtensionResource::collection($query->get())->resolve());
+    }
+
+    private function buildApprovedExportRows()
+    {
+        return OccupancyExtension::query()
+            ->with(['occupancy.room.floor', 'occupancy.bed', 'student', 'occupancyPeriod'])
+            ->where('status', 'approved')
+            ->orderByDesc('approved_at')
+            ->get()
+            ->map(function (OccupancyExtension $ext) {
+                $room = $ext->occupancy?->room;
+
+                return [
+                    'student_code'  => $ext->student?->student_code ?? '',
+                    'full_name'     => $ext->student?->full_name ?? '',
+                    'building_code' => $room?->floor?->building_code ?? '',
+                    'room_number'   => $room?->room_number ? (string) $room->room_number : '',
+                    'bed_number'    => $ext->occupancy?->bed?->bed_number ? (string) $ext->occupancy->bed->bed_number : '',
+                    'period_name'   => $ext->occupancyPeriod?->name ?? '',
+                    'requested_at'  => $ext->requested_at,
+                    'approved_at'   => $ext->approved_at,
+                    'reason'        => $ext->reason ?? '',
+                    'admin_note'    => $ext->admin_note ?? '',
+                ];
+            })->values();
+    }
+
+    public function exportApprovedPdf(PdfService $pdfService): Response
+    {
+        $extensions = $this->buildApprovedExportRows();
+
+        return $pdfService->download(
+            'pdf.extensions-approved',
+            ['extensions' => $extensions],
+            'don_gia_han_da_duyet_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportApprovedExcel(ExcelService $excelService): Response
+    {
+        $extensions = $this->buildApprovedExportRows();
+
+        $rows = $extensions->values()->map(function (array $item, int $index) {
+            return [
+                $index + 1,
+                $item['student_code'],
+                $item['full_name'],
+                $item['building_code'] . $item['room_number'],
+                $item['bed_number'],
+                $item['period_name'],
+                VnFormat::date($item['requested_at']),
+                VnFormat::date($item['approved_at']),
+                $item['reason'],
+                $item['admin_note'],
+            ];
+        })->all();
+
+        return $excelService->download(
+            'don_gia_han_da_duyet_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Don gia han da duyet',
+                'headers' => ['STT', 'MSSV', 'Họ tên', 'Phòng', 'Giường', 'Đợt gia hạn', 'Ngày gửi', 'Ngày duyệt', 'Lý do', 'Ghi chú admin'],
+                'rows' => $rows,
+            ]],
+        );
     }
 
     public function adminShow(int $id): JsonResponse

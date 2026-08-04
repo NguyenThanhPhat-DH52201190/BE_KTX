@@ -8,9 +8,13 @@ use App\Models\ElectricityRecord;
 use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
+use App\Services\ExcelService;
+use App\Services\PdfService;
+use App\Support\VnFormat;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -50,6 +54,69 @@ class ElectricityController extends Controller
 
         return response()->json(
             $query->get()->map(fn (ElectricityBill $bill) => $this->formatBill($bill))->values(),
+        );
+    }
+
+    private function buildBillsExportRows(Request $request)
+    {
+        $query = ElectricityBill::query()
+            ->with(['student', 'occupancy.registration', 'occupancy.room.floor'])
+            ->orderByDesc('month_year')
+            ->orderByDesc('id');
+
+        if ($request->filled('student_id')) {
+            $query->where('student_id', (int) $request->query('student_id'));
+        }
+
+        if ($request->filled('occupancy_id')) {
+            $query->where('occupancy_id', (int) $request->query('occupancy_id'));
+        }
+
+        if ($request->filled('status')) {
+            $query->where('status', strtolower((string) $request->query('status')));
+        }
+
+        return $query->get()->map(fn (ElectricityBill $bill) => $this->formatBill($bill))->values();
+    }
+
+    public function exportBillsPdf(Request $request, PdfService $pdfService): Response
+    {
+        $bills = $this->buildBillsExportRows($request);
+
+        return $pdfService->download(
+            'pdf.electricity-bills',
+            ['bills' => $bills],
+            'danh_sach_hoa_don_tien_dien_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportBillsExcel(Request $request, ExcelService $excelService): Response
+    {
+        $bills = $this->buildBillsExportRows($request);
+        $statusLabels = ['unpaid' => 'Chưa thanh toán', 'paid' => 'Đã thanh toán', 'overdue' => 'Quá hạn', 'exempted' => 'Đã miễn'];
+
+        $rows = $bills->values()->map(function (array $bill, int $index) use ($statusLabels) {
+            return [
+                $index + 1,
+                $bill['student']['student_code'] ?? '',
+                $bill['student']['full_name'] ?? '',
+                ($bill['room']['building_code'] ?? '') . ($bill['room']['room_number'] ?? ''),
+                $bill['month_year'],
+                $bill['usage_kwh'],
+                $bill['unit_price'],
+                $bill['amount'],
+                VnFormat::date($bill['due_date']),
+                $statusLabels[$bill['status']] ?? $bill['status'],
+            ];
+        })->all();
+
+        return $excelService->download(
+            'danh_sach_hoa_don_tien_dien_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Hoa don tien dien',
+                'headers' => ['STT', 'MSSV', 'Họ tên', 'Phòng', 'Kỳ', 'Số điện (kWh)', 'Đơn giá', 'Thành tiền', 'Hạn nộp', 'Trạng thái'],
+                'rows' => $rows,
+            ]],
         );
     }
 

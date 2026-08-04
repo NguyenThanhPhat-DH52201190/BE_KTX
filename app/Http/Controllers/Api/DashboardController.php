@@ -14,14 +14,107 @@ use App\Models\RoomFeeBill;
 use App\Models\Student;
 use App\Models\StudentSupportRequest;
 use App\Services\DormCapacityService;
+use App\Services\ExcelService;
+use App\Services\PdfService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 class DashboardController extends Controller
 {
     public function index()
+    {
+        $payload = $this->buildIndexPayload();
+
+        $now = Carbon::now();
+        $payload['finance'] = $this->financePayload($now->month, $now->year);
+
+        return response()->json($payload);
+    }
+
+    public function exportPdf(Request $request, PdfService $pdfService): Response
+    {
+        $now = Carbon::now();
+        $data = $request->validate([
+            'month' => ['nullable', 'integer', 'min:1', 'max:12'],
+            'year'  => ['nullable', 'integer', 'min:2020', 'max:2100'],
+        ]);
+
+        $month = (int) ($data['month'] ?? $now->month);
+        $year = (int) ($data['year'] ?? $now->year);
+
+        $payload = $this->buildIndexPayload();
+        $payload['finance'] = $this->financePayload($month, $year);
+
+        return $pdfService->download(
+            'pdf.dashboard-report',
+            $payload,
+            'bao_cao_thong_ke_' . $month . '_' . $year . '.pdf',
+            ['orientation' => 'landscape'],
+        );
+    }
+
+    public function exportExcel(Request $request, ExcelService $excelService): Response
+    {
+        $now = Carbon::now();
+        $data = $request->validate([
+            'month' => ['nullable', 'integer', 'min:1', 'max:12'],
+            'year'  => ['nullable', 'integer', 'min:2020', 'max:2100'],
+        ]);
+
+        $month = (int) ($data['month'] ?? $now->month);
+        $year = (int) ($data['year'] ?? $now->year);
+
+        $payload = $this->buildIndexPayload();
+        $finance = $this->financePayload($month, $year);
+        $stats = $payload['stats'];
+        $alerts = $payload['alerts'];
+
+        $overviewRows = [
+            ['Tổng sinh viên đang ở', $stats['total_students']],
+            ['Tổng giường', $stats['total_beds']],
+            ['Sinh viên nam', $stats['male_count']],
+            ['Sinh viên nữ', $stats['female_count']],
+            ['Phòng đang sử dụng', $stats['occupied_rooms']],
+            ['Tổng số phòng', $stats['total_rooms']],
+            ['Giường đã ở', $stats['occupied_beds']],
+            ['Giường khả dụng', $stats['available_beds']],
+            ['Giường bảo trì', $stats['maintenance_beds']],
+            ['Đơn đăng ký chờ duyệt', $stats['pending_registrations']],
+            ['Hóa đơn quá hạn', $alerts['overdue_invoices']],
+            ['Lưu trú sắp hết hạn (30 ngày)', $alerts['expiring_occupancies_30d']],
+            ['Chờ chọn giường', $alerts['pending_bed_selection']],
+            ['Yêu cầu đổi phòng chờ duyệt', $alerts['pending_room_changes']],
+            ['Yêu cầu đổi giường chờ duyệt', $alerts['pending_bed_changes']],
+            ['Yêu cầu thôi ở chờ duyệt', $alerts['pending_checkouts']],
+            ['Yêu cầu hỗ trợ chờ xử lý', $alerts['pending_support_requests']],
+        ];
+
+        $financeRows = [
+            ['Tiền phòng', $finance['room_expected_total'], $finance['room_collected'], $finance['room_debt']],
+            ['Tiền điện', $finance['electricity_expected_total'], $finance['electricity_collected'], $finance['electricity_debt']],
+            ['Tổng cộng (' . $finance['debtors_count'] . ' sinh viên còn nợ)', $finance['expected_total'], $finance['collected'], $finance['debt']],
+        ];
+
+        $facultyRows = collect($payload['charts']['by_faculty'])->values()->map(fn (array $r) => [$r['faculty'], $r['male'], $r['female'], $r['total']])->all();
+        $yearRows = collect($payload['charts']['by_year'])->values()->map(fn (array $r) => ['Năm ' . $r['year'], $r['male'], $r['female'], $r['total']])->all();
+        $provinceRows = collect($payload['charts']['by_province'])->values()->map(fn (array $r) => [$r['province'], $r['count']])->all();
+
+        return $excelService->download(
+            'bao_cao_thong_ke_' . $month . '_' . $year . '.xlsx',
+            [
+                ['title' => 'Tong quan', 'headers' => ['Chỉ số', 'Giá trị'], 'rows' => $overviewRows],
+                ['title' => 'Tai chinh', 'headers' => ['Khoản mục', 'Dự kiến thu', 'Đã thu', 'Còn nợ'], 'rows' => $financeRows],
+                ['title' => 'Theo khoa', 'headers' => ['Khoa', 'Nam', 'Nữ', 'Tổng'], 'rows' => $facultyRows],
+                ['title' => 'Theo nam hoc', 'headers' => ['Năm', 'Nam', 'Nữ', 'Tổng'], 'rows' => $yearRows],
+                ['title' => 'Theo tinh thanh', 'headers' => ['Tỉnh/Thành', 'Số lượng'], 'rows' => $provinceRows],
+            ],
+        );
+    }
+
+    private function buildIndexPayload(): array
     {
         // ── 1. Stat cards ─────────────────────────────────────────────────
         $totalStudents = Occupancy::where('status', 'ACTIVE')
@@ -231,11 +324,7 @@ class DashboardController extends Controller
             ['gender' => 'Nữ', 'count' => $femaleCount],
         ]);
 
-        // ── 5. Finance this month ─────────────────────────────────────────
-        $now = Carbon::now();
-        $finance = $this->financePayload($now->month, $now->year);
-
-        return response()->json([
+        return [
             'stats' => [
                 'total_students' => $totalStudents,
                 'total_capacity' => $totalCapacity,
@@ -271,8 +360,7 @@ class DashboardController extends Controller
                 'by_province' => $byProvince,
                 'by_gender'   => $byGender,
             ],
-            'finance' => $finance,
-        ]);
+        ];
     }
 
     public function finance(Request $request)

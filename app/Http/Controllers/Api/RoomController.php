@@ -10,9 +10,12 @@ use App\Models\Notification;
 use App\Models\Occupancy;
 use App\Models\Room;
 use App\Models\Student;
+use App\Services\ExcelService;
+use App\Services\PdfService;
 use App\Services\RoomChangeLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -27,6 +30,80 @@ class RoomController extends Controller
 
         return response()->json(
             $rooms->map(fn (Room $room) => $this->formatRoom($room, $occupiedBedIds, $pendingMaintenanceMap))->values(),
+        );
+    }
+
+    private function buildExportRows(Request $request)
+    {
+        $rooms = Room::query()->with(['floor', 'beds'])->orderBy('id')->get();
+        $occupiedBedIds = $this->getOccupiedBedIdSet($rooms);
+        $pendingMaintenanceMap = $this->getPendingRoomMaintenanceMap($rooms);
+
+        $formatted = $rooms->map(fn (Room $room) => $this->formatRoom($room, $occupiedBedIds, $pendingMaintenanceMap));
+
+        // Cùng bộ lọc với AdminRoomManagement.tsx (building/floor/gender/status) để file xuất
+        // phản ánh đúng danh sách đang hiển thị trên trang, không phải toàn bộ hệ thống.
+        if ($request->filled('building')) {
+            $building = strtoupper((string) $request->query('building'));
+            $formatted = $formatted->filter(fn (array $r) => $r['building_code'] === $building);
+        }
+
+        if ($request->filled('floor')) {
+            $floor = (int) $request->query('floor');
+            $formatted = $formatted->filter(fn (array $r) => $r['floor_number'] === $floor);
+        }
+
+        if ($request->filled('gender')) {
+            $gender = strtoupper((string) $request->query('gender'));
+            $formatted = $formatted->filter(fn (array $r) => ($r['floor']['gender'] ?? '') === $gender);
+        }
+
+        if ($request->filled('status')) {
+            $status = strtoupper((string) $request->query('status'));
+            $formatted = $formatted->filter(fn (array $r) => $r['status'] === $status);
+        }
+
+        return $formatted->sortBy('id')->values();
+    }
+
+    public function exportPdf(Request $request, PdfService $pdfService): Response
+    {
+        $formatted = $this->buildExportRows($request);
+
+        return $pdfService->download(
+            'pdf.rooms',
+            ['rooms' => $formatted],
+            'danh_sach_phong_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportExcel(Request $request, ExcelService $excelService): Response
+    {
+        $formatted = $this->buildExportRows($request);
+        $statusLabels = ['AVAILABLE' => 'Còn trống', 'FULL' => 'Đầy', 'MAINTENANCE' => 'Bảo trì'];
+        $genderLabels = ['MALE' => 'Nam', 'FEMALE' => 'Nữ'];
+
+        $rows = $formatted->values()->map(function (array $room, int $index) use ($statusLabels, $genderLabels) {
+            return [
+                $index + 1,
+                $room['building_code'] . $room['room_number'],
+                $room['floor_number'],
+                $genderLabels[$room['floor']['gender'] ?? ''] ?? '',
+                $room['capacity'],
+                $statusLabels[$room['status']] ?? $room['status'],
+                $room['occupied_beds'],
+                $room['available_beds'],
+                $room['maintenance_beds'],
+            ];
+        })->all();
+
+        return $excelService->download(
+            'danh_sach_phong_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Danh sach phong',
+                'headers' => ['STT', 'Mã phòng', 'Tầng', 'Giới tính', 'Sức chứa', 'Trạng thái', 'Đã ở', 'Trống', 'Bảo trì'],
+                'rows' => $rows,
+            ]],
         );
     }
 

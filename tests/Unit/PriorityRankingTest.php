@@ -43,15 +43,16 @@ class PriorityRankingTest extends TestCase
         $regB = $this->registration($studentB->id, $periodId);
 
         // A: only UT01, verified.
-        $this->verifiedPriority($studentA->id, $ut01->id);
+        $this->verifiedPriority($studentA->id, $regA->id, $ut01->id);
 
         // B: UT04 + UT06, both verified (total 110, top tier 2).
-        $this->verifiedPriority($studentB->id, $ut04->id);
-        $this->verifiedPriority($studentB->id, $ut06->id);
+        $this->verifiedPriority($studentB->id, $regB->id, $ut04->id);
+        $this->verifiedPriority($studentB->id, $regB->id, $ut06->id);
 
         // Sanity: an UNVERIFIED tier-1 row on B must NOT promote B's tier.
         StudentPriority::create([
             'student_id' => $studentB->id,
+            'registration_id' => $regB->id,
             'priority_criteria_id' => $ut01->id,
             'status' => 'pending',
         ]);
@@ -73,6 +74,40 @@ class PriorityRankingTest extends TestCase
         $this->assertSame([$regB->id], $result['waitlist']->pluck('id')->all());
     }
 
+    /**
+     * TC02: a registration with a REJECTED priority evidence must be excluded
+     * entirely from ranked/approved/waitlist, not merely demoted to tier 99.
+     */
+    public function test_rejected_priority_evidence_excludes_registration_from_ranking(): void
+    {
+        $ut01 = $this->criteria('UT01', tier: 1, score: 100);
+
+        $periodId = $this->period();
+
+        $studentA = $this->student('DH00000003', 'Sinh viên A');
+        $studentC = $this->student('DH00000004', 'Sinh viên C');
+
+        $regA = $this->registration($studentA->id, $periodId);
+        $regC = $this->registration($studentC->id, $periodId);
+
+        $this->verifiedPriority($studentA->id, $regA->id, $ut01->id);
+
+        StudentPriority::create([
+            'student_id' => $studentC->id,
+            'registration_id' => $regC->id,
+            'priority_criteria_id' => $ut01->id,
+            'status' => 'rejected',
+        ]);
+
+        $result = $this->service->rankPeriod($periodId, availableBeds: 5);
+
+        $rankedIds = $result['ranked']->pluck('id')->all();
+        $this->assertContains($regA->id, $rankedIds);
+        $this->assertNotContains($regC->id, $rankedIds);
+        $this->assertNotContains($regC->id, $result['approved']->pluck('id')->all());
+        $this->assertNotContains($regC->id, $result['waitlist']->pluck('id')->all());
+    }
+
     private function criteria(string $code, int $tier, int $score): PriorityCriteria
     {
         return PriorityCriteria::create([
@@ -84,10 +119,11 @@ class PriorityRankingTest extends TestCase
         ]);
     }
 
-    private function verifiedPriority(int $studentId, int $criteriaId): StudentPriority
+    private function verifiedPriority(int $studentId, int $registrationId, int $criteriaId): StudentPriority
     {
         return StudentPriority::create([
             'student_id' => $studentId,
+            'registration_id' => $registrationId,
             'priority_criteria_id' => $criteriaId,
             'status' => 'verified',
             'verified_at' => now(),
@@ -101,6 +137,7 @@ class PriorityRankingTest extends TestCase
             'start_date' => '2026-06-01',
             'end_date' => '2026-06-30',
             'status' => 'processing',
+            'initial_payment_due_days' => 30,
             'created_at' => now(),
             'updated_at' => now(),
         ]);
@@ -145,7 +182,7 @@ class PriorityRankingTest extends TestCase
             'parent_address' => 'TP.HCM',
             'stay_from_date' => '2026-06-20',
             'stay_to_date' => '2027-06-20',
-            'status' => 'pending',
+            'status' => 'submitted',
         ]);
     }
 }

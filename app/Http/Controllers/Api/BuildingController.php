@@ -8,7 +8,11 @@ use App\Models\Building;
 use App\Models\Floor;
 use App\Models\Occupancy;
 use App\Models\Room;
+use App\Services\ExcelService;
+use App\Services\PdfService;
+use App\Support\VnFormat;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 
 class BuildingController extends Controller
@@ -100,6 +104,97 @@ class BuildingController extends Controller
     public function show(string $buildingCode)
     {
         return response()->json($this->formatBuilding($this->findBuildingOrFail($buildingCode)));
+    }
+
+    private function buildDetailExportPayload(string $buildingCode): array
+    {
+        $building = $this->findBuildingOrFail($buildingCode);
+        $building->loadMissing(['floors.rooms.beds']);
+
+        $bedIds = $building->floors
+            ->flatMap(fn (Floor $floor) => $floor->rooms)
+            ->flatMap(fn (Room $room) => $room->beds->pluck('id'))
+            ->filter()
+            ->values()
+            ->all();
+
+        $occupiedBedIds = empty($bedIds)
+            ? []
+            : Occupancy::occupiedBedsQuery()->whereIn('bed_id', $bedIds)->pluck('bed_id')->all();
+
+        $floors = $building->floors->sortBy('floor_number')->values()->map(function (Floor $floor) use ($occupiedBedIds) {
+            return [
+                'floor_number' => $floor->floor_number,
+                'gender' => strtoupper((string) ($floor->gender ?? 'MALE')),
+                'status' => strtoupper((string) ($floor->status ?? 'ACTIVE')),
+                'rooms' => $floor->rooms->sortBy('room_number')->values()->map(function (Room $room) use ($occupiedBedIds) {
+                    $bedCount = $room->beds->count();
+                    $occupiedCount = $room->beds->filter(fn (Bed $bed) => in_array($bed->id, $occupiedBedIds, true))->count();
+
+                    return [
+                        'room_number' => $room->room_number,
+                        'capacity' => $room->capacity,
+                        'price_per_month' => $room->price_per_month,
+                        'status' => strtoupper((string) $room->status),
+                        'bed_count' => $bedCount,
+                        'occupied_count' => $occupiedCount,
+                    ];
+                })->all(),
+            ];
+        })->all();
+
+        return [
+            'building' => [
+                'code' => $building->building_code,
+                'name' => $building->name,
+                'address' => $building->address,
+            ],
+            'floors' => $floors,
+        ];
+    }
+
+    public function exportDetailPdf(string $buildingCode, PdfService $pdfService): Response
+    {
+        $payload = $this->buildDetailExportPayload($buildingCode);
+
+        return $pdfService->download(
+            'pdf.building-detail',
+            $payload,
+            'danh_sach_phong_giuong_' . $buildingCode . '.pdf',
+        );
+    }
+
+    public function exportDetailExcel(string $buildingCode, ExcelService $excelService): Response
+    {
+        $payload = $this->buildDetailExportPayload($buildingCode);
+        $roomStatusLabels = ['ACTIVE' => 'Đang sử dụng', 'MAINTENANCE' => 'Bảo trì', 'INACTIVE' => 'Ngừng sử dụng'];
+        $genderLabels = ['MALE' => 'Nam', 'FEMALE' => 'Nữ'];
+
+        $rows = [];
+        $stt = 1;
+        foreach ($payload['floors'] as $floor) {
+            foreach ($floor['rooms'] as $room) {
+                $rows[] = [
+                    $stt++,
+                    $floor['floor_number'],
+                    $genderLabels[$floor['gender']] ?? $floor['gender'],
+                    $room['room_number'],
+                    $room['capacity'],
+                    VnFormat::currency($room['price_per_month']),
+                    $roomStatusLabels[$room['status']] ?? $room['status'],
+                    $room['occupied_count'] . '/' . $room['bed_count'],
+                ];
+            }
+        }
+
+        return $excelService->download(
+            'danh_sach_phong_giuong_' . $buildingCode . '.xlsx',
+            [[
+                'title' => 'Toa ' . $buildingCode,
+                'headers' => ['STT', 'Tầng', 'Giới tính', 'Số phòng', 'Sức chứa', 'Giá/tháng', 'Trạng thái', 'Giường đã ở/tổng'],
+                'rows' => $rows,
+            ]],
+        );
     }
 
     public function store(Request $request)

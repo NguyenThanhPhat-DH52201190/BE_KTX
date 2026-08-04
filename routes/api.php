@@ -118,6 +118,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/room-fee-bills/{id}/status', [RoomFeeBillController::class, 'updateStatus']);
         Route::put('/room-fee-bills/{id}/exempt', [RoomFeeBillController::class, 'exempt']);
         Route::put('/room-fee-bills/{id}/apply-discount', [RoomFeeBillController::class, 'applyOneTimeDiscount']);
+        Route::get('/room-fee-bills/pdf', [RoomFeeBillController::class, 'exportPdf']);
+        Route::get('/room-fee-bills/excel', [RoomFeeBillController::class, 'exportExcel']);
 
         Route::get('/admin/students/{studentId}/payment-plans', [StudentPaymentPlanController::class, 'index']);
         Route::post('/admin/students/{studentId}/payment-plans', [StudentPaymentPlanController::class, 'store']);
@@ -128,6 +130,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/electricity-bills', [ElectricityController::class, 'bills']);
         Route::put('/electricity-bills/{id}/confirm-payment', [ElectricityController::class, 'confirmPayment']);
         Route::put('/electricity-bills/{id}/status', [ElectricityController::class, 'updateStatus']);
+        Route::get('/electricity-bills/pdf', [ElectricityController::class, 'exportBillsPdf']);
+        Route::get('/electricity-bills/excel', [ElectricityController::class, 'exportBillsExcel']);
 
         // Nội dung tĩnh (Bước 2E)
         Route::post('/admin/pages/{slug}', [StaticPageController::class, 'update']);
@@ -160,6 +164,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/dashboard', [DashboardController::class, 'index']);
         Route::get('/admin/dashboard/finance', [DashboardController::class, 'finance']);
         Route::get('/admin/dashboard/revenue-trend', [DashboardController::class, 'revenueTrend']);
+        Route::get('/admin/dashboard/pdf', [DashboardController::class, 'exportPdf']);
+        Route::get('/admin/dashboard/excel', [DashboardController::class, 'exportExcel']);
 
         // Yêu cầu hỗ trợ (admin)
         Route::get('/admin/support-requests', [StudentSupportRequestController::class, 'adminIndex']);
@@ -171,7 +177,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/admin/support-requests/{id}/complete', [StudentSupportRequestController::class, 'complete']);
 
         // Chi tiết lưu trú (admin)
+        Route::get('/admin/occupancies/pdf', [OccupancyController::class, 'exportListPdf']);
+        Route::get('/admin/occupancies/excel', [OccupancyController::class, 'exportListExcel']);
         Route::get('/admin/occupancies/{id}/detail', [OccupancyController::class, 'detail'])->whereNumber('id');
+        Route::get('/admin/occupancies/{id}/detail/pdf', [OccupancyController::class, 'exportDetailPdf'])->whereNumber('id');
+        Route::get('/admin/occupancies/{id}/detail/excel', [OccupancyController::class, 'exportDetailExcel'])->whereNumber('id');
 
         // Tìm kiếm sinh viên
         Route::get('/admin/students/search', [StudentSearchController::class, 'search']);
@@ -185,8 +195,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Gia hạn lưu trú (admin)
         Route::get('/admin/extensions/stats', [OccupancyExtensionController::class, 'stats']);
+        Route::get('/admin/extensions/approved/pdf', [OccupancyExtensionController::class, 'exportApprovedPdf']);
+        Route::get('/admin/extensions/approved/excel', [OccupancyExtensionController::class, 'exportApprovedExcel']);
         Route::get('/admin/extensions', [OccupancyExtensionController::class, 'adminIndex']);
-        Route::get('/admin/extensions/{id}', [OccupancyExtensionController::class, 'adminShow']);
+        Route::get('/admin/extensions/{id}', [OccupancyExtensionController::class, 'adminShow'])->whereNumber('id');
         Route::put('/admin/extensions/{id}/approve', [OccupancyExtensionController::class, 'approve']);
         Route::put('/admin/extensions/{id}/reject', [OccupancyExtensionController::class, 'reject']);
 
@@ -263,6 +275,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::middleware('role:admin')->group(function () {
         // Quản lý phòng — ghi (Lượt B)
+        Route::get('/rooms/pdf', [\App\Http\Controllers\Api\RoomController::class, 'exportPdf']);
+        Route::get('/rooms/excel', [\App\Http\Controllers\Api\RoomController::class, 'exportExcel']);
         Route::post('/rooms', [\App\Http\Controllers\Api\RoomController::class, 'store']);
         Route::put('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'update']);
         Route::delete('/rooms/{roomId}', [\App\Http\Controllers\Api\RoomController::class, 'destroy']);
@@ -283,6 +297,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/buildings', [\App\Http\Controllers\Api\BuildingController::class, 'index']);
         Route::post('/buildings', [\App\Http\Controllers\Api\BuildingController::class, 'store']);
         Route::get('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'show']);
+        Route::get('/buildings/{buildingCode}/pdf', [\App\Http\Controllers\Api\BuildingController::class, 'exportDetailPdf']);
+        Route::get('/buildings/{buildingCode}/excel', [\App\Http\Controllers\Api\BuildingController::class, 'exportDetailExcel']);
         Route::put('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'update']);
         Route::delete('/buildings/{buildingCode}', [\App\Http\Controllers\Api\BuildingController::class, 'destroy']);
         Route::post('/buildings/{buildingCode}/floors', [\App\Http\Controllers\Api\BuildingController::class, 'storeFloor']);
@@ -300,6 +316,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/violations/{id}', [ViolationController::class, 'update']);
         Route::put('/violations/{id}/process', [ViolationController::class, 'process']);
         Route::delete('/violations/{id}', [ViolationController::class, 'destroy']);
+        Route::get('/violations/pdf', [ViolationController::class, 'exportPdf']);
+        Route::get('/violations/excel', [ViolationController::class, 'exportExcel']);
 
         // Đợt gia hạn lưu trú — ghi/chi tiết (Lượt C)
         Route::post('/occupancy-periods', [OccupancyPeriodController::class, 'store']);
