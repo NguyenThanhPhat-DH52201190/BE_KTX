@@ -17,18 +17,30 @@
             <directory>app</directory>
         </include>
     </source>
+    <!--
+        DB_CONNECTION=mysql: nhiều migration dùng cú pháp riêng của MySQL (ALTER ... MODIFY,
+        Schema::getForeignKeys, ...) nên không tương thích SQLite. Trước khi chạy `php artisan test`,
+        cần một MySQL server local đang chạy và một database rỗng tên "ktx_testing"
+        (vd: `CREATE DATABASE ktx_testing;`) — RefreshDatabase sẽ tự migrate vào đó mỗi lần chạy.
+    -->
     <php>
         <env name="APP_ENV" value="testing"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
-        <env name="DB_CONNECTION" value="sqlite"/>
-        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="DB_CONNECTION" value="mysql"/>
+        <env name="DB_HOST" value="127.0.0.1"/>
+        <env name="DB_PORT" value="3306"/>
+        <env name="DB_DATABASE" value="ktx_testing"/>
+        <env name="DB_USERNAME" value="root"/>
+        <env name="DB_PASSWORD" value=""/>
         <env name="DB_URL" value=""/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
+        <env name="VNPAY_TMN_CODE" value="TESTTMN01"/>
+        <env name="VNPAY_HASH_SECRET" value="TEST_SECRET_KEY_123"/>
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>

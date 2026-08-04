@@ -244,6 +244,19 @@ class RegistrationPeriodController extends Controller
             }
         }
 
+        // Rule 4c: đợt quanh năm không được có ngày bắt đầu lưu trú sớm hơn đợt chính cùng
+        // năm học — tránh sinh viên đăng ký kênh quanh năm lại vào ở SỚM HƠN cả lứa đợt
+        // chính (vốn phải xử lý xong hồ sơ/phân phòng trước).
+        if ($data['channel'] === 'rolling' && !empty($data['stay_start_date'])) {
+            $rollingStayStartError = $this->validateRollingStayStartDate($data['stay_start_date'], $data['school_year']);
+            if ($rollingStayStartError) {
+                return response()->json([
+                    'message' => $rollingStayStartError,
+                    'errors'  => ['stay_start_date' => [$rollingStayStartError]],
+                ], 422);
+            }
+        }
+
         // Rule 5: đợt quanh năm chỉ được ở tới cùng mốc kết thúc lưu trú với đợt chính
         // cùng năm học (sinh viên đăng ký giữa năm vẫn theo chu kỳ năm học chung, không
         // được cộng thêm 1 năm kể từ ngày đăng ký) — ghi đè stay_end_date, không cho nhập tay.
@@ -351,6 +364,17 @@ class RegistrationPeriodController extends Controller
                 return response()->json([
                     'message' => $stayStartError,
                     'errors'  => ['stay_start_date' => [$stayStartError]],
+                ], 422);
+            }
+        }
+
+        // Rule 4c: đợt quanh năm không được có ngày bắt đầu lưu trú sớm hơn đợt chính cùng năm học.
+        if ($channel === 'rolling' && $stayStart) {
+            $rollingStayStartError = $this->validateRollingStayStartDate($stayStart, $schoolYear, $id);
+            if ($rollingStayStartError) {
+                return response()->json([
+                    'message' => $rollingStayStartError,
+                    'errors'  => ['stay_start_date' => [$rollingStayStartError]],
                 ], 422);
             }
         }
@@ -647,6 +671,33 @@ class RegistrationPeriodController extends Controller
         }
 
         $data['stay_end_date'] = $mainPeriod->stay_end_date->toDateString();
+
+        return null;
+    }
+
+    /**
+     * Đợt quanh năm không được có stay_start_date sớm hơn stay_start_date của đợt chính
+     * cùng năm học — lứa quanh năm luôn đăng ký/vào ở SAU lứa chính (đợt chính xử lý hồ sơ/
+     * phân phòng trước), không được "vượt mặt" vào ở sớm hơn.
+     */
+    private function validateRollingStayStartDate(string $stayStartDate, string $schoolYear, ?int $excludeId = null): ?string
+    {
+        $mainPeriod = RegistrationPeriod::where('channel', 'main')
+            ->where('school_year', $schoolYear)
+            ->when($excludeId, fn ($q) => $q->where('id', '!=', $excludeId))
+            ->first();
+
+        // Chưa có đợt chính cùng năm học để so sánh — Rule 5 (applyRollingStayEndDate) đã
+        // báo lỗi riêng cho trường hợp này, không lặp lại thông báo ở đây.
+        if (! $mainPeriod || ! $mainPeriod->stay_start_date) {
+            return null;
+        }
+
+        $mainStayStart = $mainPeriod->stay_start_date->toDateString();
+        if ($stayStartDate < $mainStayStart) {
+            $minFormatted = \Carbon\Carbon::parse($mainStayStart)->format('d/m/Y');
+            return "Ngày bắt đầu lưu trú của đợt quanh năm phải từ {$minFormatted} trở đi (không được sớm hơn đợt chính cùng năm học).";
+        }
 
         return null;
     }

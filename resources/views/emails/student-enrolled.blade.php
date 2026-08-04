@@ -26,7 +26,7 @@
     <div class="container">
         <div class="header">
             <h1>Xác nhận nhập học thành công</h1>
-            <p>Ký túc xá — Trường Đại học Công nghệ TP.HCM (STU)</p>
+            <p>Ký túc xá — Trường Đại học Công nghệ Sài Gòn (STU)</p>
         </div>
         <div class="body">
             <p>Kính gửi <strong>{{ $studentFullName }}</strong>,</p>

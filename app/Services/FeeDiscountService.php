@@ -52,11 +52,10 @@ class FeeDiscountService
             ->pluck('priority_criteria_id');
 
         if ($verifiedPriorityIds->isNotEmpty()) {
-            // Tìm policy active có mức giảm cao nhất
+            // Tìm policy có mức giảm cao nhất — 0% coi như không áp dụng, không cần cờ is_active riêng
             $bestPolicy = FeeDiscountPolicy::query()
                 ->with('criteria')
                 ->whereIn('priority_criteria_id', $verifiedPriorityIds)
-                ->where('is_active', true)
                 ->orderByDesc('discount_percent')
                 ->first();
 

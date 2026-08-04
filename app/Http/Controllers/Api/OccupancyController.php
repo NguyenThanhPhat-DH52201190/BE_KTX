@@ -9,7 +9,12 @@ use App\Models\ElectricityBill;
 use App\Models\Occupancy;
 use App\Models\RoomFeeBill;
 use App\Models\StudentSupportRequest;
+use App\Services\ExcelService;
+use App\Services\PdfService;
+use App\Support\VnFormat;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 
 class OccupancyController extends Controller
@@ -20,6 +25,182 @@ class OccupancyController extends Controller
             ->with(['student', 'registration', 'room.floor', 'bed'])
             ->findOrFail($id);
 
+        return response()->json($this->buildDetailPayload($occupancy));
+    }
+
+    private function buildListExportRows(Request $request)
+    {
+        // Chỉ lấy các trạng thái thực sự "đã/đang lưu trú tại KTX" — cùng whitelist với
+        // occupancy_history trong buildDetailPayload(), loại bỏ các bản ghi tiền lưu trú
+        // (ROOM_CONFIRMED, PENDING_PAYMENT, PROPOSED) hoặc đã hủy (CANCELLED) chưa từng ở thật.
+        $query = Occupancy::query()
+            ->with(['student', 'room.floor', 'bed'])
+            ->whereIn('status', ['ACTIVE', 'COMPLETED', 'CHECKOUT_REQUESTED', 'TERMINATED'])
+            ->orderByDesc('check_in_date')
+            ->orderByDesc('id');
+
+        if ($request->filled('status')) {
+            $query->where('status', strtoupper((string) $request->query('status')));
+        }
+
+        return $query->get()->map(function (Occupancy $occ) {
+            $room = $occ->room;
+
+            return [
+                'student_code' => $occ->student?->student_code ?? '',
+                'full_name' => $occ->student?->full_name ?? '',
+                'building_code' => $room?->floor?->building_code ?? '',
+                'room_number' => $room?->room_number ? (string) $room->room_number : '',
+                'bed_number' => $occ->bed?->bed_number ? (string) $occ->bed->bed_number : '',
+                'check_in_date' => $occ->check_in_date,
+                'check_out_date' => $occ->check_out_date,
+                'status' => $occ->status,
+            ];
+        })->values();
+    }
+
+    public function exportListPdf(Request $request, PdfService $pdfService): Response
+    {
+        $occupancies = $this->buildListExportRows($request);
+
+        return $pdfService->download(
+            'pdf.occupancies',
+            ['occupancies' => $occupancies],
+            'danh_sach_luu_tru_' . now()->format('dmY_His') . '.pdf',
+        );
+    }
+
+    public function exportListExcel(Request $request, ExcelService $excelService): Response
+    {
+        $occupancies = $this->buildListExportRows($request);
+        $statusLabels = [
+            'ACTIVE' => 'Đang lưu trú',
+            'PENDING_PAYMENT' => 'Chờ thanh toán',
+            'ROOM_CONFIRMED' => 'Đã xác nhận phòng',
+            'PROPOSED' => 'Đề xuất phòng',
+            'CHECKOUT_REQUESTED' => 'Yêu cầu thôi ở',
+            'COMPLETED' => 'Đã thôi ở',
+            'TERMINATED' => 'Đã kết thúc',
+        ];
+
+        $rows = $occupancies->values()->map(function (array $item, int $index) use ($statusLabels) {
+            return [
+                $index + 1,
+                $item['student_code'],
+                $item['full_name'],
+                $item['building_code'] . $item['room_number'],
+                $item['bed_number'],
+                VnFormat::date($item['check_in_date']),
+                VnFormat::date($item['check_out_date']),
+                $statusLabels[$item['status']] ?? $item['status'],
+            ];
+        })->all();
+
+        return $excelService->download(
+            'danh_sach_luu_tru_' . now()->format('dmY_His') . '.xlsx',
+            [[
+                'title' => 'Danh sach luu tru',
+                'headers' => ['STT', 'MSSV', 'Họ tên', 'Phòng', 'Giường', 'Ngày nhận phòng', 'Ngày trả phòng', 'Trạng thái'],
+                'rows' => $rows,
+            ]],
+        );
+    }
+
+    private function buildDetailExportPayload(int $id): array
+    {
+        $occupancy = Occupancy::query()
+            ->with(['student', 'registration', 'room.floor', 'bed'])
+            ->findOrFail($id);
+
+        $payload = $this->buildDetailPayload($occupancy);
+
+        $room = $occupancy->room;
+        $payload['identity'] = [
+            'student_code' => $occupancy->student?->student_code ?? '',
+            'full_name' => $occupancy->student?->full_name ?? '',
+            'building_code' => $room?->floor?->building_code ?? '',
+            'room_number' => $room?->room_number ? (string) $room->room_number : '',
+            'bed_number' => $occupancy->bed?->bed_number ? (string) $occupancy->bed->bed_number : '',
+            'check_in_date' => $occupancy->check_in_date,
+            'check_out_date' => $occupancy->check_out_date,
+            'status' => $occupancy->status,
+        ];
+
+        return $payload;
+    }
+
+    public function exportDetailPdf(int $id, PdfService $pdfService): Response
+    {
+        $payload = $this->buildDetailExportPayload($id);
+
+        return $pdfService->download(
+            'pdf.occupancy-detail',
+            $payload,
+            'ho_so_luu_tru_' . ($payload['identity']['student_code'] ?: $id) . '.pdf',
+        );
+    }
+
+    public function exportDetailExcel(int $id, ExcelService $excelService): Response
+    {
+        $payload = $this->buildDetailExportPayload($id);
+        $identity = $payload['identity'];
+
+        $infoRows = [
+            ['MSSV', $identity['student_code']],
+            ['Họ tên', $identity['full_name']],
+            ['Phòng', $identity['building_code'] . $identity['room_number']],
+            ['Giường', $identity['bed_number']],
+            ['Ngày nhận phòng', VnFormat::date($identity['check_in_date'])],
+            ['Ngày trả phòng', VnFormat::date($identity['check_out_date'])],
+            ['Trạng thái', $identity['status']],
+            ['Địa chỉ thường trú', $payload['student']['permanent_address'] ?? ''],
+            ['Họ tên cha', $payload['family']['father_name'] ?? ''],
+            ['SĐT cha', $payload['family']['father_phone'] ?? ''],
+            ['Họ tên mẹ', $payload['family']['mother_name'] ?? ''],
+            ['SĐT mẹ', $payload['family']['mother_phone'] ?? ''],
+            ['Tổng công nợ chưa thanh toán', $payload['total_debt']],
+            ['Nợ quá hạn/chưa thanh toán', $payload['unpaid_debt']],
+        ];
+
+        $historyRows = collect($payload['occupancy_history'])->values()->map(fn (array $item, int $index) => [
+            $index + 1,
+            $item['period_name'] ?? trim(($item['school_year'] ?? '') . ' ' . ($item['semester'] ?? '')),
+            $item['building_code'] . $item['room_number'],
+            $item['bed_number'],
+            VnFormat::date($item['check_in_date']),
+            VnFormat::date($item['check_out_date']),
+            $item['status'],
+        ])->all();
+
+        $violationRows = collect($payload['recent_violations'])->values()->map(fn (array $item, int $index) => [
+            $index + 1,
+            VnFormat::date($item['activity_date']),
+            $item['type_name'],
+            $item['level'],
+            $item['note'],
+        ])->all();
+
+        $roomChangeRows = collect($payload['room_change_history'])->values()->map(fn (array $item, int $index) => [
+            $index + 1,
+            VnFormat::date($item['transferred_at']),
+            $item['old_room_code'] ?? '',
+            $item['new_room_code'] ?? '',
+            $item['transfer_reason'] ?? '',
+        ])->all();
+
+        return $excelService->download(
+            'ho_so_luu_tru_' . ($identity['student_code'] ?: $id) . '.xlsx',
+            [
+                ['title' => 'Thong tin', 'headers' => ['Trường', 'Giá trị'], 'rows' => $infoRows],
+                ['title' => 'Lich su luu tru', 'headers' => ['STT', 'Kỳ', 'Phòng', 'Giường', 'Ngày nhận phòng', 'Ngày trả phòng', 'Trạng thái'], 'rows' => $historyRows],
+                ['title' => 'Vi pham gan day', 'headers' => ['STT', 'Ngày', 'Loại', 'Mức độ', 'Ghi chú'], 'rows' => $violationRows],
+                ['title' => 'Lich su doi phong', 'headers' => ['STT', 'Ngày', 'Từ', 'Đến', 'Lý do'], 'rows' => $roomChangeRows],
+            ],
+        );
+    }
+
+    private function buildDetailPayload(Occupancy $occupancy): array
+    {
         $student     = $occupancy->student;
         $registration = $occupancy->registration;
 
@@ -188,7 +369,7 @@ class OccupancyController extends Controller
                 'new_bed_number' => $row->new_bed_number ? (string) $row->new_bed_number : null,
             ])->values()->all();
 
-        return response()->json([
+        return [
             'student'             => $studentData,
             'family'              => $familyData,
             'occupancy_history'   => $historyItems,
@@ -208,7 +389,7 @@ class OccupancyController extends Controller
             ] : null,
             'support_requests'    => $supportRequests,
             'room_change_history' => $roomChangeHistory,
-        ]);
+        ];
     }
 
     private function resolveImageUrl(string $path): string
