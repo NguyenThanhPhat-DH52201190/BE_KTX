@@ -293,6 +293,10 @@ class AuthController extends Controller
         $account->otp_expire = null;
         $account->save();
 
+        // Thu hồi toàn bộ token hiện có, giống changePassword() — quên mật khẩu
+        // thường gắn với nghi ngờ lộ tài khoản nên cũng phải đăng xuất mọi phiên cũ.
+        $account->tokens()->delete();
+
         return response()->json(['message' => 'Đổi mật khẩu thành công']);
     }
 }
