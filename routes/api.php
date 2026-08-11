@@ -70,6 +70,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Đổi mật khẩu: dùng chung cho mọi loại tài khoản (student/admin).
     Route::post('/change-password', [AuthController::class, 'changePassword']);
 
+    // Xác minh lại danh tính/vai trò thật từ token — frontend gọi để đối chiếu với
+    // dữ liệu đang lưu ở localStorage, tránh tin thẳng role phía client có thể bị sửa tay.
+    Route::get('/me', [AuthController::class, 'me']);
+
     Route::middleware('role:student')->group(function () {
         Route::get('/student/profile', [StudentProfileController::class, 'show']);
         Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);

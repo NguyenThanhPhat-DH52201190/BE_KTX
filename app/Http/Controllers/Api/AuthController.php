@@ -161,6 +161,30 @@ class AuthController extends Controller
         ]);
     }
 
+    // Trả về danh tính/vai trò thật của tài khoản đang giữ token, đọc thẳng từ CSDL
+    // qua $request->user() (route đã bảo vệ bằng auth:sanctum) — dùng cùng cấu trúc
+    // với response của login() để frontend đối chiếu lại role đang lưu ở localStorage,
+    // tránh bị qua mặt nếu ai đó tự sửa tay giá trị role trong localStorage.
+    public function me(Request $request)
+    {
+        $account = $request->user();
+        $isAdmin = $account->role === 'admin';
+        $student = $isAdmin ? null : ($account->student_id ? Student::find($account->student_id) : null);
+        $accountEmail = Schema::hasColumn('accounts', 'email') ? ($account->email ?? null) : null;
+        $adminEmail = $isAdmin ? ($accountEmail ?? config('auth.admin_login_email')) : null;
+
+        return response()->json([
+            'id' => $account->id,
+            'email' => $adminEmail ?? $student?->email ?? null,
+            'role' => $account->role,
+            'student_id' => $isAdmin ? null : $account->student_id,
+            'student_code' => $isAdmin ? null : $student?->student_code,
+            'studentCode' => $isAdmin ? null : $student?->student_code,
+            'full_name' => $isAdmin ? null : $student?->full_name,
+            'fullName' => $isAdmin ? null : $student?->full_name,
+        ]);
+    }
+
     public function checkEmail(CheckEmailRequest $request)
     {
         $exists = Student::where('email', $request->email)->exists();
