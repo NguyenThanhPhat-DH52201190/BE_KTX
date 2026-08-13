@@ -1154,9 +1154,12 @@ class RegistrationController extends Controller
             return response()->json(['message' => 'Giường đang bảo trì, vui lòng chọn giường khác.'], 422);
         }
 
-        // 4. Giường chưa được sinh viên khác giữ chỗ hoặc đang ở.
+        // 4. Giường chưa được sinh viên khác giữ chỗ hoặc đang ở. Sinh viên lứa cũ chưa gia hạn
+        // (check_out_date < stay_start_date đợt này) coi như sẽ trống kịp, không chặn chọn
+        // giường của lứa mới (xem báo cáo timing 13/08) — chỉ áp dụng khi đơn có period rõ ràng.
+        $asOfDate = $registration->period?->stay_start_date?->toDateString();
         $isOccupiedByAnotherStudent = Occupancy::query()
-            ->occupiedBeds()
+            ->occupiedBeds($asOfDate)
             ->where('bed_id', $bed->id)
             ->where('student_id', '!=', $registration->student_id)
             ->exists();

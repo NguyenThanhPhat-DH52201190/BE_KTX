@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Occupancy;
 use App\Models\Registration;
+use App\Models\RegistrationPeriod;
 use App\Models\Room;
 use Carbon\Carbon;
 
@@ -87,8 +88,15 @@ class AutoRoomAssignmentService
         })->values();
 
         // 4. Room availability map (PROPOSED occupancies do NOT count as occupied;
-        //    confirmed rooms and pending-payment bed selections still reserve capacity)
-        $roomMap    = $this->buildRoomMap();
+        //    confirmed rooms and pending-payment bed selections still reserve capacity).
+        // Sinh viên lứa cũ chưa gia hạn (check_out_date < stay_start_date của đợt này) coi như
+        // sẽ trống giường kịp trước ngày sinh viên mới vào ở — không chờ occupancies:expire dọn
+        // dẹp thật mới cho gán giường (xem báo cáo timing 13/08). Chỉ áp dụng khi chạy cho 1
+        // đợt cụ thể (có $registrationPeriodId) vì cần biết đúng stay_start_date mục tiêu.
+        $asOfDate = $registrationPeriodId
+            ? RegistrationPeriod::find($registrationPeriodId)?->stay_start_date?->toDateString()
+            : null;
+        $roomMap    = $this->buildRoomMap($asOfDate);
         $roomTrack  = [];   // room_id => ['province'=>[], 'faculty'=>[], 'year'=>[]]
         $provinceFloor = []; // province_code => floor_id of first assigned room
 
@@ -226,7 +234,7 @@ class AutoRoomAssignmentService
 
     // ─── Private helpers ───────────────────────────────────────────────────
 
-    private function buildRoomMap(): array
+    private function buildRoomMap(?string $asOfDate = null): array
     {
         $rooms = Room::query()
             ->where('status', 'active')
@@ -236,6 +244,9 @@ class AutoRoomAssignmentService
 
         // Confirmed rooms and pending-payment bed selections still reserve capacity.
         $occupiedPerRoom = Occupancy::whereIn('status', ['ROOM_CONFIRMED', 'PENDING_PAYMENT', 'ACTIVE'])
+            ->when($asOfDate !== null, fn ($q) => $q->where(function ($qq) use ($asOfDate) {
+                $qq->whereNull('check_out_date')->orWhere('check_out_date', '>=', $asOfDate);
+            }))
             ->selectRaw('room_id, COUNT(*) as cnt')
             ->groupBy('room_id')
             ->pluck('cnt', 'room_id');

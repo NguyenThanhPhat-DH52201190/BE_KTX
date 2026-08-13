@@ -71,4 +71,17 @@ class RoomFeeBill extends Model
             ->whereRaw('(year * 12 + month) <= ?', [$targetIndex])
             ->whereRaw('(year * 12 + month + months_count - 1) >= ?', [$targetIndex]);
     }
+
+    /**
+     * Hóa đơn có số tiền phải trả <= 0 (miễn 100% qua chính sách ưu tiên/giảm giá) KHÔNG
+     * BAO GIỜ được mang status unpaid/overdue — nếu không, sinh viên nợ 0đ vẫn bị hệ thống
+     * nhắc nợ/buộc thôi ở oan (báo cáo 14/08: sinh viên diện con liệt sĩ/thương binh bị
+     * blacklist dù không nợ đồng nào, vì bill giảm 100% chỉ chỉnh amount=0 mà không đổi
+     * status). Dùng hàm này ở MỌI nơi tạo/sửa amount của RoomFeeBill, không tự set status
+     * rải rác từng chỗ để tránh lặp lại đúng lỗi này ở 1 điểm mới sau này.
+     */
+    public static function resolveStatus(int $finalAmount, string $fallbackStatus): string
+    {
+        return $finalAmount <= 0 ? 'exempted' : $fallbackStatus;
+    }
 }

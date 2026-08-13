@@ -49,8 +49,13 @@ class DormCapacityService
     /**
      * @param string|null $gender 'male'|'female' — lọc giường theo giới tính tầng (null = gộp
      *                            chung toàn KTX, giữ hành vi cũ cho nơi chưa cần tách giới).
+     * @param string|null $asOfDate Xem Occupancy::occupiedBedsQuery(). Mặc định null = phản
+     *                            ánh đúng thực tế vật lý NGAY LÚC GỌI (dùng cho dashboard tổng
+     *                            quan qua countAvailablePhysicalBeds()). Chỉ truyền khi tính
+     *                            sức chứa CHO 1 đợt đăng ký mới cụ thể, xem
+     *                            summarizeForRegistrationPeriod().
      */
-    public function summarizePhysicalBeds(?string $gender = null): array
+    public function summarizePhysicalBeds(?string $gender = null, ?string $asOfDate = null): array
     {
         $usableBedsQuery = Bed::query()
             ->where('beds.status', 'active')
@@ -70,7 +75,7 @@ class DormCapacityService
         $this->applyFloorGenderFilter($maintenanceOrBlockedQuery, $gender);
         $maintenanceOrBlockedBeds = $maintenanceOrBlockedQuery->distinct('beds.id')->count('beds.id');
 
-        $occupiedBedIds = Occupancy::occupiedBedsQuery()
+        $occupiedBedIds = Occupancy::occupiedBedsQuery($asOfDate)
             ->whereIn('bed_id', $usableBedIds)
             ->pluck('bed_id')
             ->unique()
@@ -129,13 +134,20 @@ class DormCapacityService
         $periodId = $registrationPeriod?->id;
         $occupancyPeriodId = $this->resolveOccupancyPeriodId($registrationPeriod);
 
-        $physicalBeds = $this->summarizePhysicalBeds($gender);
+        // Sinh viên lứa cũ chưa gia hạn (check_out_date < stay_start_date của đợt MỚI này) coi
+        // như sẽ trống giường kịp trước ngày sinh viên mới vào ở — không chờ tới lúc
+        // occupancies:expire dọn dẹp thật mới cho nhận/duyệt đơn (xem báo cáo timing 13/08).
+        // Sinh viên đã gia hạn thì check_out_date đã bị đợt gia hạn đẩy sang mốc mới >=
+        // stay_start_date, vẫn tính là chiếm như cũ.
+        $asOfDate = $registrationPeriod?->stay_start_date?->toDateString();
+
+        $physicalBeds = $this->summarizePhysicalBeds($gender, $asOfDate);
         $totalBeds = $physicalBeds['total_beds'];
         $maintenanceOrBlockedBeds = $physicalBeds['maintenance_or_blocked_beds'];
         $physicallyOccupiedOrReservedBeds = $physicalBeds['physically_occupied_or_reserved_beds'];
         $availablePhysicalBeds = $physicalBeds['available_physical_beds'];
 
-        $occupiedStudentIds = Occupancy::occupiedBedsQuery()
+        $occupiedStudentIds = Occupancy::occupiedBedsQuery($asOfDate)
             ->whereNotNull('student_id')
             ->pluck('student_id')
             ->unique()

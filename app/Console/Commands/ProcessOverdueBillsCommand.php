@@ -81,20 +81,27 @@ class ProcessOverdueBillsCommand extends Command
             return;
         }
 
+        // Lưới an toàn: loại bỏ bill amount<=0 (miễn 100%) khỏi diện xử lý — sinh viên không
+        // nợ đồng nào thì không được nhắc nợ/buộc thôi ở, dù lỡ status vẫn còn overdue do sót
+        // ở nơi tạo/sửa amount (xem RoomFeeBill::resolveStatus, báo cáo 14/08).
         /** @var Collection<RoomFeeBill> $overdueBills */
-        $overdueBills = $occupancy->roomFeeBills;
+        $overdueBills = $occupancy->roomFeeBills->filter(fn (RoomFeeBill $bill) => $bill->amount > 0)->values();
 
         // Gộp thêm hóa đơn điện quá hạn của cùng sinh viên
         /** @var Collection<ElectricityBill> $overdueElecBills */
         $overdueElecBills = ElectricityBill::where('student_id', $student->id)
             ->where('status', 'overdue')
+            ->where('amount', '>', 0)
             ->orderBy('due_date')
             ->get();
 
-        // Dùng due_date của bill cũ nhất để tính mức độ nặng nhất
-        /** @var RoomFeeBill $oldestBill */
-        $oldestBill  = $overdueBills->first();
-        $daysOverdue = (int) Carbon::parse($oldestBill->due_date)->diffInDays(Carbon::today());
+        if ($overdueBills->isEmpty() && $overdueElecBills->isEmpty()) {
+            return; // Không còn nợ thật (mọi bill overdue đã bị miễn 100%) — không xử lý gì cả.
+        }
+
+        // Dùng due_date CŨ NHẤT trong cả 2 loại hóa đơn còn nợ thật để tính mức độ nặng nhất.
+        $oldestDueDate = $overdueBills->concat($overdueElecBills)->pluck('due_date')->min();
+        $daysOverdue   = (int) Carbon::parse($oldestDueDate)->diffInDays(Carbon::today());
 
         // ---- Buộc thôi ở (evictionDays + đã có LEVEL_3) --------------------
         // Bỏ qua nếu sinh viên đang được duyệt "đóng theo tháng" — vẫn nhắc nợ bình thường bên dưới.
