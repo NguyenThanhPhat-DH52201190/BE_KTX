@@ -57,7 +57,7 @@ class PriorityRankingTest extends TestCase
             'status' => 'pending',
         ]);
 
-        $result = $this->service->rankPeriod($periodId, availableBeds: 1);
+        $result = $this->service->rankPeriod($periodId, availableBedsByGender: ['male' => 1, 'female' => 0]);
 
         // Cached values are correct and ignore the unverified row.
         $this->assertSame(1, $regA->fresh()->top_priority_tier);
@@ -99,7 +99,7 @@ class PriorityRankingTest extends TestCase
             'status' => 'rejected',
         ]);
 
-        $result = $this->service->rankPeriod($periodId, availableBeds: 5);
+        $result = $this->service->rankPeriod($periodId, availableBedsByGender: ['male' => 5, 'female' => 0]);
 
         $rankedIds = $result['ranked']->pluck('id')->all();
         $this->assertContains($regA->id, $rankedIds);
