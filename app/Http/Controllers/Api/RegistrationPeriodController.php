@@ -220,10 +220,15 @@ class RegistrationPeriodController extends Controller
         // thúc lưu trú — tránh khoảng trống/chồng lấn giữa 2 lứa. Ghi đè stay_start_date, không
         // cho nhập tay (chỉ áp dụng khi đã có dữ liệu lưu trú trước đó để tham chiếu; đợt chính
         // đầu tiên chưa có gì để nối tiếp thì admin vẫn tự chọn như cũ).
+        $stayStartDateAdjustedFrom = null;
         if ($data['channel'] === 'main') {
             $previousStayEnd = RegistrationPeriod::currentStayEndDate();
             if ($previousStayEnd) {
-                $data['stay_start_date'] = \Carbon\Carbon::parse($previousStayEnd)->addDay()->toDateString();
+                $forcedStayStartDate = \Carbon\Carbon::parse($previousStayEnd)->addDay()->toDateString();
+                if (($data['stay_start_date'] ?? null) !== $forcedStayStartDate) {
+                    $stayStartDateAdjustedFrom = $data['stay_start_date'] ?? null;
+                }
+                $data['stay_start_date'] = $forcedStayStartDate;
             }
         }
 
@@ -275,7 +280,15 @@ class RegistrationPeriodController extends Controller
 
         $period = RegistrationPeriod::create($data);
 
-        return response()->json($period, 201);
+        $response = $period->toArray();
+        $response['stay_start_date_adjusted'] = $stayStartDateAdjustedFrom !== null;
+        if ($stayStartDateAdjustedFrom !== null) {
+            $response['stay_start_date_adjusted_from'] = $stayStartDateAdjustedFrom;
+            $response['stay_start_date_adjusted_reason'] = 'Ngày bắt đầu lưu trú được tự động nối tiếp ngay sau ngày kết thúc lưu trú của lứa trước đó ('
+                . \Carbon\Carbon::parse($period->stay_start_date)->subDay()->format('d/m/Y') . ').';
+        }
+
+        return response()->json($response, 201);
     }
 
     public function update(Request $request, int $id): JsonResponse

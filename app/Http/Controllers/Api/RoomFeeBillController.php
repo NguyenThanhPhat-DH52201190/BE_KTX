@@ -117,8 +117,11 @@ class RoomFeeBillController extends Controller
             'month' => ['required', 'integer', 'min:1', 'max:12'],
             'year' => ['required', 'integer', 'min:2020', 'max:2100'],
             'amount' => ['required', 'integer', 'gt:0'],
-            'due_date' => ['required', 'date'],
         ]);
+
+        // Hạn thanh toán = ngày hóa đơn được tạo (hôm nay) + 7 ngày — luôn tính ở backend,
+        // không nhận từ client nữa, tránh admin chỉnh tay ra ngày tùy ý/không nhất quán.
+        $dueDate = \Carbon\Carbon::today()->addDays(7)->toDateString();
 
         // Sinh viên đang ở chế độ "đóng theo tháng" không được tạo bill gộp thủ công ở đây —
         // cron bills:generate-monthly sẽ tự bill riêng từng tháng cho họ.
@@ -138,7 +141,7 @@ class RoomFeeBillController extends Controller
         $created = [];
         $skipped = 0;
 
-        DB::transaction(function () use ($data, $occupancies, &$created, &$skipped) {
+        DB::transaction(function () use ($data, $dueDate, $occupancies, &$created, &$skipped) {
             foreach ($occupancies as $occupancy) {
                 $exists = RoomFeeBill::query()
                     ->where('occupancy_id', $occupancy->id)
@@ -153,15 +156,17 @@ class RoomFeeBillController extends Controller
 
                 $baseAmount = (int) $data['amount'];
                 $discount   = $this->discountService->calculate($occupancy, $baseAmount);
+                $status     = RoomFeeBill::resolveStatus($discount['final_amount'], 'unpaid');
 
                 $billData = [
                     'student_id'  => $occupancy->student_id,
                     'occupancy_id' => $occupancy->id,
                     'month'        => (int) $data['month'],
                     'year'         => (int) $data['year'],
-                    'due_date'     => $data['due_date'],
-                    'status'       => 'unpaid',
+                    'due_date'     => $dueDate,
+                    'status'       => $status,
                     'amount'       => $discount['final_amount'],
+                    'exempted_at'  => $status === 'exempted' ? now() : null,
                 ];
 
                 if ($discount['discount_percent'] > 0) {
@@ -287,6 +292,7 @@ class RoomFeeBillController extends Controller
         $discountPercent = (float) $data['discount_percent'];
         $discountAmount  = (int) round($base * $discountPercent / 100);
         $finalAmount     = max(0, $base - $discountAmount);
+        $status          = RoomFeeBill::resolveStatus($finalAmount, $bill->status ?? 'unpaid');
 
         $bill->update([
             'original_amount'  => $base,
@@ -294,6 +300,8 @@ class RoomFeeBillController extends Controller
             'discount_amount'  => $discountAmount,
             'discount_reason'  => $data['reason'] ?? $bill->discount_reason,
             'amount'           => $finalAmount,
+            'status'           => $status,
+            'exempted_at'      => $status === 'exempted' ? now() : $bill->exempted_at,
         ]);
 
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));

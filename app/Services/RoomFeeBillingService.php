@@ -37,7 +37,7 @@ class RoomFeeBillingService
         }
 
         $checkIn = Carbon::parse($occupancy->check_in_date)->startOfDay();
-        $dueDate = Carbon::create($checkIn->year, $checkIn->month, 20)->toDateString();
+        $dueDate = Carbon::today()->addDays(7)->toDateString();
 
         $this->createQuarterBundleBill($occupancy, $checkIn, $dueDate);
     }
@@ -141,11 +141,17 @@ class RoomFeeBillingService
         $skipped       = 0;
         $pricePerMonth = $this->getRoomFeePerMonth();
         $billingStart  = Carbon::create($year, $month, 1)->startOfDay();
-        $dueDate       = Carbon::create($year, $month, 20)->toDateString();
+        // Hạn thanh toán = ngày hóa đơn được sinh ra (hôm nay, lúc cron/lệnh này chạy) + 7 ngày —
+        // không còn cố định "ngày 20" như trước (dễ gây hiểu lầm với ngày cron chạy 01 đầu quý).
+        $dueDate       = Carbon::today()->addDays(7)->toDateString();
 
         // Sinh viên đang bật "đóng theo tháng" (installment) phải tiếp tục được
         // bill riêng từng tháng — không gộp quý, nếu không sẽ phá vỡ đúng chế
-        // độ họ đã được admin duyệt.
+        // độ họ đã được admin duyệt. Hạn của từng bill tháng (bên dưới) CỐ TÌNH
+        // vẫn giữ "ngày 20 của chính tháng đó" (không đổi theo rule +7 ở trên) —
+        // vì đây là lịch trả góp trải đều theo từng tháng, không phải "hạn 7 ngày
+        // sau khi tạo" (nếu đổi, cả 3 tháng sẽ cùng đến hạn trong 1 tuần, phá vỡ
+        // mục đích trả góp).
         $installmentStudentIds = StudentPaymentPlan::query()
             ->where('type', 'installment')
             ->where('is_active', true)
@@ -255,8 +261,9 @@ class RoomFeeBillingService
                         'discount_reason'  => null,
                     ];
 
-                $dueDate   = $index === 0 ? $originalDueDate : Carbon::create($y, $m, 20)->toDateString();
-                $totalDays = Carbon::create($y, $m, 1)->daysInMonth;
+                $dueDate      = $index === 0 ? $originalDueDate : Carbon::create($y, $m, 20)->toDateString();
+                $totalDays    = Carbon::create($y, $m, 1)->daysInMonth;
+                $monthStatus  = RoomFeeBill::resolveStatus($discount['final_amount'], $status);
 
                 $newBills[] = RoomFeeBill::create([
                     'student_id'       => $studentId,
@@ -272,7 +279,8 @@ class RoomFeeBillingService
                     'days_stayed'      => $totalDays,
                     'total_days'       => $totalDays,
                     'due_date'         => $dueDate,
-                    'status'           => $status,
+                    'status'           => $monthStatus,
+                    'exempted_at'      => $monthStatus === 'exempted' ? Carbon::now() : null,
                 ]);
             }
         });
@@ -291,7 +299,10 @@ class RoomFeeBillingService
      */
     public function markOverdueBills(): int
     {
+        // Lưới an toàn: hóa đơn amount<=0 (miễn 100%) không bao giờ được chuyển sang overdue,
+        // dù lỡ status vẫn đang là unpaid do sót ở nơi tạo/sửa amount (xem RoomFeeBill::resolveStatus).
         return RoomFeeBill::where('status', 'unpaid')
+            ->where('amount', '>', 0)
             ->where('due_date', '<', Carbon::today()->toDateString())
             ->update(['status' => 'overdue']);
     }
@@ -353,6 +364,7 @@ class RoomFeeBillingService
         $discount   = $this->discountService->calculate($occupancy, $baseAmount);
         $isSingleMonth = $monthsCount === 1;
         $totalDays  = $isSingleMonth ? Carbon::create($startYear, $startMonth, 1)->daysInMonth : null;
+        $status     = RoomFeeBill::resolveStatus($discount['final_amount'], 'unpaid');
 
         return RoomFeeBill::create([
             'student_id'       => $occupancy->student_id,
@@ -368,7 +380,8 @@ class RoomFeeBillingService
             'days_stayed'      => $totalDays,
             'total_days'       => $totalDays,
             'due_date'         => $dueDate,
-            'status'           => 'unpaid',
+            'status'           => $status,
+            'exempted_at'      => $status === 'exempted' ? Carbon::now() : null,
         ]);
     }
 

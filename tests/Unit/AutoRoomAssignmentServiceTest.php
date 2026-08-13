@@ -124,15 +124,85 @@ class AutoRoomAssignmentServiceTest extends TestCase
         $this->assertSame('ROOM_CONFIRMED', $occupancy->status);
     }
 
+    /**
+     * TC06: sinh viên lứa cũ KHÔNG gia hạn (check_out_date < stay_start_date của đợt mới)
+     * phải được coi là sẽ trống giường kịp lúc — cho phép gán sinh viên mới vào đúng giường đó,
+     * không cần chờ occupancies:expire chạy thật.
+     */
+    public function test_room_becomes_assignable_when_old_occupant_did_not_extend(): void
+    {
+        $period = $this->period('2026-09-01');
+
+        $floor = $this->floor('D', 1, 'male');
+        $room = $this->room($floor->id, '501', 1);
+        $bed = Bed::where('room_id', $room->id)->first();
+
+        // Lứa cũ, không gia hạn: hết hạn 31/08, TRƯỚC stay_start_date (01/09) của đợt mới.
+        $oldStudent = $this->student('DH10000006', 'male');
+        Occupancy::create([
+            'registration_id' => null,
+            'student_id'      => $oldStudent->id,
+            'room_id'         => $room->id,
+            'bed_id'          => $bed->id,
+            'status'          => 'ACTIVE',
+            'check_out_date'  => '2026-08-31',
+        ]);
+
+        $newStudent = $this->student('DH10000007', 'male');
+        $registration = $this->registration($newStudent->id, $period->id, tier: 1, score: 100);
+
+        $result = $this->service->run($period->id);
+
+        $this->assertSame(1, $result['assigned']);
+        $this->assertSame(0, $result['no_room']);
+
+        $occupancy = Occupancy::where('registration_id', $registration->id)->first();
+        $this->assertSame($room->id, $occupancy->room_id);
+    }
+
+    /**
+     * TC07: sinh viên lứa cũ ĐÃ gia hạn (check_out_date >= stay_start_date của đợt mới, mô
+     * phỏng check_out_date đã bị đợt gia hạn đẩy sang năm sau) vẫn phải bị tính là đang chiếm
+     * giường — không được gán nhầm cho sinh viên mới.
+     */
+    public function test_room_stays_blocked_when_old_occupant_extended(): void
+    {
+        $period = $this->period('2026-09-01');
+
+        $floor = $this->floor('E', 1, 'male');
+        $room = $this->room($floor->id, '601', 1);
+        $bed = Bed::where('room_id', $room->id)->first();
+
+        // Lứa cũ, ĐÃ gia hạn: check_out_date bị đẩy sang 2027, sau stay_start_date đợt mới.
+        $extendedStudent = $this->student('DH10000008', 'male');
+        Occupancy::create([
+            'registration_id' => null,
+            'student_id'      => $extendedStudent->id,
+            'room_id'         => $room->id,
+            'bed_id'          => $bed->id,
+            'status'          => 'ACTIVE',
+            'check_out_date'  => '2027-08-31',
+        ]);
+
+        $newStudent = $this->student('DH10000009', 'male');
+        $registration = $this->registration($newStudent->id, $period->id, tier: 1, score: 100);
+
+        $result = $this->service->run($period->id);
+
+        $this->assertSame(0, $result['assigned']);
+        $this->assertSame(1, $result['no_room']);
+        $this->assertNull(Occupancy::where('registration_id', $registration->id)->first());
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    private function period(): RegistrationPeriod
+    private function period(?string $stayStartDate = null): RegistrationPeriod
     {
         return RegistrationPeriod::create([
             'name'                      => 'Đợt test',
             'start_date'                => '2026-06-01',
             'end_date'                  => '2026-06-30',
-            'stay_start_date'           => '2026-07-01',
+            'stay_start_date'           => $stayStartDate ?? '2026-07-01',
             'stay_end_date'             => '2027-06-30',
             'status'                    => 'processing',
             'initial_payment_due_days'  => 30,

@@ -32,17 +32,33 @@ class Occupancy extends Model
         'previous_occupancy_id',
     ];
 
-    public static function occupiedBedsQuery(): Builder
+    /**
+     * @param string|null $asOfDate Nếu truyền, occupancy có check_out_date < $asOfDate (sinh
+     *                    viên chưa gia hạn, sẽ dọn ra TRƯỚC mốc này) KHÔNG được tính là đang
+     *                    chiếm giường — dùng khi xét giường cho đợt đăng ký MỚI (nhận đơn/duyệt
+     *                    hồ sơ TRƯỚC khi lứa cũ chính thức hết hạn qua occupancies:expire).
+     *                    Mặc định null = giữ nguyên hành vi cũ (chiếm giường theo status thật
+     *                    ngay lúc gọi) — dùng cho dashboard tổng quan, bảo trì, building overview.
+     */
+    public static function occupiedBedsQuery(?string $asOfDate = null): Builder
     {
-        return static::query()->occupiedBeds();
+        return static::query()->occupiedBeds($asOfDate);
     }
 
-    public function scopeOccupiedBeds(Builder $query): Builder
+    public function scopeOccupiedBeds(Builder $query, ?string $asOfDate = null): Builder
     {
-        return $query
+        $query
             ->whereNotNull('bed_id')
             ->whereIn('status', self::OCCUPIED_BED_STATUSES)
             ->whereIn('bed_approval_status', self::OCCUPIED_BED_APPROVAL_STATUSES);
+
+        if ($asOfDate !== null) {
+            $query->where(function ($q) use ($asOfDate) {
+                $q->whereNull('check_out_date')->orWhere('check_out_date', '>=', $asOfDate);
+            });
+        }
+
+        return $query;
     }
 
     public function registration(): BelongsTo
