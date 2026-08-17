@@ -183,6 +183,17 @@ class OccupancyExtensionController extends Controller
             return response()->json(['message' => 'Hiện không có đợt gia hạn nào đang mở.'], 422);
         }
 
+        // Lưới an toàn: chặn nộp đơn nếu đã qua hạn chót 17:00 end_date, dù status vẫn đang
+        // 'open' (phòng trường hợp occupancy-periods:auto-close chưa kịp chạy tới, hoặc admin
+        // quên bấm "Đóng đợt" tay — báo cáo 17/08). Xử lý chính vẫn là auto-close tự đóng đợt
+        // theo lịch mỗi 5 phút; đây chỉ là lớp chặn bổ sung ngay tại điểm nộp đơn.
+        $deadline = $period->applicationDeadline();
+        if ($deadline && now()->greaterThan($deadline)) {
+            return response()->json([
+                'message' => 'Đã quá hạn nộp đơn gia hạn (17:00 ngày ' . $deadline->format('d/m/Y') . ').',
+            ], 422);
+        }
+
         // Đợt gia hạn chỉ phục vụ ĐÚNG lứa sinh viên có check_out_date = stay_end_date thật
         // (RegistrationPeriod::currentStayEndDate()) — KHÔNG dùng period->end_date, vì field đó
         // chỉ là hạn chót nhận đơn, không phải ngày dọn ra thật. Nếu lưu trú của sinh viên có
