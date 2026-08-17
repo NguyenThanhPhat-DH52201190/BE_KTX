@@ -93,7 +93,6 @@ class OccupancyPeriodController extends Controller
         }
 
         $this->checkOverlap($data['start_date'], $data['end_date']);
-        $this->checkApplicationWindow($data['start_date'], $data['end_date']);
         $this->checkExtensionUntilDate($data['extension_until_date'] ?? null);
 
         $period = OccupancyPeriod::create(array_merge($data, ['status' => 'draft']));
@@ -119,7 +118,6 @@ class OccupancyPeriodController extends Controller
 
         if ($startDate && $endDate) {
             $this->checkOverlap($startDate, $endDate, $id);
-            $this->checkApplicationWindow($startDate, $endDate);
         }
 
         if (array_key_exists('extension_until_date', $data)) {
@@ -279,27 +277,6 @@ class OccupancyPeriodController extends Controller
             'start_date' => $startDate->toDateString(),
             'end_date'   => $endDate->toDateString(),
         ];
-    }
-
-    /**
-     * Nghiệp vụ: "Thời gian nhận đơn" phải đúng công thức cứng (1 tháng trước ngày kết thúc
-     * lưu trú thật, kéo dài 7 ngày) — không cho admin nhập lệch, tránh mở đơn quá sớm/quá trễ
-     * so với ngày sinh viên thực sự phải dọn ra.
-     */
-    private function checkApplicationWindow(string $startDate, string $endDate): void
-    {
-        $window = $this->computeApplicationWindow();
-
-        if (! $window) {
-            return;
-        }
-
-        if ($startDate !== $window['start_date'] || $endDate !== $window['end_date']) {
-            abort(422, 'Thời gian nhận đơn phải đúng '
-                . \Carbon\Carbon::parse($window['start_date'])->format('d/m/Y') . ' — '
-                . \Carbon\Carbon::parse($window['end_date'])->format('d/m/Y')
-                . ' (1 tháng trước ngày kết thúc lưu trú hiện tại, kéo dài 7 ngày). Vui lòng dùng đúng gợi ý được cung cấp.');
-        }
     }
 
     private function appendSuggestedOpenDate(OccupancyPeriod $period): void
