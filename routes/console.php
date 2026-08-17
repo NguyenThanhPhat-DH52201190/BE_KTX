@@ -36,6 +36,12 @@ Schedule::command('bills:process-overdue')->everyFiveMinutes()->withoutOverlappi
 // Chạy dày (5 phút) — đã có guard "đã có đợt open/draft thì bỏ qua", an toàn.
 Schedule::command('periods:auto-draft')->everyFiveMinutes();
 
+// Tự động đóng đợt gia hạn lưu trú đúng lúc qua hạn 17:00 end_date — trước đây end_date chỉ
+// mang tính hiển thị, sinh viên vẫn nộp đơn được vô thời hạn nếu admin quên bấm "Đóng đợt" tay
+// (báo cáo 17/08). Chạy dày (5 phút) vì đây là mốc giờ cụ thể trong ngày, giống cách
+// registration-periods:auto-close-admission đang xử lý cho đợt tuyển sinh.
+Schedule::command('occupancy-periods:auto-close')->everyFiveMinutes()->withoutOverlapping();
+
 // Kết thúc tự động lưu trú hết hạn: occupancy → COMPLETED, giường → EMPTY.
 // Chạy dày (5 phút) — chuyển trạng thái một chiều, idempotent.
 Schedule::command('occupancies:expire')->everyFiveMinutes()->withoutOverlapping();
