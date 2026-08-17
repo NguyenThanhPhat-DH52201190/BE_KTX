@@ -89,7 +89,7 @@ class RoomFeeBillingService
             return $existing;
         }
 
-        $monthsCount   = $this->monthsRemainingInQuarter($month);
+        $monthsCount   = $this->monthsUntilCheckout($occupancy, $checkIn, $this->monthsRemainingInQuarter($month));
         $pricePerMonth = $this->getRoomFeePerMonth();
 
         return $this->createBundleBill($occupancy, $month, $year, $monthsCount, $pricePerMonth, $dueDate);
@@ -105,6 +105,31 @@ class RoomFeeBillingService
         $positionInQuarter = ($month - 1) % 3; // 0, 1 hoặc 2
 
         return 3 - $positionInQuarter;
+    }
+
+    /**
+     * Giới hạn $maxMonths (số tháng còn lại của quý) theo check_out_date thật
+     * của occupancy — đợt/gia hạn hiện tại chỉ cam kết chỗ ở tới check_out_date,
+     * không được thu tiền trước cho các tháng sau đó (sinh viên phải tự làm đơn
+     * gia hạn mới được ở tiếp — xem OccupancyExtensionController: mỗi lần gia
+     * hạn được duyệt sẽ tạo occupancy MỚI và tự gọi lại createInitialBill()
+     * riêng, nên không cần "bù" tháng gia hạn ở đây).
+     *
+     * check_out_date rỗng (occupancy không giới hạn thời hạn) -> giữ nguyên
+     * hành vi cũ, trả về $maxMonths.
+     */
+    private function monthsUntilCheckout(Occupancy $occupancy, Carbon $checkIn, int $maxMonths): int
+    {
+        if (! $occupancy->check_out_date) {
+            return $maxMonths;
+        }
+
+        $checkOut = Carbon::parse($occupancy->check_out_date)->startOfDay();
+
+        $monthsToCheckout = ($checkOut->year * 12 + $checkOut->month)
+            - ($checkIn->year * 12 + $checkIn->month) + 1;
+
+        return max(1, min($maxMonths, $monthsToCheckout));
     }
 
     /**
@@ -170,11 +195,22 @@ class RoomFeeBillingService
                     return;
                 }
 
+                // Occupancy đã hết hạn ở (check_out_date) trước khi quý này bắt đầu —
+                // không còn cam kết chỗ ở nữa, không tạo hóa đơn quý mới cho họ.
+                if ($occupancy->check_out_date && Carbon::parse($occupancy->check_out_date)->startOfDay()->lt($billingStart)) {
+                    $skipped++;
+                    return;
+                }
+
                 if ($installmentStudentIds->has($occupancy->student_id)) {
                     $createdAny = false;
                     [$m, $y] = [$month, $year];
                     for ($i = 0; $i < 3; $i++) {
-                        if (! $this->billExists($occupancy->student_id, $m, $y)) {
+                        $monthStart = Carbon::create($y, $m, 1)->startOfDay();
+                        $withinStay = ! $occupancy->check_out_date
+                            || Carbon::parse($occupancy->check_out_date)->startOfDay()->gte($monthStart);
+
+                        if ($withinStay && ! $this->billExists($occupancy->student_id, $m, $y)) {
                             $this->createBundleBill($occupancy, $m, $y, 1, $pricePerMonth, Carbon::create($y, $m, 20)->toDateString());
                             $createdAny = true;
                         }
@@ -189,7 +225,8 @@ class RoomFeeBillingService
                     return;
                 }
 
-                $this->createBundleBill($occupancy, $month, $year, 3, $pricePerMonth, $dueDate);
+                $monthsCount = $this->monthsUntilCheckout($occupancy, $billingStart, 3);
+                $this->createBundleBill($occupancy, $month, $year, $monthsCount, $pricePerMonth, $dueDate);
                 $generated++;
             });
 
@@ -366,7 +403,7 @@ class RoomFeeBillingService
         $totalDays  = $isSingleMonth ? Carbon::create($startYear, $startMonth, 1)->daysInMonth : null;
         $status     = RoomFeeBill::resolveStatus($discount['final_amount'], 'unpaid');
 
-        return RoomFeeBill::create([
+        $bill = RoomFeeBill::create([
             'student_id'       => $occupancy->student_id,
             'occupancy_id'     => $occupancy->id,
             'month'            => $startMonth,
@@ -383,6 +420,30 @@ class RoomFeeBillingService
             'status'           => $status,
             'exempted_at'      => $status === 'exempted' ? Carbon::now() : null,
         ]);
+
+        // Hóa đơn đã 0đ (miễn 100%) ngay lúc tạo — không còn bước "Xác nhận miễn phí"
+        // thủ công nào để admin bấm nữa (bill sinh ra đã exempted từ đầu, không phải
+        // unpaid), nên phải tự kích hoạt occupancy ở đây, nếu không occupancy sẽ kẹt
+        // vĩnh viễn ở PENDING_PAYMENT dù sinh viên không nợ đồng nào.
+        if ($status === 'exempted') {
+            $this->activatePendingOccupancy($occupancy);
+        }
+
+        return $bill;
+    }
+
+    /**
+     * Chuyển occupancy từ PENDING_PAYMENT -> ACTIVE khi hóa đơn tháng đầu đã
+     * được coi là xong (đã trả hoặc đã miễn 100%). Dùng lockForUpdate để tránh
+     * đụng độ nếu có luồng khác cũng đang xử lý occupancy này cùng lúc.
+     */
+    private function activatePendingOccupancy(Occupancy $occupancy): void
+    {
+        $locked = Occupancy::query()->lockForUpdate()->find($occupancy->id);
+
+        if ($locked?->status === 'PENDING_PAYMENT' && $locked->bed_id) {
+            $locked->update(['status' => 'ACTIVE']);
+        }
     }
 
     /**

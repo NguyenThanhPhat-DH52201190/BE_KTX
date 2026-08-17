@@ -1061,6 +1061,18 @@ class RegistrationController extends Controller
             'registration_id' => $registration->id,
         ]);
 
+        // Admin đã xác nhận phòng 1 lần rồi thì khóa luôn — không cho đổi qua endpoint này nữa.
+        // Trước đây không chặn, dẫn tới bug nghiêm trọng: bấm "Đổi phòng" cho occupancy đã
+        // PENDING_PAYMENT/ACTIVE (sinh viên đã chọn giường, có thể đã trả tiền) sẽ bị ép lùi
+        // về ROOM_CONFIRMED và mất giường đang ở, mà hóa đơn cũ vẫn giữ nguyên không đổi theo.
+        // Đổi phòng cho sinh viên đã xác nhận phải đi qua "Chuyển sinh viên" (Quản lý phòng ->
+        // transferBedOccupancy()), không phải endpoint này.
+        if ($occupancy->exists && $occupancy->room_id) {
+            return response()->json([
+                'message' => 'Phòng đã được xác nhận cho sinh viên này. Vui lòng dùng chức năng "Chuyển sinh viên" ở Quản lý phòng nếu cần đổi.',
+            ], 422);
+        }
+
         $oldRoomId = $occupancy->exists ? $occupancy->room_id : null;
         $oldBedId = $occupancy->exists ? $occupancy->bed_id : null;
 

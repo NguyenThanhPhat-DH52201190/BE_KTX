@@ -294,15 +294,21 @@ class RoomFeeBillController extends Controller
         $finalAmount     = max(0, $base - $discountAmount);
         $status          = RoomFeeBill::resolveStatus($finalAmount, $bill->status ?? 'unpaid');
 
-        $bill->update([
-            'original_amount'  => $base,
-            'discount_percent' => $discountPercent,
-            'discount_amount'  => $discountAmount,
-            'discount_reason'  => $data['reason'] ?? $bill->discount_reason,
-            'amount'           => $finalAmount,
-            'status'           => $status,
-            'exempted_at'      => $status === 'exempted' ? now() : $bill->exempted_at,
-        ]);
+        DB::transaction(function () use ($bill, $base, $discountPercent, $discountAmount, $data, $finalAmount, $status) {
+            $bill->update([
+                'original_amount'  => $base,
+                'discount_percent' => $discountPercent,
+                'discount_amount'  => $discountAmount,
+                'discount_reason'  => $data['reason'] ?? $bill->discount_reason,
+                'amount'           => $finalAmount,
+                'status'           => $status,
+                'exempted_at'      => $status === 'exempted' ? now() : $bill->exempted_at,
+            ]);
+
+            if ($status === 'exempted') {
+                $this->activatePendingOccupancy($bill);
+            }
+        });
 
         return response()->json($this->formatBill($bill->fresh(['student', 'occupancy.registration', 'occupancy.room.floor'])));
     }
